@@ -1,0 +1,42 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    addressable (2.8.7)
+      public_suffix (>= 2.0.2, < 7.0)
+    bigdecimal (3.1.9)
+    crack (1.0.0)
+      bigdecimal
+      rexml
+    hashdiff (1.1.2)
+    language_server-protocol (3.17.0.4)
+    logger (1.7.0)
+    minitest (5.25.5)
+    prism (1.4.0)
+    public_suffix (6.0.2)
+    rake (13.2.1)
+    rbs (3.9.3)
+      logger
+    rexml (3.4.1)
+    ruby-lsp (0.23.17)
+      language_server-protocol (~> 3.17.0)
+      prism (>= 1.2, < 2.0)
+      rbs (>= 3, < 4)
+      sorbet-runtime (>= 0.5.10782)
+    sorbet-runtime (0.5.12087)
+    webmock (3.25.1)
+      addressable (>= 2.8.0)
+      crack (>= 0.3.2)
+      hashdiff (>= 0.4.0, < 2.0.0)
+
+PLATFORMS
+  arm64-darwin-23
+  ruby
+
+DEPENDENCIES
+  minitest
+  rake
+  ruby-lsp
+  webmock
+
+BUNDLED WITH
+   2.6.2
