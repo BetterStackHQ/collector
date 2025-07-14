@@ -1,6 +1,6 @@
 # [Better Stack](https://betterstack.com/logs) Collector
 
-[![Better Stack dashboard](https://github.com/user-attachments/assets/3975906e-0131-4e55-bc57-5b2cf079f24c)](https://betterstack.com/tracing)
+[![Better Stack dashboard](https://github.com/user-attachments/assets/e84ed542-a9b9-4a7b-9442-3c145593406a)](https://betterstack.com/tracing)
 
 [![Apache 2.0 License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE.md)
 [![Run Tests](https://github.com/BetterStackHQ/collector/actions/workflows/test.yml/badge.svg)](https://github.com/BetterStackHQ/collector/actions/workflows/test.yml)
