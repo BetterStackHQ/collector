@@ -118,4 +118,4 @@ EOF
     
 done
 
-print_green "✓✓✓ Better Stack collector successfully deployed to all swarm nodes!"
+print_green "✓ Better Stack collector successfully deployed to all swarm nodes!"
