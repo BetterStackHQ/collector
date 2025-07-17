@@ -24,7 +24,7 @@ jobs:
           submodules: true
 
       - name: Ensure tag version matches collector version
-        id: repo
+        id: ensure-tag-version
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             sed -i "s/^ENV COLLECTOR_VERSION=.*/ENV COLLECTOR_VERSION=${GITHUB_REF#refs\/tags\/v}/" Dockerfile
