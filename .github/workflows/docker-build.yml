@@ -23,6 +23,14 @@ jobs:
         with:
           submodules: true
 
+      - name: Ensure tag version matches collector version
+        id: repo
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            sed -i "s/^ENV COLLECTOR_VERSION=.*/ENV COLLECTOR_VERSION=${GITHUB_REF#refs\/tags\/v}/" Dockerfile
+            git diff --exit-code
+          fi
+
       - name: Determine repository and tags
         id: repo
         run: |
