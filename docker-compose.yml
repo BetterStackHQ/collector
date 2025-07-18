@@ -6,6 +6,13 @@ configs:
           - application
           - application_process
 
+      exclude_services:
+        - name: better-stack-collector-beyla
+        - name: better-stack-collector-vector
+        - name: better-stack-collector-webserver
+        - name: better-stack-collector-cluster-agent
+        - name: better-stack-collector-updater
+
       attributes:
         select:
           http_server_request_duration:
