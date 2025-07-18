@@ -113,6 +113,11 @@ class BetterStackClient
   end
 
   def get_configuration(new_version)
+    if new_version.include?('..')
+      write_error("Invalid configuration version: '#{new_version}'")
+      return
+    end
+
     params = {
       collector_secret: @collector_secret,
       configuration_version: new_version
