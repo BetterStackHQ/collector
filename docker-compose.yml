@@ -6,14 +6,6 @@ configs:
           - application
           - application_process
 
-      discovery:
-        exclude_services:
-          - name: better-stack-collector-beyla
-          - name: better-stack-collector-vector
-          - name: better-stack-collector-webserver
-          - name: better-stack-collector-cluster-agent
-          - name: better-stack-collector-updater
-
       attributes:
         select:
           http_server_request_duration:
@@ -66,13 +58,10 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:34320
       - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
       - BEYLA_OPEN_PORT=1-65535
-      - BEYLA_EXCLUDE_OTEL_INSTRUMENTED_SERVICES=false
       - BEYLA_BPF_CONTEXT_PROPAGATION=all
       - BEYLA_BPF_TRACK_REQUEST_HEADERS=true
       - BEYLA_METRICS_INTERVAL=15s
       - BEYLA_CONFIG_PATH=/etc/beyla/beyla.yaml
-      # Set service name so we can monitor Beyla itself
-      - OTEL_SERVICE_NAME=better-stack-collector-beyla
     configs:
       - source: beyla.yaml
         target: /etc/beyla/beyla.yaml
