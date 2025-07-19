@@ -1,6 +1,13 @@
 configs:
   beyla.yaml:
     content: |
+      discovery:
+        services:
+          - open_ports: "1-65535"
+
+        exclude_services:
+          - exe_path: ".*/vector$"
+
       otel_metrics_export:
         features:
           - application
@@ -57,14 +64,10 @@ services:
       # Override OTLP endpoint to point to collector container
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:34320
       - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-      - BEYLA_OPEN_PORT=1-65535
-      - BEYLA_EXCLUDE_OTEL_INSTRUMENTED_SERVICES=false
       - BEYLA_BPF_CONTEXT_PROPAGATION=all
       - BEYLA_BPF_TRACK_REQUEST_HEADERS=true
       - BEYLA_METRICS_INTERVAL=15s
       - BEYLA_CONFIG_PATH=/etc/beyla/beyla.yaml
-      # Set service name so we can monitor Beyla itself
-      - OTEL_SERVICE_NAME=better-stack-collector-beyla
     configs:
       - source: beyla.yaml
         target: /etc/beyla/beyla.yaml
