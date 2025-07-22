@@ -66,7 +66,7 @@ if [[ $EXIT_CODE -ne 0 ]]; then
     print_blue "Please make sure '$SSH_CMD $MANAGER_NODE' works on this machine and $MANAGER_NODE is a swarm manager."
     echo
     print_blue "Need to use different SSH user or command?"
-    echo "Customize SSH user and command:" 
+    echo "Customize SSH user and command:"
     echo "  curl -sSL ... | MANAGER_NODE=\"root@host\" SSH_CMD=\"tsh ssh\" COLLECTOR_SECRET=\"...\" bash"
     echo
     exit 1
@@ -89,7 +89,7 @@ CURRENT=0
 for NODE in $NODES; do
     ((CURRENT++))
     print_blue "Deploying to node: $NODE ($CURRENT/$NODE_COUNT)"
-    
+
     # Extract user from MANAGER_NODE if present
     if [[ "$MANAGER_NODE" == *"@"* ]]; then
         SSH_USER="${MANAGER_NODE%%@*}"
@@ -97,14 +97,14 @@ for NODE in $NODES; do
     else
         NODE_TARGET="$NODE"
     fi
-    
+
     if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
         set -e
         echo "Running: docker compose up..."
         curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/docker-compose.yml | \\
           COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME=\$(hostname) \\
-          docker compose -f - up -d
-        
+          docker compose -f - up -d --pull always
+
         echo "Checking deployment status..."
         docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"
 EOF
@@ -115,7 +115,7 @@ EOF
         exit 1
     fi
     echo
-    
+
 done
 
 print_green "✓ Better Stack collector successfully deployed to all swarm nodes!"
