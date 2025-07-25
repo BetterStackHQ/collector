@@ -376,13 +376,12 @@ class BetterStackClientTest < Minitest::Test
     version_dir = File.join(@test_dir, 'versions', new_version)
     FileUtils.mkdir_p(version_dir)
 
-    # Mock necessary methods
-    def @client.validate_vector_config(version_dir)
-      puts "Configuration validated."
-      return true
+    # Mock vector_config methods
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:validate_upstream_file) do |path|
+      nil # validation passes
     end
-
-    def @client.promote_version(new_version)
+    
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:promote_upstream_file) do |path|
       puts "Configuration validated. Updating symlink..."
     end
 
@@ -410,10 +409,8 @@ class BetterStackClientTest < Minitest::Test
     assert_match(/Downloading vector.yaml to #{version_dir}\/vector.yaml/, output.join)
     assert_match(/Configuration validated/, output.join)
 
-    # Reset the methods to not affect other tests
+    # Reset the method to not affect other tests
     class << @client
-      remove_method :validate_vector_config
-      remove_method :promote_version
       remove_method :download_file
     end
   end
@@ -431,9 +428,9 @@ class BetterStackClientTest < Minitest::Test
       return true
     end
 
-    def @client.validate_vector_config(version_dir)
-      puts "Error: Invalid vector config #{version_dir}/vector.yaml"
-      return false
+    # Mock vector_config validation to fail
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:validate_upstream_file) do |path|
+      "Validation failed for vector config"
     end
 
     # Sample response data
@@ -450,9 +447,8 @@ class BetterStackClientTest < Minitest::Test
 
     assert_match(/Error: Invalid vector config/, output.join)
 
-    # Reset the methods to not affect other tests
+    # Reset the method to not affect other tests
     class << @client
-      remove_method :validate_vector_config
       remove_method :download_file
     end
   end
@@ -501,32 +497,6 @@ class BetterStackClientTest < Minitest::Test
     assert_match(/Error: Failed to fetch configuration for version #{new_version}. Response code: #{code}/, output.join)
   end
 
-  def test_promote_version
-    new_version = "2023-01-01T00:00:00"
-    version_dir = File.join(@test_dir, 'versions', new_version)
-    FileUtils.mkdir_p(version_dir)
-
-    # Create an error file to ensure it gets removed
-    File.write(File.join(@test_dir, 'errors.txt'), "Test error")
-
-    # Mock the update_vector_symlink method
-    def @client.update_vector_symlink(version_dir)
-      puts "Updating symlink for #{version_dir}"
-    end
-
-    output = capture_io do
-      @client.promote_version(new_version)
-    end
-
-    assert_match(/Updating symlink/, output.join)
-    assert_match(/Successfully updated to version #{new_version}/, output.join)
-    assert !File.exist?(File.join(@test_dir, 'errors.txt')), "errors.txt should be removed"
-
-    # Reset the method to not affect other tests
-    class << @client
-      remove_method :update_vector_symlink
-    end
-  end
 
   def test_cluster_collector
     # Mock hostname method
