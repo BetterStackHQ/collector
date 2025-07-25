@@ -306,10 +306,9 @@ class KubernetesDiscovery
             next unless node_name == @node_name
             
             # Extract workload information from ownerReferences
-            owner_refs = pod.dig('metadata', 'ownerReferences') || []
-            if owner_refs.length > 0
-              owner = owner_refs.first
-              workload = "#{owner['kind'].downcase}/#{owner['name']}"
+            workload = get_workload_from_pod(pod, namespace)
+            if workload
+              puts "Found workload for #{pod_name}: #{workload}"
             end
           rescue => e
             puts "Warning: Failed to get pod info for #{pod_name}: #{e.message}"
@@ -343,12 +342,7 @@ class KubernetesDiscovery
     path = annotations['prometheus.io/path'] || '/metrics'
 
     # Extract workload information from ownerReferences
-    workload = nil
-    owner_refs = pod.dig('metadata', 'ownerReferences') || []
-    if owner_refs.length > 0
-      owner = owner_refs.first
-      workload = "#{owner['kind'].downcase}/#{owner['name']}"
-    end
+    workload = get_workload_from_pod(pod, namespace)
 
     {
       name: "#{namespace}_#{pod_name}",
@@ -439,5 +433,31 @@ class KubernetesDiscovery
       content2 = File.read("#{dir2}/#{filename}")
       content1 == content2
     end
+  end
+
+  def get_workload_from_pod(pod, namespace)
+    owner_refs = pod.dig('metadata', 'ownerReferences') || []
+    return nil if owner_refs.empty?
+
+    owner = owner_refs.first
+    owner_kind = owner['kind']
+    owner_name = owner['name']
+
+    # For ReplicaSets, try to find the parent Deployment
+    if owner_kind == 'ReplicaSet'
+      begin
+        replicaset = kubernetes_request("/apis/apps/v1/namespaces/#{namespace}/replicasets/#{owner_name}")
+        rs_owner_refs = replicaset.dig('metadata', 'ownerReferences') || []
+        
+        if rs_owner_refs.length > 0 && rs_owner_refs.first['kind'] == 'Deployment'
+          return "deployment/#{rs_owner_refs.first['name']}"
+        end
+      rescue => e
+        puts "Warning: Failed to get ReplicaSet info for #{owner_name}: #{e.message}"
+      end
+    end
+
+    # Return the direct owner for other types (DaemonSet, StatefulSet, Job, etc.)
+    "#{owner_kind.downcase}/#{owner_name}"
   end
 end
