@@ -272,10 +272,9 @@ class KubernetesDiscovery
       annotations = pod.dig('metadata', 'annotations') || {}
       node_name = pod.dig('spec', 'nodeName')
 
-      # Only select pods on the current node
+      # Select all running pods with prometheus scrape annotation on the current node
       annotations['prometheus.io/scrape'] == 'true' &&
         pod['status']['phase'] == 'Running' &&
-        !pod['metadata']['ownerReferences'] && # Skip pods that belong to services
         (@node_name.nil? || node_name == @node_name) # If NODE_NAME not set, discover all pods
     end
   end
@@ -304,7 +303,7 @@ class KubernetesDiscovery
             pod = kubernetes_request("/api/v1/namespaces/#{namespace}/pods/#{pod_name}")
             node_name = pod.dig('spec', 'nodeName')
             next unless node_name == @node_name
-            
+
             # Extract workload information from ownerReferences
             workload = get_workload_from_pod(pod, namespace)
             if workload
@@ -382,7 +381,7 @@ class KubernetesDiscovery
     if endpoint_info[:service]
       config['sources'][source_name]['labels']['service'] = endpoint_info[:service]
     end
-    
+
     # Add workload label if available
     if endpoint_info[:workload]
       config['sources'][source_name]['labels']['workload'] = endpoint_info[:workload]
@@ -448,7 +447,7 @@ class KubernetesDiscovery
       begin
         replicaset = kubernetes_request("/apis/apps/v1/namespaces/#{namespace}/replicasets/#{owner_name}")
         rs_owner_refs = replicaset.dig('metadata', 'ownerReferences') || []
-        
+
         if rs_owner_refs.length > 0 && rs_owner_refs.first['kind'] == 'Deployment'
           return "deployment/#{rs_owner_refs.first['name']}"
         end
