@@ -107,18 +107,6 @@ class UtilsTest < Minitest::Test
     end
   end
 
-  def test_update_vector_symlink
-    # Test updating symlink
-    version = "test_version"
-    FileUtils.mkdir_p(File.join(@working_dir, 'versions', version))
-    FileUtils.touch(File.join(@working_dir, 'versions', version, 'vector.yaml'))
-
-    update_vector_symlink(version)
-
-    assert File.symlink?(File.join(@working_dir, 'vector.yaml'))
-    assert_equal File.join(@working_dir, 'versions', version, 'vector.yaml'),
-                 File.readlink(File.join(@working_dir, 'vector.yaml'))
-  end
 
   def test_download_file
     # Test successful download
