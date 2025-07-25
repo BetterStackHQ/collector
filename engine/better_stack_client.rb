@@ -17,7 +17,7 @@ class BetterStackClient
       puts "Error: COLLECTOR_SECRET environment variable is required"
       exit 1
     end
-    
+
     @kubernetes_discovery = KubernetesDiscovery.new(working_dir)
     @vector_config = VectorConfig.new(working_dir)
   end
@@ -72,16 +72,16 @@ class BetterStackClient
 
     response = make_post_request('/collector/ping', ping_params)
     upstream_changed = process_ping(response.code, response.body)
-    
+
     # Run kubernetes discovery if latest valid vector config uses kubernetes_discovery_*
     vector_config_uses_kubernetes_discovery = @kubernetes_discovery.should_discover?
     kubernetes_discovery_changed = @kubernetes_discovery.run if vector_config_uses_kubernetes_discovery
-    
+
     # Create new vector-config version if either changed
     if upstream_changed || kubernetes_discovery_changed
       puts "Upstream configuration changed - updating vector-config" if upstream_changed
       puts "Kubernetes discovery changed - updating vector-config" if kubernetes_discovery_changed
-      
+
       new_config_dir = @vector_config.prepare_dir
       validate_output = @vector_config.validate_dir(new_config_dir)
       unless validate_output.nil?

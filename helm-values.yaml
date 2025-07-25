@@ -1,0 +1,9 @@
+collector:
+  env:
+    COLLECTOR_SECRET: DWZgCnjeoKCrbGUJtZrSgY2STAfb2dQs
+  image:
+    pullPolicy: Always
+    repository: registry.digitalocean.com/betterstack-collector/collector
+    tag: latest
+imagePullSecrets:
+- name: registry-betterstack-collector
