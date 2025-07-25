@@ -43,14 +43,6 @@ module Utils
     nil
   end
 
-  def update_vector_symlink(version)
-    FileUtils.rm_f("#{@working_dir}/vector.yaml")
-    FileUtils.ln_s("#{@working_dir}/versions/#{version}/vector.yaml", "#{@working_dir}/vector.yaml")
-
-    puts "Reloading vector..."
-    system("supervisorctl signal HUP vector")
-  end
-
   def latest_database_json
     latest_ver = latest_version
     return '{}' unless latest_ver
@@ -97,5 +89,11 @@ module Utils
       # If all else fails, return 'unknown'
       return 'unknown'
     end
+  end
+
+  # Always points to latest valid kubernetes discovery configs
+  def latest_kubernetes_discovery
+    versions = Dir.glob("#{@working_dir}/kubernetes-discovery/*").select { |f| File.directory?(f) }
+    versions.sort.last
   end
 end

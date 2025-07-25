@@ -1,5 +1,9 @@
 require_relative 'utils'
+require_relative 'kubernetes_discovery'
+require_relative 'vector_config'
 require 'net/http'
+require 'fileutils'
+require 'time'
 
 class BetterStackClient
   include Utils
@@ -13,6 +17,9 @@ class BetterStackClient
       puts "Error: COLLECTOR_SECRET environment variable is required"
       exit 1
     end
+    
+    @kubernetes_discovery = KubernetesDiscovery.new(working_dir)
+    @vector_config = VectorConfig.new(working_dir)
   end
 
   def make_post_request(path, params)
@@ -64,7 +71,27 @@ class BetterStackClient
     ping_params[:error] = read_error if read_error
 
     response = make_post_request('/collector/ping', ping_params)
-    process_ping(response.code, response.body)
+    upstream_changed = process_ping(response.code, response.body)
+    
+    # Run kubernetes discovery if latest valid vector config uses kubernetes_discovery_*
+    vector_config_uses_kubernetes_discovery = @kubernetes_discovery.should_discover?
+    kubernetes_discovery_changed = @kubernetes_discovery.run if vector_config_uses_kubernetes_discovery
+    
+    # Create new vector-config version if either changed
+    if upstream_changed || kubernetes_discovery_changed
+      puts "Upstream configuration changed - updating vector-config" if upstream_changed
+      puts "Kubernetes discovery changed - updating vector-config" if kubernetes_discovery_changed
+      
+      new_config_dir = @vector_config.prepare_dir
+      validate_output = @vector_config.validate_dir(new_config_dir)
+      unless validate_output.nil?
+        write_error("Validation failed for vector config with kubernetes_discovery\n\n#{validate_output}")
+        return
+      end
+
+      @vector_config.promote_dir(new_config_dir)
+      clear_error
+    end
   end
 
   def process_ping(code, body)
@@ -79,11 +106,12 @@ class BetterStackClient
         new_version = data['configuration_version']
         puts "New version available: #{new_version}"
 
-        get_configuration(new_version)
+        return get_configuration(new_version)
       else
         # Status is not 'new_version_available', could be an error message or other status
         puts "No new version. Status: #{data['status']}"
         clear_error
+        return
       end
     when '401', '403'
       puts 'Ping failed: unauthorized. Please check your COLLECTOR_SECRET.'
@@ -158,24 +186,17 @@ class BetterStackClient
       puts "All files downloaded. Validating configuration..."
 
       # Validate vector config
-      validate_output = validate_vector_config(new_version)
+      vector_yaml_path = "#{@working_dir}/versions/#{new_version}/vector.yaml"
+      validate_output = @vector_config.validate_upstream_file(vector_yaml_path)
       unless validate_output.nil?
-        write_error("Invalid vector config #{new_version}/vector.yaml\n\n#{validate_output}")
-        return # Exit this iteration
+        write_error("Validation failed for vector config #{new_version}/vector.yaml\n\n#{validate_output}")
+        return
       end
 
-      promote_version(new_version)
+      @vector_config.promote_upstream_file(vector_yaml_path)
+      return true
     else
       write_error("Failed to fetch configuration for version #{new_version}. Response code: #{code}")
-      return
     end
-  end
-
-  def promote_version(new_version)
-    # Update symlink and cleanup
-    puts "Configuration validated. Updating symlink..."
-    update_vector_symlink(new_version)
-    clear_error
-    puts "Successfully updated to version #{new_version}"
   end
 end

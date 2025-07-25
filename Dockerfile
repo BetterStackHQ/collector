@@ -39,7 +39,9 @@ COPY --from=mdprobe-builder /bin/mdprobe /usr/local/bin/mdprobe
 RUN mkdir -p /versions/0-default \
     && mkdir -p /etc/supervisor/conf.d \
     && mkdir -p /var/lib/vector \
-    && mkdir -p /var/log/supervisor
+    && mkdir -p /var/log/supervisor \
+    && mkdir -p /kubernetes-discovery/0-default \
+    && mkdir -p /vector-config
 
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
@@ -71,12 +73,17 @@ COPY proxy.rb /proxy.rb
 COPY vector.sh /vector.sh
 COPY versions/0-default/vector.yaml /versions/0-default/vector.yaml
 COPY versions/0-default/databases.json /versions/0-default/databases.json
+COPY kubernetes-discovery/0-default/no_sources_discovered.yaml /kubernetes-discovery/0-default/no_sources_discovered.yaml
 COPY engine /engine
 COPY should_run_cluster_collector.rb /should_run_cluster_collector.rb
 COPY cluster-collector.sh /cluster-collector.sh
 
-# Create symlink for vector.yaml
-RUN ln -s /versions/0-default/vector.yaml /vector.yaml
+# Create initial vector-config with symlinks to defaults
+RUN mkdir -p /vector-config/0-default \
+    && ln -s /versions/0-default/vector.yaml /vector-config/0-default/vector.yaml \
+    && ln -s /kubernetes-discovery/0-default /vector-config/0-default/kubernetes-discovery \
+    && ln -s /vector-config/0-default /vector-config/current \
+    && ln -s /versions/0-default/vector.yaml /latest-valid-vector.yaml
 
 # Set permissions
 RUN chmod +x /usr/local/bin/vector \
