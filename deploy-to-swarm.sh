@@ -100,10 +100,9 @@ for NODE in $NODES; do
 
     if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
         set -e
-        echo "Running: docker compose up..."
-        curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/docker-compose.yml | \\
-          COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME=\$(hostname) \\
-          docker compose -f - up -d --pull always
+        echo "Running: Better Stack collector install..."
+        curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/install.sh | \\
+          COLLECTOR_SECRET="$COLLECTOR_SECRET" bash
 
         echo "Checking deployment status..."
         docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"

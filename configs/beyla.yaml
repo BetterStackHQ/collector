@@ -1,0 +1,22 @@
+discovery:
+  services:
+    - open_ports: "1-65535"
+
+  exclude_services:
+    - exe_path: ".*/vector$"
+
+otel_metrics_export:
+  features:
+    - application
+    - application_process
+
+attributes:
+  select:
+    http_server_request_duration:
+      include: ["service.name", "server.address", "http.response.status_code"]
+    rpc_server_duration:
+      include: ["service.name", "server.address", "rpc.grpc.status_code"]
+    http_client_request_duration:
+      include: ["service.name", "server.address", "http.response.status_code"]
+    rpc_client_duration:
+      include: ["service.name", "server.address", "rpc.grpc.status_code"]
