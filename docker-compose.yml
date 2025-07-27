@@ -1,29 +1,3 @@
-configs:
-  beyla.yaml:
-    content: |
-      discovery:
-        services:
-          - open_ports: "1-65535"
-
-        exclude_services:
-          - exe_path: ".*/vector$"
-
-      otel_metrics_export:
-        features:
-          - application
-          - application_process
-
-      attributes:
-        select:
-          http_server_request_duration:
-            include: ["service.name", "server.address", "http.response.status_code"]
-          rpc_server_duration:
-            include: ["service.name", "server.address", "rpc.grpc.status_code"]
-          http_client_request_duration:
-            include: ["service.name", "server.address", "http.response.status_code"]
-          rpc_client_duration:
-            include: ["service.name", "server.address", "rpc.grpc.status_code"]
-
 services:
   collector:
     build:
@@ -68,10 +42,8 @@ services:
       - BEYLA_BPF_TRACK_REQUEST_HEADERS=true
       - BEYLA_METRICS_INTERVAL=15s
       - BEYLA_CONFIG_PATH=/etc/beyla/beyla.yaml
-    configs:
-      - source: beyla.yaml
-        target: /etc/beyla/beyla.yaml
     volumes:
+      - ./beyla.yaml:/etc/beyla/beyla.yaml:ro
       - /sys/kernel/tracing:/sys/kernel/tracing:rw
       - /sys/kernel/debug:/sys/kernel/debug:rw
       - /sys/kernel/security:/sys/kernel/security:ro
