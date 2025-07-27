@@ -37,7 +37,14 @@ trap "rm -rf $TEMP_DIR" EXIT
 curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/beyla.yaml \
     -o beyla.yaml
 
-# Download compose file and run
-curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/docker-compose.yml | \
-    COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="$HOSTNAME" \
-    $COMPOSE_CMD -f - up -d
+# Download compose file
+curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/docker-compose.yml \
+    -o docker-compose.yml
+
+# Pull images first
+COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="$HOSTNAME" \
+    $COMPOSE_CMD -p better-stack-collector pull
+
+# Run containers
+COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="$HOSTNAME" \
+    $COMPOSE_CMD -p better-stack-collector up -d
