@@ -17,6 +17,12 @@ else
     exit 1
 fi
 
+# Check COLLECTOR_SECRET
+if [ -z "$COLLECTOR_SECRET" ]; then
+    echo "Please set COLLECTOR_SECRET environment variable"
+    exit 1
+fi
+
 # Set hostname if not provided
 HOSTNAME="${HOSTNAME:-$(hostname)}"
 
