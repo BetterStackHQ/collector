@@ -20,9 +20,16 @@ fi
 # Set hostname if not provided
 HOSTNAME="${HOSTNAME:-$(hostname)}"
 
+# Create temporary directory and cd into it
+TEMP_DIR=$(mktemp -d)
+cd "$TEMP_DIR"
+
+# Clean up on exit
+trap "rm -rf $TEMP_DIR" EXIT
+
 # Download beyla.yaml
-curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/configs/beyla.yaml \
-    -o /tmp/better-stack-collector-beyla.yaml
+curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/beyla.yaml \
+    -o beyla.yaml
 
 # Download compose file and run
 curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/docker-compose.yml | \

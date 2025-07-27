@@ -43,7 +43,7 @@ services:
       - BEYLA_METRICS_INTERVAL=15s
       - BEYLA_CONFIG_PATH=/etc/beyla/beyla.yaml
     volumes:
-      - ./configs/beyla.yaml:/etc/beyla/beyla.yaml:ro
+      - ./beyla.yaml:/etc/beyla/beyla.yaml:ro
       - /sys/kernel/tracing:/sys/kernel/tracing:rw
       - /sys/kernel/debug:/sys/kernel/debug:rw
       - /sys/kernel/security:/sys/kernel/security:ro
