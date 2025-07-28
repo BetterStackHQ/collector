@@ -6,9 +6,6 @@ services:
     image: betterstack/collector:latest
     container_name: better-stack-collector
     restart: always
-    cap_add:
-      - SYS_RESOURCE
-      - SYS_NICE
     security_opt:
       - seccomp=collector-seccomp.json
     environment:
