@@ -1,0 +1,53 @@
+services:
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: betterstack/collector:latest
+    container_name: better-stack-collector
+    restart: always
+    security_opt:
+      - seccomp=collector-seccomp.json
+    environment:
+      - COLLECTOR_SECRET=${COLLECTOR_SECRET}
+      - BASE_URL=${BASE_URL:-https://telemetry.betterstack.com}
+      - CLUSTER_COLLECTOR=${CLUSTER_COLLECTOR:-false}
+      - VECTOR_LOG_FORMAT=json
+      # Pass hostname of host machine to collector; needs `export HOSTNAME` before running `docker compose up`
+      - HOSTNAME
+    volumes:
+      # Let Vector collector host system metrics
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      # Collect host logs
+      - /var/log:/host/var/log:ro
+      # Collect Docker container logs
+      - /var/lib/docker/containers:/host/var/lib/docker/containers:ro
+    ports:
+      # Bind to localhost only for security - Beyla will connect via host network
+      - "127.0.0.1:34320:34320"
+
+  beyla:
+    image: grafana/beyla:2.2.4
+    container_name: better-stack-beyla
+    restart: always
+    privileged: true
+    pid: host
+    network_mode: host
+    environment:
+      # Pass hostname of host machine to Beyla; needs `export HOSTNAME` before running `docker compose up`
+      - HOSTNAME
+      # Override OTLP endpoint to point to collector container
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:34320
+      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      - BEYLA_BPF_CONTEXT_PROPAGATION=all
+      - BEYLA_BPF_TRACK_REQUEST_HEADERS=true
+      - BEYLA_METRICS_INTERVAL=15s
+      - BEYLA_CONFIG_PATH=/etc/beyla/beyla.yaml
+    volumes:
+      - ./beyla.yaml:/etc/beyla/beyla.yaml:ro
+      - /sys/kernel/tracing:/sys/kernel/tracing:rw
+      - /sys/kernel/debug:/sys/kernel/debug:rw
+      - /sys/kernel/security:/sys/kernel/security:ro
+    depends_on:
+      - collector
