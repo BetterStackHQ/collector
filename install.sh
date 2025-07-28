@@ -41,6 +41,10 @@ curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/beyla.y
 curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/docker-compose.yml \
     -o docker-compose.yml
 
+# Download seccomp profile (for compatibility with older Docker versions)
+curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/collector-seccomp.json \
+    -o collector-seccomp.json
+
 # Pull images first
 COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="$HOSTNAME" \
     $COMPOSE_CMD -p better-stack-collector pull
