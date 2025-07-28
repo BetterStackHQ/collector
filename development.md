@@ -42,3 +42,9 @@ Tail collector logs:
 ## Topology
 
 - Beyla container talks to collector via host network on port 34320. Only localhost is allowed to connect to this port.
+
+## Seccomp
+
+- On Docker versions `< 20.10.10`, seccomp forbids the use of `clone3` syscall, which is required by Tokio (in Vector)
+- For these versions, we ship a custom seccomp profile that allows the use of `clone3` syscall via `docker-compose.seccomp.yml` + `collector-seccomp.json`
+- For Docker versions `>= 20.10.10`, we use the default seccomp profile
