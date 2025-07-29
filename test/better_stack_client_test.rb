@@ -409,15 +409,15 @@ class BetterStackClientTest < Minitest::Test
     promote_path = nil
 
     # Mock vector_config methods
-    @client.instance_variable_get(:@vector_config).define_singleton_method(:validate_upstream_file) do |path|
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:validate_upstream_files) do |dir|
       validate_called = true
-      validate_path = path
+      validate_path = dir
       nil # validation passes
     end
 
-    @client.instance_variable_get(:@vector_config).define_singleton_method(:promote_upstream_file) do |path|
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:promote_upstream_files) do |dir|
       promote_called = true
-      promote_path = path
+      promote_path = dir
     end
 
     def @client.download_file(url, path)
@@ -444,10 +444,10 @@ class BetterStackClientTest < Minitest::Test
     assert_equal "test content", File.read(File.join(version_dir, "databases.json"))
 
     # Validation and promotion should be called
-    assert validate_called, "validate_upstream_file should be called"
-    assert promote_called, "promote_upstream_file should be called"
-    assert_equal File.join(version_dir, "vector.yaml"), validate_path
-    assert_equal File.join(version_dir, "vector.yaml"), promote_path
+    assert validate_called, "validate_upstream_files should be called"
+    assert promote_called, "promote_upstream_files should be called"
+    assert_equal version_dir, validate_path
+    assert_equal version_dir, promote_path
 
     # Reset the method to not affect other tests
     class << @client

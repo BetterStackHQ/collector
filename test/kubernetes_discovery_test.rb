@@ -25,17 +25,19 @@ class KubernetesDiscoveryTest < Minitest::Test
   end
 
   def test_should_discover_with_kubernetes_discovery_usage
-    # Create latest-valid-vector.yaml with kubernetes_discovery_ reference
-    vector_path = File.join(@test_dir, 'latest-valid-vector.yaml')
-    File.write(vector_path, "sources:\n  kubernetes_discovery_test:\n    type: prometheus_scrape")
+    # Create latest-valid-upstream directory with vector.yaml containing kubernetes_discovery_ reference
+    upstream_dir = File.join(@test_dir, 'vector-config', 'latest-valid-upstream')
+    FileUtils.mkdir_p(upstream_dir)
+    File.write(File.join(upstream_dir, 'vector.yaml'), "sources:\n  kubernetes_discovery_test:\n    type: prometheus_scrape")
 
     assert @discovery.should_discover?
   end
 
   def test_should_not_discover_without_kubernetes_discovery_usage
-    # Create latest-valid-vector.yaml without kubernetes_discovery_ reference
-    vector_path = File.join(@test_dir, 'latest-valid-vector.yaml')
-    File.write(vector_path, "sources:\n  test:\n    type: file")
+    # Create latest-valid-upstream directory with vector.yaml without kubernetes_discovery_ reference
+    upstream_dir = File.join(@test_dir, 'vector-config', 'latest-valid-upstream')
+    FileUtils.mkdir_p(upstream_dir)
+    File.write(File.join(upstream_dir, 'vector.yaml'), "sources:\n  test:\n    type: file")
 
     assert !@discovery.should_discover?
   end
@@ -111,7 +113,7 @@ class KubernetesDiscoveryTest < Minitest::Test
     assert !File.exist?(File.join(base_dir, '2025-01-04T00:00:00'))
   end
 
-  def test_get_workload_from_pod_returns_direct_owner_type
+  def test_get_workload_info_returns_direct_owner_type
     pod = {
       'metadata' => {
         'ownerReferences' => [{
@@ -121,11 +123,14 @@ class KubernetesDiscoveryTest < Minitest::Test
       }
     }
 
-    result = @discovery.send(:get_workload_from_pod, pod, 'default')
-    assert_equal 'daemonset/test-daemonset', result
+    result = @discovery.send(:get_workload_info, pod, 'default')
+    assert_equal 'test-daemonset', result[:daemonset]
+    assert_nil result[:deployment]
+    assert_nil result[:statefulset]
+    assert_nil result[:replicaset]
   end
 
-  def test_get_workload_from_pod_follows_replicaset_to_deployment
+  def test_get_workload_info_follows_replicaset_to_deployment
     pod = {
       'metadata' => {
         'ownerReferences' => [{
@@ -146,20 +151,26 @@ class KubernetesDiscoveryTest < Minitest::Test
 
     # Mock kubernetes_request for ReplicaSet lookup
     @discovery.stub :kubernetes_request, replicaset do
-      result = @discovery.send(:get_workload_from_pod, pod, 'default')
-      assert_equal 'deployment/test-deployment', result
+      result = @discovery.send(:get_workload_info, pod, 'default')
+      assert_equal 'test-deployment', result[:deployment]
+      assert_equal 'test-deployment-abc123', result[:replicaset]
+      assert_nil result[:statefulset]
+      assert_nil result[:daemonset]
     end
   end
 
-  def test_get_workload_from_pod_returns_nil_when_no_owner
+  def test_get_workload_info_returns_empty_hash_when_no_owner
     pod = {
       'metadata' => {
         'ownerReferences' => []
       }
     }
 
-    result = @discovery.send(:get_workload_from_pod, pod, 'default')
-    assert_nil result
+    result = @discovery.send(:get_workload_info, pod, 'default')
+    assert_nil result[:deployment]
+    assert_nil result[:statefulset]
+    assert_nil result[:daemonset]
+    assert_nil result[:replicaset]
   end
 
   def test_generate_config_creates_prometheus_scrape_source
@@ -169,8 +180,9 @@ class KubernetesDiscoveryTest < Minitest::Test
       namespace: 'test-namespace',
       pod: 'test-pod',
       service: 'test-service',
-      pod_ip: '10.0.0.1',
-      workload: 'deployment/test-app'
+      node_name: 'test-node',
+      pod_uid: 'abc123',
+      deployment_name: 'test-app'
     }
 
     result = @discovery.send(:generate_config, endpoint_info)
@@ -180,16 +192,25 @@ class KubernetesDiscoveryTest < Minitest::Test
     assert result[:filename].end_with?('.yaml')
 
     config = result[:content]
-    assert_equal 'prometheus_scrape', config['sources']['kubernetes_discovery_test-namespace_test-pod']['type']
-    assert_equal ['http://10.0.0.1:9090/metrics'], config['sources']['kubernetes_discovery_test-namespace_test-pod']['endpoints']
-    assert_equal 30, config['sources']['kubernetes_discovery_test-namespace_test-pod']['scrape_interval_secs']
+    source_name = 'prometheus_scrape_test-namespace_test-pod'
+    transform_name = 'kubernetes_discovery_test-namespace_test-pod'
 
-    labels = config['sources']['kubernetes_discovery_test-namespace_test-pod']['labels']
-    assert_equal 'test-namespace', labels['namespace']
-    assert_equal 'test-pod', labels['pod']
-    assert_equal '10.0.0.1', labels['pod_ip']
-    assert_equal 'test-service', labels['service']
-    assert_equal 'deployment/test-app', labels['workload']
+    # Check source
+    assert_equal 'prometheus_scrape', config['sources'][source_name]['type']
+    assert_equal ['http://10.0.0.1:9090/metrics'], config['sources'][source_name]['endpoints']
+    assert_equal 30, config['sources'][source_name]['scrape_interval_secs']
+    assert_equal 'instance', config['sources'][source_name]['instance_tag']
+
+    # Check transform
+    assert_equal 'remap', config['transforms'][transform_name]['type']
+    assert_equal [source_name], config['transforms'][transform_name]['inputs']
+
+    # Check remap source includes k8s labels
+    remap_source = config['transforms'][transform_name]['source']
+    assert_match /\.tags\."k8s\.namespace\.name" = "test-namespace"/, remap_source
+    assert_match /\.tags\."k8s\.pod\.name" = "test-pod"/, remap_source
+    assert_match /\.tags\."k8s\.node\.name" = "test-node"/, remap_source
+    assert_match /\.tags\."k8s\.deployment\.name" = "test-app"/, remap_source
   end
 
   def test_generate_config_excludes_nil_labels
@@ -199,16 +220,22 @@ class KubernetesDiscoveryTest < Minitest::Test
       namespace: 'test-namespace',
       pod: 'test-pod',
       service: nil,
-      pod_ip: '10.0.0.1',
-      workload: nil
+      deployment_name: nil,
+      node_name: nil
     }
 
     result = @discovery.send(:generate_config, endpoint_info)
     config = result[:content]
-    labels = config['sources']['kubernetes_discovery_test-namespace_test-pod']['labels']
+    transform_name = 'kubernetes_discovery_test-namespace_test-pod'
+    remap_source = config['transforms'][transform_name]['source']
 
-    assert !labels.key?('service')
-    assert !labels.key?('workload')
+    # Should include namespace and pod
+    assert_match /\.tags\."k8s\.namespace\.name" = "test-namespace"/, remap_source
+    assert_match /\.tags\."k8s\.pod\.name" = "test-pod"/, remap_source
+
+    # Should not include nil fields
+    refute_match /deployment_name/, remap_source
+    refute_match /node_name/, remap_source
   end
 
   def test_configs_identical_returns_true_for_same_content

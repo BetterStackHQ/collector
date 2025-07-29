@@ -1,0 +1,11 @@
+---
+sources:
+  kubernetes_discovery_static_metrics:
+    type: static_metrics
+    metrics:
+      - name: collector_kubernetes_discovered_pods
+        kind: absolute
+        value:
+          gauge:
+            value: 0
+        tags: {}

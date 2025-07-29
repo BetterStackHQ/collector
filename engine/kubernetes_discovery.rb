@@ -40,35 +40,41 @@ class KubernetesDiscovery
     @node_name = ENV['HOSTNAME']
   end
 
-  def should_discover?
-    latest_vector_yaml = File.join(@working_dir, "latest-valid-vector.yaml")
-    return false unless File.exist?(latest_vector_yaml)
+  def self.vector_config_uses_kubernetes_discovery?(vector_config_dir)
+    return false unless File.exist?(vector_config_dir)
 
-    config_content = File.read(latest_vector_yaml)
-    config_content.include?('kubernetes_discovery_')
+    # Check all yaml files in latest-valid-upstream for kubernetes_discovery_
+    Dir.glob(File.join(vector_config_dir, "*.yaml")).each do |config_file|
+      if File.read(config_file).include?('kubernetes_discovery_')
+        return true
+      end
+    end
+
+    false
+  end
+
+  def should_discover?
+    vector_config_dir = File.join(@working_dir, "vector-config", "latest-valid-upstream")
+    self.class.vector_config_uses_kubernetes_discovery?(vector_config_dir)
   end
 
   def run
     unless should_discover?
-      puts "Skipping kubernetes discovery - not used in vector config"
+      # Kubernetes discovery not used in vector config
       return false
     end
 
-    # Rate limit check
     current_time = Time.now
     if @last_run_time && (current_time - @last_run_time) < 30
-      puts "Skipping kubernetes discovery - last run #{(current_time - @last_run_time).to_i}s ago"
+      # Rate limited - last run was too recent
       return false
     end
     @last_run_time = current_time
 
-    # Initialize kubernetes connection
     unless in_kubernetes?
-      puts "Not running in Kubernetes environment"
+      # Not in Kubernetes environment
       return false
     end
-
-    puts "Running kubernetes discovery"
 
     @base_url = "https://#{ENV['KUBERNETES_SERVICE_HOST']}:#{ENV['KUBERNETES_SERVICE_PORT']}"
     @token = read_service_account_token
@@ -78,7 +84,7 @@ class KubernetesDiscovery
     begin
       discover_and_update
     rescue => e
-      puts "Error during kubernetes discovery: #{e.class.name}: #{e.message}"
+      puts "Kubernetes discovery failed: #{e.class.name}: #{e.message}"
       false
     end
   end
@@ -91,7 +97,7 @@ class KubernetesDiscovery
     if versions.length > keep_count
       to_delete = versions[0...(versions.length - keep_count)]
       to_delete.each do |dir|
-        puts "Cleaning up old kubernetes-discovery version: #{File.basename(dir)}"
+        # Cleaning up old kubernetes-discovery version
         FileUtils.rm_rf(dir)
       end
     end
@@ -150,9 +156,6 @@ class KubernetesDiscovery
   end
 
   def discover_and_update
-    puts "Starting Prometheus endpoint discovery"
-    puts "Filtering for node: #{@node_name}" if @node_name
-
     latest_dir = latest_kubernetes_discovery
 
     # Create new version directory
@@ -162,7 +165,6 @@ class KubernetesDiscovery
 
     # Get all namespaces we have access to
     namespaces = get_namespaces
-    puts "Checking #{namespaces.length} namespaces"
 
     # Use hash to store configs by namespace_pod key to avoid duplicates
     discovered_configs = {}
@@ -216,29 +218,42 @@ class KubernetesDiscovery
       configs_generated += 1
     end
 
-    if configs_generated == 0
-      puts "No sources discovered, removing directory"
-      FileUtils.rm_rf(new_dir)
-      return false
-    end
-
-    puts "Generated #{configs_generated} configs for kubernetes discovery"
+    # Always generate discovered_pods.yaml with the count of discovered pods
+    discovered_pods_config = {
+      'sources' => {
+        'kubernetes_discovery_static_metrics' => {
+          'type' => 'static_metrics',
+          'metrics' => [
+            {
+              'name' => 'collector_kubernetes_discovered_pods',
+              'kind' => 'absolute',
+              'value' => {
+                'gauge' => {
+                  'value' => configs_generated
+                }
+              },
+              'tags' => {}
+            }
+          ]
+        }
+      }
+    }
+    File.write(File.join(new_dir, 'discovered_pods.yaml'), discovered_pods_config.to_yaml)
 
     # Validate the generated configs
     unless validate_configs(new_dir)
-      puts "Error: Kubernetes discovery validation failed, removing invalid configs"
+      puts "Kubernetes discovery: validation failed"
       FileUtils.rm_rf(new_dir)
       return false
     end
-
-    puts "Kubernetes discovery validation passed"
 
     # Check if configs changed from latest version
     if latest_dir && configs_identical?(latest_dir, new_dir)
-      puts "Kubernetes discovery unchanged from previous version"
       FileUtils.rm_rf(new_dir)
       return false
     end
+
+    puts "Kubernetes discovery: Generated configs for #{configs_generated} pods"
 
     # Clean up old versions
     cleanup_old_versions
@@ -251,7 +266,7 @@ class KubernetesDiscovery
       result = kubernetes_request('/api/v1/namespaces')
       result['items'].map { |ns| ns['metadata']['name'] }
     rescue => e
-      puts "Warning: Failed to list namespaces (#{e.message}), using current namespace"
+      puts "Kubernetes discovery: Failed to list namespaces (#{e.message}), using current namespace"
       [@namespace]
     end
   end
@@ -297,21 +312,37 @@ class KubernetesDiscovery
         pod_name = address.dig('targetRef', 'name')
 
         # Skip if we have NODE_NAME set and need to check pod's node
-        workload = nil
-        if @node_name && pod_name
+        pod_metadata = {}
+        if pod_name
           begin
             pod = kubernetes_request("/api/v1/namespaces/#{namespace}/pods/#{pod_name}")
-            node_name = pod.dig('spec', 'nodeName')
-            next unless node_name == @node_name
+
+            if @node_name
+              node_name = pod.dig('spec', 'nodeName')
+              next unless node_name == @node_name
+            end
 
             # Extract workload information from ownerReferences
-            workload = get_workload_from_pod(pod, namespace)
-            if workload
-              puts "Found workload for #{pod_name}: #{workload}"
-            end
+            workload_info = get_workload_info(pod, namespace)
+
+            # Extract container names
+            containers = pod.dig('spec', 'containers') || []
+            container_names = containers.map { |c| c['name'] }
+
+            # Collect pod metadata
+            pod_metadata = {
+              pod_uid: pod.dig('metadata', 'uid'),
+              node_name: pod.dig('spec', 'nodeName'),
+              start_time: pod.dig('status', 'startTime'),
+              container_names: container_names,
+              deployment_name: workload_info[:deployment],
+              statefulset_name: workload_info[:statefulset],
+              daemonset_name: workload_info[:daemonset],
+              replicaset_name: workload_info[:replicaset]
+            }
           rescue => e
-            puts "Warning: Failed to get pod info for #{pod_name}: #{e.message}"
-            next
+            puts "Kubernetes discovery: Failed to get pod info for #{pod_name}: #{e.message}"
+            next if @node_name  # Skip if we need node filtering but couldn't get pod info
           end
         end
 
@@ -320,10 +351,8 @@ class KubernetesDiscovery
           endpoint: "http://#{address['ip']}:#{port}#{path}",
           namespace: namespace,
           pod: pod_name,
-          service: service_name,
-          pod_ip: address['ip'],
-          workload: workload
-        }
+          service: service_name
+        }.merge(pod_metadata)
       end
     end
 
@@ -341,7 +370,11 @@ class KubernetesDiscovery
     path = annotations['prometheus.io/path'] || '/metrics'
 
     # Extract workload information from ownerReferences
-    workload = get_workload_from_pod(pod, namespace)
+    workload_info = get_workload_info(pod, namespace)
+
+    # Extract container names
+    containers = pod.dig('spec', 'containers') || []
+    container_names = containers.map { |c| c['name'] }
 
     {
       name: "#{namespace}_#{pod_name}",
@@ -349,15 +382,23 @@ class KubernetesDiscovery
       namespace: namespace,
       pod: pod_name,
       service: nil,
-      pod_ip: pod_ip,
-      workload: workload
+      # k8s metadata for labels
+      pod_uid: pod.dig('metadata', 'uid'),
+      node_name: pod.dig('spec', 'nodeName'),
+      start_time: pod.dig('status', 'startTime'),
+      container_names: container_names,
+      deployment_name: workload_info[:deployment],
+      statefulset_name: workload_info[:statefulset],
+      daemonset_name: workload_info[:daemonset],
+      replicaset_name: workload_info[:replicaset]
     }
   end
 
   def generate_config(endpoint_info)
     return nil unless endpoint_info
 
-    source_name = "kubernetes_discovery_#{endpoint_info[:name]}"
+    source_name = "prometheus_scrape_#{endpoint_info[:name]}"
+    transform_name = "kubernetes_discovery_#{endpoint_info[:name]}"
 
     config = {
       'sources' => {
@@ -365,27 +406,45 @@ class KubernetesDiscovery
           'type' => 'prometheus_scrape',
           'endpoints' => [endpoint_info[:endpoint]],
           'scrape_interval_secs' => 30,
-          'labels' => {
-            'namespace' => endpoint_info[:namespace],
-            'pod' => endpoint_info[:pod],
-            'pod_ip' => endpoint_info[:pod_ip],
-          }
+          'instance_tag' => 'instance'  # This will add instance="host:port" tag
+        }
+      },
+      'transforms' => {
+        transform_name => {
+          'type' => 'remap',
+          'inputs' => [source_name],
+          'source' => ''  # Will be built below
         }
       }
     }
 
+    # Build remap source to add all k8s labels
+    remap_lines = []
+
+    # Add labels
+    remap_lines << ".tags.\"k8s.namespace.name\" = \"#{endpoint_info[:namespace]}\""
+    remap_lines << ".tags.\"k8s.pod.name\" = \"#{endpoint_info[:pod]}\""
+
+    # Add new k8s labels if present
+    remap_lines << ".tags.\"k8s.node.name\" = \"#{endpoint_info[:node_name]}\"" if endpoint_info[:node_name]
+    remap_lines << ".tags.\"k8s.pod.uid\" = \"#{endpoint_info[:pod_uid]}\"" if endpoint_info[:pod_uid]
+    remap_lines << ".tags.\"k8s.pod.start_time\" = \"#{endpoint_info[:start_time]}\"" if endpoint_info[:start_time]
+
+    # Add workload-specific labels
+    remap_lines << ".tags.\"k8s.deployment.name\" = \"#{endpoint_info[:deployment_name]}\"" if endpoint_info[:deployment_name]
+    remap_lines << ".tags.\"k8s.statefulset.name\" = \"#{endpoint_info[:statefulset_name]}\"" if endpoint_info[:statefulset_name]
+    remap_lines << ".tags.\"k8s.daemonset.name\" = \"#{endpoint_info[:daemonset_name]}\"" if endpoint_info[:daemonset_name]
+    remap_lines << ".tags.\"k8s.replicaset.name\" = \"#{endpoint_info[:replicaset_name]}\"" if endpoint_info[:replicaset_name]
+
+    # Add container names if present
+    if endpoint_info[:container_names] && !endpoint_info[:container_names].empty?
+      remap_lines << ".tags.\"k8s.container.name\" = \"#{endpoint_info[:container_names].join(',')}\""
+    end
+
+    config['transforms'][transform_name]['source'] = remap_lines.join("\n")
+
     config_md5 = Digest::MD5.hexdigest(config.to_yaml)
     filename = "#{endpoint_info[:name]}-#{config_md5}.yaml"
-
-    # Add service label if this endpoint belongs to a service
-    if endpoint_info[:service]
-      config['sources'][source_name]['labels']['service'] = endpoint_info[:service]
-    end
-
-    # Add workload label if available
-    if endpoint_info[:workload]
-      config['sources'][source_name]['labels']['workload'] = endpoint_info[:workload]
-    end
 
     {
       filename: filename,
@@ -434,29 +493,43 @@ class KubernetesDiscovery
     end
   end
 
-  def get_workload_from_pod(pod, namespace)
+  def get_workload_info(pod, namespace)
     owner_refs = pod.dig('metadata', 'ownerReferences') || []
-    return nil if owner_refs.empty?
+    workload_info = {
+      deployment: nil,
+      statefulset: nil,
+      daemonset: nil,
+      replicaset: nil
+    }
+
+    return workload_info if owner_refs.empty?
 
     owner = owner_refs.first
     owner_kind = owner['kind']
     owner_name = owner['name']
 
-    # For ReplicaSets, try to find the parent Deployment
-    if owner_kind == 'ReplicaSet'
+    case owner_kind
+    when 'ReplicaSet'
+      workload_info[:replicaset] = owner_name
+      # Try to find parent Deployment
       begin
         replicaset = kubernetes_request("/apis/apps/v1/namespaces/#{namespace}/replicasets/#{owner_name}")
         rs_owner_refs = replicaset.dig('metadata', 'ownerReferences') || []
 
         if rs_owner_refs.length > 0 && rs_owner_refs.first['kind'] == 'Deployment'
-          return "deployment/#{rs_owner_refs.first['name']}"
+          workload_info[:deployment] = rs_owner_refs.first['name']
         end
       rescue => e
-        puts "Warning: Failed to get ReplicaSet info for #{owner_name}: #{e.message}"
+        puts "Kubernetes discovery: Failed to get ReplicaSet info for #{owner_name}: #{e.message}"
       end
+    when 'Deployment'
+      workload_info[:deployment] = owner_name
+    when 'StatefulSet'
+      workload_info[:statefulset] = owner_name
+    when 'DaemonSet'
+      workload_info[:daemonset] = owner_name
     end
 
-    # Return the direct owner for other types (DaemonSet, StatefulSet, Job, etc.)
-    "#{owner_kind.downcase}/#{owner_name}"
+    workload_info
   end
 end

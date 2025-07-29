@@ -186,14 +186,14 @@ class BetterStackClient
       puts "All files downloaded. Validating configuration..."
 
       # Validate vector config
-      vector_yaml_path = "#{@working_dir}/versions/#{new_version}/vector.yaml"
-      validate_output = @vector_config.validate_upstream_file(vector_yaml_path)
+      version_dir = File.join(@working_dir, "versions", new_version)
+      validate_output = @vector_config.validate_upstream_files(version_dir)
       unless validate_output.nil?
-        write_error("Validation failed for vector config #{new_version}/vector.yaml\n\n#{validate_output}")
+        write_error("Validation failed for vector config in #{new_version}\n\n#{validate_output}")
         return
       end
 
-      @vector_config.promote_upstream_file(vector_yaml_path)
+      @vector_config.promote_upstream_files(version_dir)
       return true
     else
       write_error("Failed to fetch configuration for version #{new_version}. Response code: #{code}")

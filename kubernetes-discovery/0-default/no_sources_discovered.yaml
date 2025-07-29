@@ -1,9 +1,0 @@
----
-sources:
-  # This source is intentionally generating no events.
-  # We need at least one source matching the pattern kubernetes_discovery_prometheus_scrape_*
-  # when no pods are discovered otherwise vector will fail to start.
-  kubernetes_discovery_prometheus_scrape_no_sources_discovered:
-    type: file
-    include:
-      - /dev/null

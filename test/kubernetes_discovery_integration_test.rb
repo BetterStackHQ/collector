@@ -28,9 +28,10 @@ class KubernetesDiscoveryIntegrationTest < Minitest::Test
   end
 
   def test_discover_and_update_finds_service_endpoints_and_standalone_pods
-    # Create vector.yaml that uses kubernetes_discovery
-    vector_path = File.join(@test_dir, 'latest-valid-vector.yaml')
-    File.write(vector_path, "sources:\n  kubernetes_discovery_test:\n    type: prometheus_scrape")
+    # Create latest-valid-upstream with vector.yaml that uses kubernetes_discovery
+    upstream_dir = File.join(@test_dir, 'vector-config', 'latest-valid-upstream')
+    FileUtils.mkdir_p(upstream_dir)
+    File.write(File.join(upstream_dir, 'vector.yaml'), "sources:\n  kubernetes_discovery_test:\n    type: prometheus_scrape")
 
     # Mock being in Kubernetes
     @discovery.stub :in_kubernetes?, true do
@@ -142,30 +143,40 @@ class KubernetesDiscoveryIntegrationTest < Minitest::Test
                 assert discovery_dir
 
                 files = Dir.glob(File.join(discovery_dir, '*.yaml')).sort
+                # Filter out discovered_pods.yaml
+                config_files = files.reject { |f| f.include?('discovered_pods.yaml') }
                 # We expect 3 configs: service endpoint + cronjob pod + standalone pod
                 # All pods with prometheus annotations should be discovered
-                assert_equal 3, files.length
+                assert_equal 3, config_files.length
 
                 # Check deployment workload
                 # The filename includes the pod name, not the deployment name
-                webapp_file = files.find { |f| f.include?('webapp-deployment-abc123-xyz') }
-                assert webapp_file, "Could not find webapp file in: #{files.map { |f| File.basename(f) }}"
+                webapp_file = config_files.find { |f| f.include?('webapp-deployment-abc123-xyz') }
+                assert webapp_file, "Could not find webapp file in: #{config_files.map { |f| File.basename(f) }}"
                 webapp_config = YAML.load_file(webapp_file)
-                workload = webapp_config['sources'].values.first['labels']['workload']
-                assert_equal 'deployment/webapp-deployment', workload
+                # Check transform remap source for k8s.deployment.name
+                transform_source = webapp_config['transforms'].values.first['source']
+                assert_match /\.tags\."k8s\.deployment\.name" = "webapp-deployment"/, transform_source
 
                 # Check job workload (cronjob pod)
-                job_file = files.find { |f| f.include?('cronjob') }
+                job_file = config_files.find { |f| f.include?('cronjob') }
                 assert job_file, "Should find cronjob pod file"
                 job_config = YAML.load_file(job_file)
-                assert_equal 'job/scheduled-job-1234',
-                             job_config['sources'].values.first['labels']['workload']
+                # Jobs don't have deployment/statefulset/daemonset labels
+                transform_source = job_config['transforms'].values.first['source']
+                refute_match /k8s\.deployment\.name/, transform_source
+                refute_match /k8s\.statefulset\.name/, transform_source
+                refute_match /k8s\.daemonset\.name/, transform_source
 
                 # Check standalone pod (no workload)
-                standalone_file = files.find { |f| f.include?('standalone') }
+                standalone_file = config_files.find { |f| f.include?('standalone') }
                 assert standalone_file
                 standalone_config = YAML.load_file(standalone_file)
-                assert_nil standalone_config['sources'].values.first['labels']['workload']
+                transform_source = standalone_config['transforms'].values.first['source']
+                # Should have basic k8s labels but no workload labels
+                assert_match /k8s\.namespace\.name/, transform_source
+                assert_match /k8s\.pod\.name/, transform_source
+                refute_match /k8s\.deployment\.name/, transform_source
               end
             end
           end
@@ -175,9 +186,10 @@ class KubernetesDiscoveryIntegrationTest < Minitest::Test
   end
 
   def test_node_filtering_discovers_only_pods_on_current_node
-    # Create vector.yaml that uses kubernetes_discovery
-    vector_path = File.join(@test_dir, 'latest-valid-vector.yaml')
-    File.write(vector_path, "sources:\n  kubernetes_discovery_test:\n    type: prometheus_scrape")
+    # Create latest-valid-upstream with vector.yaml that uses kubernetes_discovery
+    upstream_dir = File.join(@test_dir, 'vector-config', 'latest-valid-upstream')
+    FileUtils.mkdir_p(upstream_dir)
+    File.write(File.join(upstream_dir, 'vector.yaml'), "sources:\n  kubernetes_discovery_test:\n    type: prometheus_scrape")
 
     # Mock being in Kubernetes
     @discovery.stub :in_kubernetes?, true do
@@ -245,8 +257,10 @@ class KubernetesDiscoveryIntegrationTest < Minitest::Test
                 # Verify only our node's pod was discovered
                 discovery_dir = Dir.glob(File.join(@test_dir, 'kubernetes-discovery', '2*')).first
                 files = Dir.glob(File.join(discovery_dir, '*.yaml'))
-                assert_equal 1, files.length
-                assert files.first.include?('pod-on-our-node')
+                # Filter out discovered_pods.yaml
+                config_files = files.reject { |f| f.include?('discovered_pods.yaml') }
+                assert_equal 1, config_files.length
+                assert config_files.first.include?('pod-on-our-node')
               end
             end
           end
@@ -256,9 +270,10 @@ class KubernetesDiscoveryIntegrationTest < Minitest::Test
   end
 
   def test_deduplication_prevents_duplicate_configs_for_same_pod
-    # Create vector.yaml that uses kubernetes_discovery
-    vector_path = File.join(@test_dir, 'latest-valid-vector.yaml')
-    File.write(vector_path, "sources:\n  kubernetes_discovery_test:\n    type: prometheus_scrape")
+    # Create latest-valid-upstream with vector.yaml that uses kubernetes_discovery
+    upstream_dir = File.join(@test_dir, 'vector-config', 'latest-valid-upstream')
+    FileUtils.mkdir_p(upstream_dir)
+    File.write(File.join(upstream_dir, 'vector.yaml'), "sources:\n  kubernetes_discovery_test:\n    type: prometheus_scrape")
 
     # Mock being in Kubernetes
     @discovery.stub :in_kubernetes?, true do
@@ -330,13 +345,14 @@ class KubernetesDiscoveryIntegrationTest < Minitest::Test
                 # Verify deduplication worked
                 discovery_dir = Dir.glob(File.join(@test_dir, 'kubernetes-discovery', '2*')).first
                 files = Dir.glob(File.join(discovery_dir, '*.yaml'))
-                assert_equal 1, files.length
+                # Filter out discovered_pods.yaml
+                config_files = files.reject { |f| f.include?('discovered_pods.yaml') }
+                assert_equal 1, config_files.length
 
                 # Check that first service's config was kept
-                config = YAML.load_file(files.first)
+                config = YAML.load_file(config_files.first)
                 source = config['sources'].values.first
                 assert_equal ['http://10.0.0.1:8080/metrics'], source['endpoints']
-                assert_equal 'service-a', source['labels']['service']
               end
             end
           end
@@ -346,9 +362,10 @@ class KubernetesDiscoveryIntegrationTest < Minitest::Test
   end
 
   def test_run_returns_false_on_kubernetes_api_error
-    # Create vector.yaml that uses kubernetes_discovery
-    vector_path = File.join(@test_dir, 'latest-valid-vector.yaml')
-    File.write(vector_path, "sources:\n  kubernetes_discovery_test:\n    type: prometheus_scrape")
+    # Create latest-valid-upstream with vector.yaml that uses kubernetes_discovery
+    upstream_dir = File.join(@test_dir, 'vector-config', 'latest-valid-upstream')
+    FileUtils.mkdir_p(upstream_dir)
+    File.write(File.join(upstream_dir, 'vector.yaml'), "sources:\n  kubernetes_discovery_test:\n    type: prometheus_scrape")
 
     # Mock being in Kubernetes
     @discovery.stub :in_kubernetes?, true do

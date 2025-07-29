@@ -14,7 +14,7 @@ class VectorConfigEdgeCasesTest < Minitest::Test
     FileUtils.rm_rf(@test_dir)
   end
 
-  def test_validate_upstream_file_with_malicious_command_variations
+  def test_validate_upstream_files_should_reject_malicious_command_variations
     # Test various ways someone might try to sneak in command directives
     test_cases = [
       "sources:\n  test:\n    command: 'rm -rf /'",
@@ -24,21 +24,22 @@ class VectorConfigEdgeCasesTest < Minitest::Test
     ]
 
     test_cases.each do |content|
-      vector_yaml_path = File.join(@test_dir, 'test.yaml')
-      File.write(vector_yaml_path, content)
+      version_dir = File.join(@test_dir, 'test-version')
+      FileUtils.mkdir_p(version_dir)
+      File.write(File.join(version_dir, 'vector.yaml'), content)
 
-      result = @vector_config.validate_upstream_file(vector_yaml_path)
+      result = @vector_config.validate_upstream_files(version_dir)
       assert_equal 'vector.yaml must not contain command: directives', result,
                    "Should reject config with content: #{content}"
     end
   end
 
-  def test_prepare_dir_with_missing_kubernetes_discovery
-    # Create latest-valid-vector.yaml with kubernetes_discovery reference
+  def test_prepare_dir_should_work_with_missing_kubernetes_discovery
+    # Create latest-valid-upstream with kubernetes_discovery reference
+    upstream_dir = File.join(@test_dir, 'vector-config', 'latest-valid-upstream')
+    FileUtils.mkdir_p(upstream_dir)
     vector_content = "sources:\n  kubernetes_discovery_test:\n    type: prometheus_scrape"
-    vector_path = File.join(@test_dir, 'test.yaml')
-    File.write(vector_path, vector_content)
-    FileUtils.ln_s(vector_path, File.join(@test_dir, 'latest-valid-vector.yaml'))
+    File.write(File.join(upstream_dir, 'vector.yaml'), vector_content)
 
     # Remove kubernetes-discovery directories
     FileUtils.rm_rf(File.join(@test_dir, 'kubernetes-discovery'))
@@ -49,13 +50,14 @@ class VectorConfigEdgeCasesTest < Minitest::Test
       assert result
 
       # Should still create the directory structure
-      assert File.symlink?(File.join(result, 'vector.yaml'))
+      assert File.exist?(File.join(result, 'vector.yaml'))
+      assert !File.symlink?(File.join(result, 'vector.yaml'))
       # kubernetes-discovery symlink should not exist if source doesn't exist
       assert !File.exist?(File.join(result, 'kubernetes-discovery'))
     end
   end
 
-  def test_validate_dir_with_permission_errors
+  def test_validate_dir_should_handle_permission_errors
     config_dir = File.join(@test_dir, 'test-config')
     FileUtils.mkdir_p(config_dir)
     File.write(File.join(config_dir, 'vector.yaml'), "test: config")
@@ -71,7 +73,7 @@ class VectorConfigEdgeCasesTest < Minitest::Test
     end
   end
 
-  def test_promote_dir_with_current_as_file_not_directory
+  def test_promote_dir_should_handle_current_as_file_not_directory
     config_dir = File.join(@vector_config_dir, 'new_test')
     FileUtils.mkdir_p(config_dir)
 
@@ -91,7 +93,7 @@ class VectorConfigEdgeCasesTest < Minitest::Test
     end
   end
 
-  def test_promote_dir_when_supervisorctl_fails
+  def test_promote_dir_should_handle_supervisorctl_failure
     config_dir = File.join(@vector_config_dir, 'new_test')
     FileUtils.mkdir_p(config_dir)
 
@@ -108,4 +110,66 @@ class VectorConfigEdgeCasesTest < Minitest::Test
     end
   end
 
+  def test_validate_upstream_files_should_work_with_just_vector_yaml
+    # Create test directory with just vector.yaml
+    upstream_dir = File.join(@test_dir, 'upstream')
+    FileUtils.mkdir_p(upstream_dir)
+
+    # Write only vector.yaml (valid config)
+    valid_config = <<~YAML
+      sources:
+        test_source:
+          type: file
+          include: ["/var/log/test.log"]
+    YAML
+    File.write(File.join(upstream_dir, 'vector.yaml'), valid_config)
+
+    # Mock successful vector validation
+    original_backtick = @vector_config.method(:`)
+    @vector_config.define_singleton_method(:`) do |cmd|
+      original_backtick.call('true')
+      "Configuration validated successfully"
+    end
+
+    # Should validate successfully with just vector.yaml
+    result = @vector_config.validate_upstream_files(upstream_dir)
+    assert_nil result, "Should validate successfully with just vector.yaml"
+  end
+
+  def test_validate_upstream_files_should_work_with_just_manual_vector_yaml
+    # Create test directory with just manual.vector.yaml
+    upstream_dir = File.join(@test_dir, 'upstream')
+    FileUtils.mkdir_p(upstream_dir)
+
+    # Write only manual.vector.yaml (valid config)
+    valid_manual_config = <<~YAML
+      transforms:
+        test_transform:
+          type: remap
+          inputs: ["test_source"]
+          source: '.message = "test"'
+    YAML
+    File.write(File.join(upstream_dir, 'manual.vector.yaml'), valid_manual_config)
+
+    # Mock successful vector validation
+    original_backtick = @vector_config.method(:`)
+    @vector_config.define_singleton_method(:`) do |cmd|
+      original_backtick.call('true')
+      "Configuration validated successfully"
+    end
+
+    # Should validate successfully with just manual.vector.yaml
+    result = @vector_config.validate_upstream_files(upstream_dir)
+    assert_nil result, "Should validate successfully with just manual.vector.yaml"
+  end
+
+  def test_validate_upstream_files_should_fail_with_no_vector_configs
+    # Create test directory with no vector configs
+    upstream_dir = File.join(@test_dir, 'upstream')
+    FileUtils.mkdir_p(upstream_dir)
+
+    # Should fail validation when no vector configs are present
+    result = @vector_config.validate_upstream_files(upstream_dir)
+    assert_match(/No vector.yaml or manual.vector.yaml found/, result, "Should fail validation with no vector configs")
+  end
 end

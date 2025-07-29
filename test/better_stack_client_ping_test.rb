@@ -46,11 +46,11 @@ class BetterStackClientPingTest < Minitest::Test
 
     # Mock vector_config methods
     vector_config = @client.instance_variable_get(:@vector_config)
-    vector_config.define_singleton_method(:validate_upstream_file) { |path|
+    vector_config.define_singleton_method(:validate_upstream_files) { |path|
       validate_upstream_called = true
       nil
     }
-    vector_config.define_singleton_method(:promote_upstream_file) { |path|
+    vector_config.define_singleton_method(:promote_upstream_files) { |path|
       promote_upstream_called = true
     }
 
@@ -104,11 +104,11 @@ class BetterStackClientPingTest < Minitest::Test
 
     # Mock vector_config methods
     vector_config = @client.instance_variable_get(:@vector_config)
-    vector_config.define_singleton_method(:validate_upstream_file) { |path|
+    vector_config.define_singleton_method(:validate_upstream_files) { |path|
       validate_upstream_called = true
       nil
     }
-    vector_config.define_singleton_method(:promote_upstream_file) { |path|
+    vector_config.define_singleton_method(:promote_upstream_files) { |path|
       promote_upstream_called = true
     }
 

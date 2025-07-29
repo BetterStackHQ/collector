@@ -25,17 +25,19 @@ class VectorConfigTest < Minitest::Test
     FileUtils.rm_rf(@test_dir)
   end
 
-  def test_validate_upstream_file_rejects_command_directive
-    vector_yaml_path = File.join(@test_dir, 'test.yaml')
-    File.write(vector_yaml_path, "sources:\n  test:\n    type: exec\n    command: ['echo', 'test']")
+  def test_validate_upstream_files_rejects_command_directive_in_vector_yaml
+    version_dir = File.join(@test_dir, 'versions', '2025-01-01T00:00:00')
+    FileUtils.mkdir_p(version_dir)
+    File.write(File.join(version_dir, 'vector.yaml'), "sources:\n  test:\n    type: exec\n    command: ['echo', 'test']")
 
-    result = @vector_config.validate_upstream_file(vector_yaml_path)
+    result = @vector_config.validate_upstream_files(version_dir)
     assert_equal 'vector.yaml must not contain command: directives', result
   end
 
-  def test_validate_upstream_file_returns_nil_on_success
-    vector_yaml_path = File.join(@test_dir, 'test.yaml')
-    File.write(vector_yaml_path, "sources:\n  test:\n    type: file\n    include: ['/test']")
+  def test_validate_upstream_files_returns_nil_on_success
+    version_dir = File.join(@test_dir, 'versions', '2025-01-01T00:00:00')
+    FileUtils.mkdir_p(version_dir)
+    File.write(File.join(version_dir, 'vector.yaml'), "sources:\n  test:\n    type: file\n    include: ['/test']")
 
     # Mock successful vector validation
     original_backtick = @vector_config.method(:`)
@@ -45,13 +47,14 @@ class VectorConfigTest < Minitest::Test
       "Configuration validated successfully"
     end
 
-    result = @vector_config.validate_upstream_file(vector_yaml_path)
+    result = @vector_config.validate_upstream_files(version_dir)
     assert_nil result
   end
 
-  def test_validate_upstream_file_returns_error_on_failure
-    vector_yaml_path = File.join(@test_dir, 'test.yaml')
-    File.write(vector_yaml_path, "sources:\n  test:\n    type: file")
+  def test_validate_upstream_files_returns_error_on_validation_failure
+    version_dir = File.join(@test_dir, 'versions', '2025-01-01T00:00:00')
+    FileUtils.mkdir_p(version_dir)
+    File.write(File.join(version_dir, 'vector.yaml'), "sources:\n  test:\n    type: file")
 
     # Mock failed vector validation by actually running a command that fails
     original_backtick = @vector_config.method(:`)
@@ -61,39 +64,47 @@ class VectorConfigTest < Minitest::Test
       "Error: Missing required field 'include'"
     end
 
-    result = @vector_config.validate_upstream_file(vector_yaml_path)
+    result = @vector_config.validate_upstream_files(version_dir)
     assert_match(/Error: Missing required field/, result)
   end
 
-  def test_promote_upstream_file
-    assert !File.exist?(File.join(@test_dir, 'latest-valid-vector.yaml'))
-    vector_yaml_path = File.join(@test_dir, 'test.yaml')
-    File.write(vector_yaml_path, "test: config")
+  def test_promote_upstream_files
+    # Create a version directory with vector.yaml and manual.vector.yaml
+    version_dir = File.join(@test_dir, 'versions', '2025-01-01T00:00:00')
+    FileUtils.mkdir_p(version_dir)
+    File.write(File.join(version_dir, 'vector.yaml'), "sources:\n  test:\n    type: file")
+    File.write(File.join(version_dir, 'manual.vector.yaml'), "sources:\n  manual:\n    type: file")
 
-    @vector_config.promote_upstream_file(vector_yaml_path)
+    @vector_config.promote_upstream_files(version_dir)
 
-    # Test the actual outcome - symlink creation
-    latest_valid_path = File.join(@test_dir, 'latest-valid-vector.yaml')
-    assert File.symlink?(latest_valid_path)
-    assert_equal vector_yaml_path, File.readlink(latest_valid_path)
+    # Test the actual outcome - files copied to latest-valid-upstream
+    upstream_dir = File.join(@test_dir, 'vector-config', 'latest-valid-upstream')
+    assert File.exist?(File.join(upstream_dir, 'vector.yaml'))
+    assert File.exist?(File.join(upstream_dir, 'manual.vector.yaml'))
+    assert_equal "sources:\n  test:\n    type: file", File.read(File.join(upstream_dir, 'vector.yaml'))
+    assert_equal "sources:\n  manual:\n    type: file", File.read(File.join(upstream_dir, 'manual.vector.yaml'))
   end
 
-  def test_prepare_dir_returns_nil_when_no_latest_valid_vector
-    # Test that prepare_dir returns nil when no valid vector exists
-    assert !File.exist?(File.join(@test_dir, 'latest-valid-vector.yaml'))
+  def test_prepare_dir_returns_nil_when_no_latest_valid_upstream
+    # Test that prepare_dir returns nil when no latest-valid-upstream exists
+    assert !File.exist?(File.join(@test_dir, 'vector-config', 'latest-valid-upstream'))
     result = @vector_config.prepare_dir
     assert_nil result
   end
 
   def test_prepare_dir_uses_latest_kubernetes_discovery_when_referenced
-    # Create latest-valid-vector.yaml with kubernetes_discovery_ reference
+    # Create latest-valid-upstream with vector.yaml containing kubernetes_discovery_ reference
+    upstream_dir = File.join(@test_dir, 'vector-config', 'latest-valid-upstream')
+    FileUtils.mkdir_p(upstream_dir)
     vector_content = "sources:\n  kubernetes_discovery_test:\n    type: prometheus_scrape"
-    vector_path = File.join(@test_dir, 'test.yaml')
-    File.write(vector_path, vector_content)
-    FileUtils.ln_s(vector_path, File.join(@test_dir, 'latest-valid-vector.yaml'))
+    File.write(File.join(upstream_dir, 'vector.yaml'), vector_content)
+
+    # Create a kubernetes discovery directory
+    k8s_discovery_dir = File.join(@test_dir, 'kubernetes-discovery', '2025-01-01T00:00:00')
+    FileUtils.mkdir_p(k8s_discovery_dir)
 
     # Mock latest_kubernetes_discovery
-    @vector_config.stub :latest_kubernetes_discovery, File.join(@test_dir, 'kubernetes-discovery', '2025-01-01T00:00:00') do
+    @vector_config.stub :latest_kubernetes_discovery, k8s_discovery_dir do
       result = @vector_config.prepare_dir
 
       # Test actual outcomes
@@ -101,33 +112,32 @@ class VectorConfigTest < Minitest::Test
       assert result.start_with?(File.join(@vector_config_dir, 'new_'))
       assert File.directory?(result)
 
-      # Check symlinks are correctly created
-      assert File.symlink?(File.join(result, 'vector.yaml'))
+      # Check files are correctly created
+      assert File.exist?(File.join(result, 'vector.yaml'))
       assert File.symlink?(File.join(result, 'kubernetes-discovery'))
 
-      # Verify it uses the latest kubernetes discovery and vector.yaml
-      assert_equal File.join(@test_dir, 'kubernetes-discovery', '2025-01-01T00:00:00'),
+      # Verify it uses the latest kubernetes discovery
+      assert_equal k8s_discovery_dir,
                    File.readlink(File.join(result, 'kubernetes-discovery'))
-      assert_equal File.join(@test_dir, 'latest-valid-vector.yaml'),
-                   File.readlink(File.join(result, 'vector.yaml'))
+      # Verify vector.yaml content
+      assert_equal vector_content, File.read(File.join(result, 'vector.yaml'))
     end
   end
 
   def test_prepare_dir_uses_default_kubernetes_discovery_when_not_referenced
-    # Create latest-valid-vector.yaml without kubernetes_discovery_ reference
+    # Create latest-valid-upstream with vector.yaml without kubernetes_discovery_ reference
+    upstream_dir = File.join(@test_dir, 'vector-config', 'latest-valid-upstream')
+    FileUtils.mkdir_p(upstream_dir)
     vector_content = "sources:\n  test:\n    type: file"
-    vector_path = File.join(@test_dir, 'test.yaml')
-    File.write(vector_path, vector_content)
-    FileUtils.ln_s(vector_path, File.join(@test_dir, 'latest-valid-vector.yaml'))
+    File.write(File.join(upstream_dir, 'vector.yaml'), vector_content)
 
     result = @vector_config.prepare_dir
 
-    # Test actual outcome - should use 0-default when kubernetes_discovery not used and latest-valid-vector.yaml
+    # Test actual outcome - should use 0-default when kubernetes_discovery not used
     assert result
     assert_equal File.join(@test_dir, 'kubernetes-discovery', '0-default'),
                  File.readlink(File.join(result, 'kubernetes-discovery'))
-    assert_equal File.join(@test_dir, 'latest-valid-vector.yaml'),
-                  File.readlink(File.join(result, 'vector.yaml'))
+    assert_equal vector_content, File.read(File.join(result, 'vector.yaml'))
   end
 
   def test_validate_dir_returns_nil_on_success

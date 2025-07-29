@@ -18,4 +18,4 @@ export PROCFS_ROOT="/host/proc"
 export SYSFS_ROOT="/host/sys"
 
 echo "Starting Vector..."
-exec /usr/local/bin/vector --config /vector-config/current/vector.yaml --config /vector-config/current/kubernetes-discovery/\*.yaml
+exec /usr/local/bin/vector --config /vector-config/current/\*.yaml --config /vector-config/current/kubernetes-discovery/\*.yaml
