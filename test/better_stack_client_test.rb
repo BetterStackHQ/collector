@@ -34,6 +34,8 @@ class BetterStackClientTest < Minitest::Test
     ENV.delete('VECTOR_VERSION')
     ENV.delete('BEYLA_VERSION')
     ENV.delete('CLUSTER_AGENT_VERSION')
+    # Reset WebMock stubs
+    WebMock.reset!
   end
 
   def test_initialize_with_valid_secret
@@ -41,7 +43,7 @@ class BetterStackClientTest < Minitest::Test
     assert_instance_of BetterStackClient, client
   end
 
-  def test_initialize_without_secret
+  def test_initialize_exits_when_collector_secret_missing
     ENV.delete('COLLECTOR_SECRET')
     # Expect the process to exit with status 1
     assert_raises(SystemExit) do
@@ -51,13 +53,13 @@ class BetterStackClientTest < Minitest::Test
     end
   end
 
-  def test_ping_no_updates
+  def test_ping_sends_204_when_no_updates_available
     # Mock hostname method
     original_hostname = @client.method(:hostname)
     @client.define_singleton_method(:hostname) { "test-host" }
 
     # Use POST with body parameters
-    stub_request(:post, "https://test.betterstack.com/api/collector/ping")
+    stub = stub_request(:post, "https://test.betterstack.com/api/collector/ping")
       .with(
         body: hash_including({
           "collector_secret" => "test_secret",
@@ -71,17 +73,17 @@ class BetterStackClientTest < Minitest::Test
       )
       .to_return(status: 204, body: "")
 
-    output = capture_io do
-      @client.ping
-    end
+    # Test actual behavior - should make request and not crash
+    @client.ping
 
-    assert_match(/No updates available/, output.join)
+    # Verify the request was made with correct parameters
+    assert_requested(stub, times: 1)
 
     # Restore original method
     @client.define_singleton_method(:hostname, original_hostname)
   end
 
-  def test_ping_parameters
+  def test_ping_sends_all_required_parameters
     # Override environment variables for this test
     ENV['COLLECTOR_VERSION'] = "1.2.3"
     ENV['VECTOR_VERSION'] = "0.28.1"
@@ -130,7 +132,7 @@ class BetterStackClientTest < Minitest::Test
     @client.define_singleton_method(:hostname, original_hostname)
   end
 
-  def test_ping_new_version_available
+  def test_ping_calls_get_configuration_when_new_version_available
     # Mock hostname method
     original_hostname = @client.method(:hostname)
     @client.define_singleton_method(:hostname) { "test-host" }
@@ -142,7 +144,7 @@ class BetterStackClientTest < Minitest::Test
     }.to_json
 
     # Updated stub with body parameters
-    stub_request(:post, "https://test.betterstack.com/api/collector/ping")
+    stub = stub_request(:post, "https://test.betterstack.com/api/collector/ping")
       .with(
         body: hash_including({
           "collector_secret" => "test_secret",
@@ -156,20 +158,28 @@ class BetterStackClientTest < Minitest::Test
       )
       .to_return(status: 200, body: response_body)
 
-    # Stub the get_configuration method to avoid making real requests
-    @client.stub :get_configuration, nil do
-      output = capture_io do
-        @client.ping
-      end
+    # Track if get_configuration was called with correct version
+    get_configuration_called = false
+    get_configuration_version = nil
 
-      assert_match(/New version available: #{configuration_version}/, output.join)
+    # Stub the get_configuration method to track calls
+    @client.stub :get_configuration, lambda { |version|
+      get_configuration_called = true
+      get_configuration_version = version
+    } do
+      @client.ping
     end
+
+    # Test actual behavior - should call get_configuration with new version
+    assert get_configuration_called, "get_configuration should be called"
+    assert_equal configuration_version, get_configuration_version
+    assert_requested(stub, times: 1)
 
     # Restore original method
     @client.define_singleton_method(:hostname, original_hostname)
   end
 
-  def test_ping_with_error
+  def test_ping_writes_error_file_on_unexpected_response
     # Mock hostname method
     original_hostname = @client.method(:hostname)
     @client.define_singleton_method(:hostname) { "test-host" }
@@ -208,7 +218,7 @@ class BetterStackClientTest < Minitest::Test
     end
 
     # Updated stub with body parameters
-    stub_request(:post, "https://test.betterstack.com/api/collector/ping")
+    stub = stub_request(:post, "https://test.betterstack.com/api/collector/ping")
       .with(
         body: hash_including({
           "collector_secret" => "test_secret",
@@ -222,18 +232,19 @@ class BetterStackClientTest < Minitest::Test
       )
       .to_return(status: 500, body: { error: "Server error" }.to_json)
 
-    output = capture_io do
-      @client.ping
-    end
+    @client.ping
 
-    assert_match(/Unexpected response from ping endpoint/, output.join)
+    # Test actual behavior - should write error file
     assert File.exist?(File.join(@test_dir, 'errors.txt'))
+    error_content = File.read(File.join(@test_dir, 'errors.txt'))
+    assert error_content.include?("Ping failed: 500")
+    assert_requested(stub, times: 1)
 
     # Restore original method
     @client.define_singleton_method(:hostname, original_hostname)
   end
 
-  def test_ping_with_network_error
+  def test_ping_writes_error_file_on_network_error
 
     # Instead of raising an error directly, let's stub the method that handles the network error
     def @client.ping
@@ -242,12 +253,12 @@ class BetterStackClientTest < Minitest::Test
       return
     end
 
-    output = capture_io do
-      @client.ping
-    end
+    @client.ping
 
-    assert_match(/Network error: Network error/, output.join)
+    # Test actual behavior - should write error file
     assert File.exist?(File.join(@test_dir, 'errors.txt'))
+    error_content = File.read(File.join(@test_dir, 'errors.txt'))
+    assert error_content.include?("Network error")
 
     # Reset the method to not affect other tests
     class << @client
@@ -255,7 +266,7 @@ class BetterStackClientTest < Minitest::Test
     end
   end
 
-  def test_ping_with_401_unauthorized
+  def test_ping_exits_on_401_unauthorized
     # Mock hostname method
     original_hostname = @client.method(:hostname)
     @client.define_singleton_method(:hostname) { "test-host" }
@@ -275,7 +286,7 @@ class BetterStackClientTest < Minitest::Test
     @client.define_singleton_method(:hostname, original_hostname)
   end
 
-  def test_ping_with_403_forbidden
+  def test_ping_exits_on_403_forbidden
     # Mock hostname method
     original_hostname = @client.method(:hostname)
     @client.define_singleton_method(:hostname) { "test-host" }
@@ -295,7 +306,7 @@ class BetterStackClientTest < Minitest::Test
     @client.define_singleton_method(:hostname, original_hostname)
   end
 
-  def test_cluster_collector_with_401_unauthorized
+  def test_cluster_collector_exits_on_401_unauthorized
     # Don't force cluster collector mode
     ENV.delete('CLUSTER_COLLECTOR')
 
@@ -318,7 +329,7 @@ class BetterStackClientTest < Minitest::Test
     @client.define_singleton_method(:hostname, original_hostname)
   end
 
-  def test_cluster_collector_with_403_forbidden
+  def test_cluster_collector_exits_on_403_forbidden
     # Don't force cluster collector mode
     ENV.delete('CLUSTER_COLLECTOR')
 
@@ -345,7 +356,7 @@ class BetterStackClientTest < Minitest::Test
     new_version = "2023-01-01T00:00:00"
 
     # Updated stub with body parameters
-    stub_request(:post, "https://test.betterstack.com/api/collector/configuration")
+    stub = stub_request(:post, "https://test.betterstack.com/api/collector/configuration")
       .with(
         body: {
           "collector_secret" => "test_secret",
@@ -354,16 +365,31 @@ class BetterStackClientTest < Minitest::Test
       )
       .to_return(status: 200, body: { files: [] }.to_json)
 
-    # Test stub for process_configuration
-    def @client.process_configuration(new_version, code, body)
-      puts "Configuration processed for version #{new_version}"
+    # Track process_configuration calls
+    process_called = false
+    process_args = nil
+
+    # Capture method calls using a wrapper
+    original_method = @client.method(:process_configuration)
+    @client.define_singleton_method(:process_configuration) do |version, code, body|
+      process_called = true
+      process_args = [version, code, body]
+      original_method.call(version, code, body)
     end
 
-    output = capture_io do
+    @client.stub :process_configuration, lambda { |version, code, body|
+      process_called = true
+      process_args = [version, code, body]
+    } do
       @client.get_configuration(new_version)
-    end
 
-    assert_match(/Configuration processed for version #{new_version}/, output.join)
+      # Test actual behavior
+      assert process_called, "process_configuration should be called"
+      assert_equal new_version, process_args[0]
+      assert_equal "200", process_args[1]
+      assert_equal({ "files" => [] }, JSON.parse(process_args[2]))
+      assert_requested(stub, times: 1)
+    end
 
     # Reset the method to not affect other tests
     class << @client
@@ -371,23 +397,30 @@ class BetterStackClientTest < Minitest::Test
     end
   end
 
-  def test_process_configuration
+  def test_process_configuration_downloads_and_validates_files
     new_version = "2023-01-01T00:00:00"
     version_dir = File.join(@test_dir, 'versions', new_version)
     FileUtils.mkdir_p(version_dir)
 
-    # Mock necessary methods
-    def @client.validate_vector_config(version_dir)
-      puts "Configuration validated."
-      return true
+    # Track method calls
+    validate_called = false
+    promote_called = false
+    validate_path = nil
+    promote_path = nil
+
+    # Mock vector_config methods
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:validate_upstream_files) do |dir|
+      validate_called = true
+      validate_path = dir
+      nil # validation passes
     end
 
-    def @client.promote_version(new_version)
-      puts "Configuration validated. Updating symlink..."
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:promote_upstream_files) do |dir|
+      promote_called = true
+      promote_path = dir
     end
 
     def @client.download_file(url, path)
-      puts "Downloading #{File.basename(path)} to #{path}"
       FileUtils.mkdir_p(File.dirname(path))
       File.write(path, "test content")
       return true
@@ -402,38 +435,48 @@ class BetterStackClientTest < Minitest::Test
       ]
     }.to_json
 
-    output = capture_io do
-      @client.process_configuration(new_version, code, body)
-    end
+    @client.process_configuration(new_version, code, body)
 
-    assert_match(/Downloading configuration files for version #{new_version}/, output.join)
-    assert_match(/Downloading vector.yaml to #{version_dir}\/vector.yaml/, output.join)
-    assert_match(/Configuration validated/, output.join)
+    # Test actual behavior - files should be downloaded and validated
+    assert File.exist?(File.join(version_dir, "vector.yaml"))
+    assert File.exist?(File.join(version_dir, "databases.json"))
+    assert_equal "test content", File.read(File.join(version_dir, "vector.yaml"))
+    assert_equal "test content", File.read(File.join(version_dir, "databases.json"))
 
-    # Reset the methods to not affect other tests
+    # Validation and promotion should be called
+    assert validate_called, "validate_upstream_files should be called"
+    assert promote_called, "promote_upstream_files should be called"
+    assert_equal version_dir, validate_path
+    assert_equal version_dir, promote_path
+
+    # Reset the method to not affect other tests
     class << @client
-      remove_method :validate_vector_config
-      remove_method :promote_version
       remove_method :download_file
     end
   end
 
-  def test_process_configuration_with_invalid_vector_config
+  def test_process_configuration_writes_error_when_validation_fails
     new_version = "2023-01-01T00:00:00"
     version_dir = File.join(@test_dir, 'versions', new_version)
     FileUtils.mkdir_p(version_dir)
 
     # Mock necessary methods
     def @client.download_file(url, path)
-      puts "Downloading #{File.basename(path)} to #{path}"
       FileUtils.mkdir_p(File.dirname(path))
       File.write(path, "test content")
       return true
     end
 
-    def @client.validate_vector_config(version_dir)
-      puts "Error: Invalid vector config #{version_dir}/vector.yaml"
-      return false
+    # Track promote calls
+    promote_called = false
+
+    # Mock vector_config validation to fail
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:validate_upstream_file) do |path|
+      "Validation failed for vector config"
+    end
+
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:promote_upstream_file) do |path|
+      promote_called = true
     end
 
     # Sample response data
@@ -444,43 +487,13 @@ class BetterStackClientTest < Minitest::Test
       ]
     }.to_json
 
-    output = capture_io do
-      @client.process_configuration(new_version, code, body)
-    end
+    @client.process_configuration(new_version, code, body)
 
-    assert_match(/Error: Invalid vector config/, output.join)
-
-    # Reset the methods to not affect other tests
-    class << @client
-      remove_method :validate_vector_config
-      remove_method :download_file
-    end
-  end
-
-  def test_process_configuration_with_download_failure
-    new_version = "2023-01-01T00:00:00"
-    version_dir = File.join(@test_dir, 'versions', new_version)
-    FileUtils.mkdir_p(version_dir)
-
-    # Mock necessary methods
-    def @client.download_file(url, path)
-      puts "Downloading #{File.basename(path)} to #{path}"
-      return false # Simulate download failure
-    end
-
-    # Sample response data
-    code = "200"
-    body = {
-      files: [
-        { path: "/collector/file/vector.yaml", name: "vector.yaml" }
-      ]
-    }.to_json
-
-    output = capture_io do
-      @client.process_configuration(new_version, code, body)
-    end
-
-    assert_match(/Aborting update due to download failure/, output.join)
+    # Test actual behavior - should not promote invalid config
+    assert !promote_called, "promote_upstream_file should not be called for invalid config"
+    assert File.exist?(File.join(@test_dir, 'errors.txt'))
+    error_content = File.read(File.join(@test_dir, 'errors.txt'))
+    assert error_content.include?("Validation failed for vector config")
 
     # Reset the method to not affect other tests
     class << @client
@@ -488,47 +501,67 @@ class BetterStackClientTest < Minitest::Test
     end
   end
 
-  def test_process_configuration_with_error_response
+  def test_process_configuration_aborts_when_download_fails
+    new_version = "2023-01-01T00:00:00"
+    version_dir = File.join(@test_dir, 'versions', new_version)
+    FileUtils.mkdir_p(version_dir)
+
+    # Track method calls
+    validate_called = false
+    promote_called = false
+
+    # Mock necessary methods
+    def @client.download_file(url, path)
+      return false # Simulate download failure
+    end
+
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:validate_upstream_file) do |path|
+      validate_called = true
+      nil
+    end
+
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:promote_upstream_file) do |path|
+      promote_called = true
+    end
+
+    # Sample response data
+    code = "200"
+    body = {
+      files: [
+        { path: "/collector/file/vector.yaml", name: "vector.yaml" }
+      ]
+    }.to_json
+
+    @client.process_configuration(new_version, code, body)
+
+    # Test actual behavior - should not validate or promote after download failure
+    assert !validate_called, "validate_upstream_file should not be called after download failure"
+    assert !promote_called, "promote_upstream_file should not be called after download failure"
+    assert !File.exist?(File.join(version_dir, "vector.yaml"))
+
+    # Reset the method to not affect other tests
+    class << @client
+      remove_method :download_file
+    end
+  end
+
+  def test_process_configuration_writes_error_on_non_200_response
     new_version = "2023-01-01T00:00:00"
 
     code = "404"
     body = { status: "version_not_found" }.to_json
 
-    output = capture_io do
-      @client.process_configuration(new_version, code, body)
-    end
+    @client.process_configuration(new_version, code, body)
 
-    assert_match(/Error: Failed to fetch configuration for version #{new_version}. Response code: #{code}/, output.join)
+    # Test actual behavior - should write error file
+    assert File.exist?(File.join(@test_dir, 'errors.txt'))
+    error_content = File.read(File.join(@test_dir, 'errors.txt'))
+    assert error_content.include?("Failed to fetch configuration")
+    assert error_content.include?("404")
   end
 
-  def test_promote_version
-    new_version = "2023-01-01T00:00:00"
-    version_dir = File.join(@test_dir, 'versions', new_version)
-    FileUtils.mkdir_p(version_dir)
 
-    # Create an error file to ensure it gets removed
-    File.write(File.join(@test_dir, 'errors.txt'), "Test error")
-
-    # Mock the update_vector_symlink method
-    def @client.update_vector_symlink(version_dir)
-      puts "Updating symlink for #{version_dir}"
-    end
-
-    output = capture_io do
-      @client.promote_version(new_version)
-    end
-
-    assert_match(/Updating symlink/, output.join)
-    assert_match(/Successfully updated to version #{new_version}/, output.join)
-    assert !File.exist?(File.join(@test_dir, 'errors.txt')), "errors.txt should be removed"
-
-    # Reset the method to not affect other tests
-    class << @client
-      remove_method :update_vector_symlink
-    end
-  end
-
-  def test_cluster_collector
+  def test_cluster_collector_returns_false_on_409_response
     # Mock hostname method
     original_hostname = @client.method(:hostname)
     @client.define_singleton_method(:hostname) { "test-host" }
@@ -551,7 +584,7 @@ class BetterStackClientTest < Minitest::Test
     @client.define_singleton_method(:hostname, original_hostname)
   end
 
-  def test_cluster_collector_env_override
+  def test_cluster_collector_returns_true_when_env_override_set
     # Set environment variable to force cluster collector mode
     ENV['CLUSTER_COLLECTOR'] = 'true'
 
