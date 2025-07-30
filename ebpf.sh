@@ -44,25 +44,25 @@ fi
 # Check for BPF filesystem
 if [ ! -d "/sys/fs/bpf" ]; then
     HAS_EBPF=false
-    ISSUES+=("BPF filesystem is not mounted at /sys/fs/bpf")
+    ISSUES+=("BPF filesystem is not available")
 fi
 
 # Check for BTF support
 if [ ! -f "/sys/kernel/btf/vmlinux" ] && [ ! -f "/boot/vmlinux-$KERNEL_VERSION" ]; then
     HAS_EBPF=false
-    ISSUES+=("BTF (BPF Type Format) support is required for eBPF")
+    ISSUES+=("BTF support is not available")
 fi
 
 # Check for CONFIG_BPF_SYSCALL
 if [ -f "/proc/config.gz" ]; then
     if ! zcat /proc/config.gz 2>/dev/null | grep -q "CONFIG_BPF_SYSCALL=y"; then
         HAS_EBPF=false
-        ISSUES+=("CONFIG_BPF_SYSCALL must be enabled in kernel")
+        ISSUES+=("BPF syscall is not enabled in kernel configuration")
     fi
 elif [ -f "/boot/config-$KERNEL_VERSION" ]; then
     if ! grep -q "CONFIG_BPF_SYSCALL=y" "/boot/config-$KERNEL_VERSION" 2>/dev/null; then
         HAS_EBPF=false
-        ISSUES+=("CONFIG_BPF_SYSCALL must be enabled in kernel")
+        ISSUES+=("BPF syscall is not enabled in kernel configuration")
     fi
 fi
 
@@ -70,7 +70,7 @@ fi
 if [ -f "/proc/sys/net/core/bpf_jit_enable" ]; then
     JIT_ENABLED=$(cat /proc/sys/net/core/bpf_jit_enable)
     if [ "$JIT_ENABLED" = "0" ]; then
-        ISSUES+=("BPF JIT compiler is disabled - consider enabling with: sysctl net.core.bpf_jit_enable=1")
+        ISSUES+=("BPF JIT compiler is disabled")
     fi
 fi
 
@@ -100,7 +100,13 @@ if [ "$HAS_EBPF" = false ]; then
     echo -e "${BOLD}System Information:${NC}"
     echo "  Kernel version: $KERNEL_VERSION"
     echo "  Architecture: $(uname -m)"
-    echo "  Distribution: $(cat /etc/os-release 2>/dev/null | grep "^PRETTY_NAME" | cut -d= -f2 | tr -d '"' || echo "Unknown")"
+    if [ -f /etc/os-release ]; then
+        echo "  Distribution: $(grep "^PRETTY_NAME" /etc/os-release | cut -d= -f2 | tr -d '"')"
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        echo "  Distribution: macOS $(sw_vers -productVersion 2>/dev/null || echo "")"
+    else
+        echo "  Distribution: Unknown"
+    fi
 fi
 
 exit 0
