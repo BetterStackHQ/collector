@@ -10,6 +10,7 @@ class VectorConfig
     sources:
       kubernetes_discovery_static_metrics:
         type: static_metrics
+        namespace: ''  # Empty namespace to avoid "static_" prefix
         metrics:
           - name: collector_kubernetes_discovered_pods
             kind: absolute
