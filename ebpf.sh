@@ -2,12 +2,14 @@
 
 # eBPF Compatibility Check Script for Better Stack Collector
 # This script checks if your system supports eBPF features required by Beyla
+# Specifically: BTF + CO-RE support and eBPF ring buffer (BPF_MAP_TYPE_RINGBUF)
 
 set -e
 
 # Color codes for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 BOLD='\033[1m'
 
@@ -33,12 +35,16 @@ check_kernel_version() {
 HAS_EBPF=true
 ISSUES=()
 
-# Check kernel version (5.14+ recommended, 5.8+ minimum)
+# Check kernel version (5.14+ required for reliable operation)
+if ! check_kernel_version 5 14; then
+    # Older kernels may work if distro has backported features, so don't set HAS_EBPF=false yet
+    ISSUES+=("Kernel version is below 5.14 - eBPF features may not work reliably without backports")
+fi
+
+# Check for ring buffer support (5.8+ minimum)
 if ! check_kernel_version 5 8; then
     HAS_EBPF=false
-    ISSUES+=("Kernel version must be at least 5.8 for eBPF support")
-elif ! check_kernel_version 5 14; then
-    ISSUES+=("Kernel version is below recommended 5.14 - some eBPF features may be limited")
+    ISSUES+=("Kernel version must be at least 5.8 for eBPF ring buffer support")
 fi
 
 # Check for BPF filesystem
@@ -86,12 +92,69 @@ else
 fi
 
 # Display issues if any
-if [ ${#ISSUES[@]} -gt 0 ] && [ "$HAS_EBPF" = false ]; then
+if [ "$HAS_EBPF" = false ]; then
     echo
-    echo -e "${BOLD}Issues found:${NC}"
-    for issue in "${ISSUES[@]}"; do
-        echo "  • $issue"
-    done
+    echo -e "${BOLD}Details:${NC}"
+    
+    # Kernel version
+    if ! check_kernel_version 5 14; then
+        echo -e "  ${YELLOW}⚠${NC} Kernel version: $KERNEL_VERSION (5.14+ required, may work with backports)"
+    else
+        echo -e "  ${GREEN}✓${NC} Kernel version: $KERNEL_VERSION"
+    fi
+    
+    # Ring buffer support (5.8+ has BPF_MAP_TYPE_RINGBUF)
+    if check_kernel_version 5 8; then
+        echo -e "  ${GREEN}✓${NC} eBPF ring buffer: supported"
+    else
+        echo -e "  ${RED}✗${NC} eBPF ring buffer: not supported (requires 5.8+)"
+    fi
+    
+    # BPF filesystem
+    if [ -d "/sys/fs/bpf" ]; then
+        echo -e "  ${GREEN}✓${NC} BPF filesystem: mounted"
+    else
+        echo -e "  ${RED}✗${NC} BPF filesystem: not available"
+    fi
+    
+    # BTF support
+    if [ -f "/sys/kernel/btf/vmlinux" ] || [ -f "/boot/vmlinux-$KERNEL_VERSION" ]; then
+        echo -e "  ${GREEN}✓${NC} BTF + CO-RE support: available"
+    else
+        echo -e "  ${RED}✗${NC} BTF + CO-RE support: not available"
+    fi
+    
+    # BPF syscall
+    BPF_SYSCALL_FOUND=false
+    if [ -f "/proc/config.gz" ]; then
+        if zcat /proc/config.gz 2>/dev/null | grep -q "CONFIG_BPF_SYSCALL=y"; then
+            BPF_SYSCALL_FOUND=true
+        fi
+    elif [ -f "/boot/config-$KERNEL_VERSION" ]; then
+        if grep -q "CONFIG_BPF_SYSCALL=y" "/boot/config-$KERNEL_VERSION" 2>/dev/null; then
+            BPF_SYSCALL_FOUND=true
+        fi
+    fi
+    
+    if [ "$BPF_SYSCALL_FOUND" = true ]; then
+        echo -e "  ${GREEN}✓${NC} BPF syscall: enabled"
+    else
+        if [ -f "/proc/config.gz" ] || [ -f "/boot/config-$KERNEL_VERSION" ]; then
+            echo -e "  ${RED}✗${NC} BPF syscall: not enabled"
+        else
+            echo -e "  ${YELLOW}⚠${NC} BPF syscall: unable to verify"
+        fi
+    fi
+    
+    # BPF JIT
+    if [ -f "/proc/sys/net/core/bpf_jit_enable" ]; then
+        JIT_ENABLED=$(cat /proc/sys/net/core/bpf_jit_enable)
+        if [ "$JIT_ENABLED" != "0" ]; then
+            echo -e "  ${GREEN}✓${NC} BPF JIT compiler: enabled"
+        else
+            echo -e "  ${YELLOW}⚠${NC} BPF JIT compiler: disabled (performance impact)"
+        fi
+    fi
 fi
 
 # Display system information only on failure
