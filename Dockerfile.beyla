@@ -1,0 +1,37 @@
+# Build dockerprobe
+FROM golang:1.24.4-alpine3.22 AS dockerprobe-builder
+WORKDIR /src
+COPY dockerprobe/go.mod dockerprobe/go.sum ./
+RUN go mod download
+COPY dockerprobe/main.go ./
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags='-s -w' -o /bin/dockerprobe .
+
+# Get Beyla files from official image
+FROM grafana/beyla:2.2.4 AS beyla-source
+
+# Final stage - Alpine based
+FROM alpine:3.22
+
+# Install supervisor and ca-certificates
+RUN apk add --no-cache supervisor ca-certificates
+
+# Copy Beyla files from official image
+COPY --from=beyla-source /beyla /usr/local/bin/beyla
+COPY --from=beyla-source /LICENSE /LICENSE
+COPY --from=beyla-source /NOTICE /NOTICE
+COPY --from=beyla-source /third_party_licenses.csv /third_party_licenses.csv
+
+# Copy dockerprobe binary
+COPY --from=dockerprobe-builder /bin/dockerprobe /usr/local/bin/dockerprobe
+
+# Create necessary directories
+RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /enrichment
+
+# Copy supervisor configuration
+COPY beyla/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+# Set permissions
+RUN chmod +x /usr/local/bin/beyla /usr/local/bin/dockerprobe
+
+# Default command
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

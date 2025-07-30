@@ -21,12 +21,17 @@ services:
       - /var/log:/host/var/log:ro
       # Collect Docker container logs
       - /var/lib/docker/containers:/host/var/lib/docker/containers:ro
+      # Shared volume for Docker enrichment data
+      - docker-enrichment:/enrichment:ro
     ports:
       # Bind to localhost only for security - Beyla will connect via host network
       - "127.0.0.1:34320:34320"
 
   beyla:
-    image: grafana/beyla:2.2.4
+    build:
+      context: .
+      dockerfile: Dockerfile.beyla
+    image: betterstack/beyla-enriched:latest
     container_name: better-stack-beyla
     restart: always
     privileged: true
@@ -47,5 +52,13 @@ services:
       - /sys/kernel/tracing:/sys/kernel/tracing:rw
       - /sys/kernel/debug:/sys/kernel/debug:rw
       - /sys/kernel/security:/sys/kernel/security:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      # Docker socket for dockerprobe
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Shared volume for Docker enrichment data
+      - docker-enrichment:/enrichment:rw
     depends_on:
       - collector
+
+volumes:
+  docker-enrichment:
