@@ -29,16 +29,26 @@ print_blue() {
     echo "${BOLD}${BLUE}$*${RESET}"
 }
 
+# Default action is install
+ACTION="${ACTION:-install}"
+
+# Validate ACTION parameter
+if [[ "$ACTION" != "install" && "$ACTION" != "uninstall" && "$ACTION" != "force_upgrade" ]]; then
+    print_red "Error: Invalid ACTION parameter: $ACTION"
+    echo "Valid actions: install, uninstall, force_upgrade"
+    exit 1
+fi
+
 # Check required environment variables
 if [[ -z "${MANAGER_NODE:-}" ]]; then
     print_red "Error: MANAGER_NODE environment variable is required"
-    echo "Usage: MANAGER_NODE=user@manager-node COLLECTOR_SECRET=secret [SSH_CMD='tsh ssh'] $0"
+    echo "Usage: MANAGER_NODE=user@manager-node COLLECTOR_SECRET=secret [ACTION=install|uninstall|force_upgrade] [SSH_CMD='tsh ssh'] $0"
     exit 1
 fi
 
 if [[ -z "${COLLECTOR_SECRET:-}" ]]; then
     print_red "Error: COLLECTOR_SECRET environment variable is required"
-    echo "Usage: MANAGER_NODE=user@manager-node COLLECTOR_SECRET=secret [SSH_CMD='tsh ssh'] $0"
+    echo "Usage: MANAGER_NODE=user@manager-node COLLECTOR_SECRET=secret [ACTION=install|uninstall|force_upgrade] [SSH_CMD='tsh ssh'] $0"
     exit 1
 fi
 
@@ -46,6 +56,7 @@ fi
 SSH_CMD="${SSH_CMD:-ssh}"
 
 print_blue "Connecting to swarm manager: $MANAGER_NODE"
+[[ "$ACTION" != "install" ]] && print_blue "Action: $ACTION"
 if [[ "$SSH_CMD" != "ssh" ]]; then
     echo "Using SSH command: $SSH_CMD"
 fi
@@ -88,7 +99,18 @@ echo
 CURRENT=0
 for NODE in $NODES; do
     ((CURRENT++))
-    print_blue "Deploying to node: $NODE ($CURRENT/$NODE_COUNT)"
+    
+    case "$ACTION" in
+        "install")
+            print_blue "Installing on node: $NODE ($CURRENT/$NODE_COUNT)"
+            ;;
+        "uninstall")
+            print_blue "Uninstalling from node: $NODE ($CURRENT/$NODE_COUNT)"
+            ;;
+        "force_upgrade")
+            print_blue "Force upgrading on node: $NODE ($CURRENT/$NODE_COUNT)"
+            ;;
+    esac
 
     # Extract user from MANAGER_NODE if present
     if [[ "$MANAGER_NODE" == *"@"* ]]; then
@@ -98,23 +120,76 @@ for NODE in $NODES; do
         NODE_TARGET="$NODE"
     fi
 
-    if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
-        set -e
-        echo "Running: Better Stack collector install..."
-        curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/install.sh | \\
-          COLLECTOR_SECRET="$COLLECTOR_SECRET" bash
+    case "$ACTION" in
+        "install")
+            if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
+                set -e
+                echo "Running: Better Stack collector install..."
+                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/install.sh | \\
+                  COLLECTOR_SECRET="$COLLECTOR_SECRET" bash
 
-        echo "Checking deployment status..."
-        docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"
+                echo "Checking deployment status..."
+                docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"
 EOF
-    then
-        print_green "✓ Better Stack collector deployed to $NODE"
-    else
-        print_red "✗ Failed to deploy to $NODE"
-        exit 1
-    fi
+            then
+                print_green "✓ Better Stack collector installed on $NODE"
+            else
+                print_red "✗ Failed to install on $NODE"
+                exit 1
+            fi
+            ;;
+            
+        "uninstall")
+            if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
+                set -e
+                echo "Stopping and removing Better Stack containers..."
+                docker stop better-stack-collector better-stack-beyla 2>/dev/null || true
+                docker rm better-stack-collector better-stack-beyla 2>/dev/null || true
+                echo "Containers removed."
+EOF
+            then
+                print_green "✓ Better Stack collector uninstalled from $NODE"
+            else
+                print_red "✗ Failed to uninstall from $NODE"
+                exit 1
+            fi
+            ;;
+            
+        "force_upgrade")
+            if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
+                set -e
+                echo "Stopping and removing Better Stack containers..."
+                docker stop better-stack-collector better-stack-beyla 2>/dev/null || true
+                docker rm better-stack-collector better-stack-beyla 2>/dev/null || true
+                echo "Containers removed. Waiting 3 seconds..."
+                sleep 3
+                echo "Installing Better Stack collector..."
+                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/install.sh | \\
+                  COLLECTOR_SECRET="$COLLECTOR_SECRET" bash
+
+                echo "Checking deployment status..."
+                docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"
+EOF
+            then
+                print_green "✓ Better Stack collector force upgraded on $NODE"
+            else
+                print_red "✗ Failed to force upgrade on $NODE"
+                exit 1
+            fi
+            ;;
+    esac
     echo
 
 done
 
-print_green "✓ Better Stack collector successfully deployed to all swarm nodes!"
+case "$ACTION" in
+    "install")
+        print_green "✓ Better Stack collector successfully installed on all swarm nodes!"
+        ;;
+    "uninstall")
+        print_green "✓ Better Stack collector successfully uninstalled from all swarm nodes!"
+        ;;
+    "force_upgrade")
+        print_green "✓ Better Stack collector successfully force upgraded on all swarm nodes!"
+        ;;
+esac
