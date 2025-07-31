@@ -26,9 +26,8 @@ const (
 )
 
 type config struct {
-	outputPath          string
-	containerOutputPath string
-	interval            time.Duration
+	outputPath string
+	interval   time.Duration
 }
 
 type containerInfo struct {
@@ -71,11 +70,6 @@ func loadConfig() config {
 		outputPath = defaultOutputPath
 	}
 
-	containerOutputPath := strings.Replace(outputPath, ".csv", "-by-container.csv", 1)
-	if containerOutputPath == outputPath {
-		containerOutputPath = strings.TrimSuffix(outputPath, ".csv") + "-by-container.csv"
-	}
-
 	interval := defaultInterval
 	if intervalStr := os.Getenv("DOCKERPROBE_INTERVAL"); intervalStr != "" {
 		parsed, err := strconv.Atoi(intervalStr)
@@ -87,9 +81,8 @@ func loadConfig() config {
 	}
 
 	return config{
-		outputPath:          outputPath,
-		containerOutputPath: containerOutputPath,
-		interval:            time.Duration(interval) * time.Second,
+		outputPath: outputPath,
+		interval:   time.Duration(interval) * time.Second,
 	}
 }
 
@@ -126,10 +119,9 @@ func (pm *pidMapper) updateMappings() error {
 	}
 
 	pidMappings := make(map[string]containerInfo)
-	containerMappings := make(map[string]containerInfo)
 
 	for _, cnt := range containers {
-		if err := pm.processContainer(ctx, cnt, pidMappings, containerMappings); err != nil {
+		if err := pm.processContainer(ctx, cnt, pidMappings); err != nil {
 			log.Printf("Failed to process container %s: %v", cnt.ID[:shortContainerIDLen], err)
 			continue
 		}
@@ -137,10 +129,6 @@ func (pm *pidMapper) updateMappings() error {
 
 	if err := pm.writePIDMappings(pidMappings); err != nil {
 		return fmt.Errorf("failed to write PID mappings: %w", err)
-	}
-
-	if err := pm.writeContainerMappings(containerMappings); err != nil {
-		return fmt.Errorf("failed to write container mappings: %w", err)
 	}
 
 	return nil
@@ -156,7 +144,7 @@ func (pm *pidMapper) listRunningContainers(ctx context.Context) ([]types.Contain
 	return containers, nil
 }
 
-func (pm *pidMapper) processContainer(ctx context.Context, cnt types.Container, pidMappings, containerMappings map[string]containerInfo) error {
+func (pm *pidMapper) processContainer(ctx context.Context, cnt types.Container, pidMappings map[string]containerInfo) error {
 	inspect, err := pm.client.ContainerInspect(ctx, cnt.ID)
 	if err != nil {
 		return err
@@ -171,8 +159,6 @@ func (pm *pidMapper) processContainer(ctx context.Context, cnt types.Container, 
 		id:    cnt.ID[:shortContainerIDLen],
 		image: cnt.Image,
 	}
-
-	containerMappings[info.id] = info
 
 	pids := getProcessDescendants(inspect.State.Pid)
 	for _, pid := range pids {
@@ -280,19 +266,6 @@ func (pm *pidMapper) writePIDMappings(mappings map[string]containerInfo) error {
 				}
 			}
 			log.Printf("Updated PID mappings file with %d entries", len(mappings))
-			return nil
-		})
-}
-
-func (pm *pidMapper) writeContainerMappings(mappings map[string]containerInfo) error {
-	return writeCSVFile(pm.config.containerOutputPath, []string{"container_id", "container_name", "image_name"},
-		func(w *csv.Writer) error {
-			for _, info := range mappings {
-				if err := w.Write([]string{info.id, info.name, info.image}); err != nil {
-					return fmt.Errorf("failed to write row: %w", err)
-				}
-			}
-			log.Printf("Updated container mappings file with %d containers", len(mappings))
 			return nil
 		})
 }
