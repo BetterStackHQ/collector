@@ -6,6 +6,7 @@
 // 1020,your-container-replica-name-1,0dbc098bc64d,your-repository/your-image:latest
 //
 // This file is shared from the Beyla container to the Collector container via the docker-metadata volume mounted at /enrichment.
+// Vector uses this file to enrich logs, metrics, and traces with container metadata.
 package main
 
 import (

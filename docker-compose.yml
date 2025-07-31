@@ -21,7 +21,8 @@ services:
       - /var/log:/host/var/log:ro
       # Collect Docker container logs
       - /var/lib/docker/containers:/host/var/lib/docker/containers:ro
-      # Shared volume for Docker enrichment data
+      # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this volume
+      # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
       - docker-metadata:/enrichment:ro
     ports:
       # Bind to localhost only for security - Beyla will connect via host network
@@ -54,7 +55,8 @@ services:
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
       # Docker socket for dockerprobe
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Shared volume for Docker enrichment data
+      # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this volume
+      # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
       - docker-metadata:/enrichment:rw
     depends_on:
       - collector
