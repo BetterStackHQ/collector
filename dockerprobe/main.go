@@ -18,11 +18,11 @@ import (
 )
 
 const (
-	defaultOutputPath    = "/enrichment/docker-mappings.csv"
-	defaultInterval      = 30
-	defaultTimeout       = 30 * time.Second
-	debugLogLimit        = 5
-	shortContainerIDLen  = 12
+	defaultOutputPath   = "/enrichment/docker-mappings.csv"
+	defaultInterval     = 30
+	defaultTimeout      = 30 * time.Second
+	debugLogLimit       = 5
+	shortContainerIDLen = 12
 )
 
 type config struct {
@@ -46,7 +46,7 @@ func main() {
 	log.Println("Starting dockerprobe...")
 
 	cfg := loadConfig()
-	
+
 	if err := ensureOutputDirectory(cfg.outputPath); err != nil {
 		log.Fatalf("Failed to create output directory: %v", err)
 	}
@@ -229,7 +229,7 @@ func findChildProcesses(parentPid int) []int {
 	var children []int
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry)
-		if err != nil || pid <= 0 {
+		if err != nil {
 			continue
 		}
 
@@ -272,7 +272,7 @@ func getParentPID(pid int) (int, error) {
 }
 
 func (pm *pidMapper) writePIDMappings(mappings map[string]containerInfo) error {
-	return writeCSVFile(pm.config.outputPath, []string{"pid", "container_name", "container_id", "image_name"}, 
+	return writeCSVFile(pm.config.outputPath, []string{"pid", "container_name", "container_id", "image_name"},
 		func(w *csv.Writer) error {
 			for pid, info := range mappings {
 				if err := w.Write([]string{pid, info.name, info.id, info.image}); err != nil {
@@ -285,7 +285,7 @@ func (pm *pidMapper) writePIDMappings(mappings map[string]containerInfo) error {
 }
 
 func (pm *pidMapper) writeContainerMappings(mappings map[string]containerInfo) error {
-	return writeCSVFile(pm.config.containerOutputPath, []string{"container_id", "container_name", "image_name"}, 
+	return writeCSVFile(pm.config.containerOutputPath, []string{"container_id", "container_name", "image_name"},
 		func(w *csv.Writer) error {
 			for _, info := range mappings {
 				if err := w.Write([]string{info.id, info.name, info.image}); err != nil {
@@ -299,12 +299,12 @@ func (pm *pidMapper) writeContainerMappings(mappings map[string]containerInfo) e
 
 func writeCSVFile(path string, headers []string, writeRows func(*csv.Writer) error) error {
 	tmpPath := path + ".tmp"
-	
+
 	file, err := os.Create(tmpPath)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
-	
+
 	success := false
 	defer func() {
 		file.Close()
@@ -314,7 +314,7 @@ func writeCSVFile(path string, headers []string, writeRows func(*csv.Writer) err
 	}()
 
 	writer := csv.NewWriter(file)
-	
+
 	if err := writer.Write(headers); err != nil {
 		return fmt.Errorf("failed to write header: %w", err)
 	}
