@@ -22,7 +22,7 @@ services:
       # Collect Docker container logs
       - /var/lib/docker/containers:/host/var/lib/docker/containers:ro
       # Shared volume for Docker enrichment data
-      - docker-enrichment:/enrichment:ro
+      - docker-metadata:/enrichment:ro
     ports:
       # Bind to localhost only for security - Beyla will connect via host network
       - "127.0.0.1:34320:34320"
@@ -56,9 +56,9 @@ services:
       # Docker socket for dockerprobe
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # Shared volume for Docker enrichment data
-      - docker-enrichment:/enrichment:rw
+      - docker-metadata:/enrichment:rw
     depends_on:
       - collector
 
 volumes:
-  docker-enrichment:
+  docker-metadata:
