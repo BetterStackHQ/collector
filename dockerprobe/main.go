@@ -27,8 +27,8 @@ import (
 
 const (
 	defaultOutputPath   = "/enrichment/docker-mappings.csv"
-	defaultInterval     = 30
-	defaultTimeout      = 30 * time.Second
+	defaultInterval     = 15
+	defaultTimeout      = 15 * time.Second
 	debugLogLimit       = 5
 	shortContainerIDLen = 12
 )
