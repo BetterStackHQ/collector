@@ -33,5 +33,8 @@ COPY beyla/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 # Set permissions
 RUN chmod +x /usr/local/bin/beyla /usr/local/bin/dockerprobe
 
+# Copy Beyla configuration
+COPY beyla.yaml /etc/beyla/beyla.yaml
+
 # Default command
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
