@@ -37,7 +37,7 @@ fi
 check_kernel_version() {
     local min_major=$1
     local min_minor=$2
-    
+
     if [ "$KERNEL_MAJOR" -gt "$min_major" ] || \
        ([ "$KERNEL_MAJOR" -eq "$min_major" ] && [ "$KERNEL_MINOR" -ge "$min_minor" ]); then
         return 0
@@ -126,18 +126,28 @@ if [ -f "/proc/sys/net/core/bpf_jit_enable" ]; then
     fi
 fi
 
+json_bool() {
+    local value="$1"
+    if [[ "$value" = true ]]; then
+        echo "true"
+    elif [[ "$value" = false ]]; then
+        echo "false"
+    else
+        echo "null"
+    fi
+}
+
 # Output results
 if [ "$JSON_OUTPUT" = true ]; then
-    # JSON output
     cat <<EOF
 {
-  "ebpf_supported": $([[ "$HAS_EBPF" = true ]] && echo "true" || echo "false"),
+  "ebpf_supported": $(json_bool "$HAS_EBPF"),
   "kernel_version": "$KERNEL_VERSION",
-  "ring_buffer_supported": $([[ "$RING_BUFFER_SUPPORTED" = true ]] && echo "true" || echo "false"),
-  "bpf_filesystem_mounted": $([[ "$BPF_FILESYSTEM_MOUNTED" = true ]] && echo "true" || echo "false"),
-  "btf_support_available": $([[ "$BTF_SUPPORT_AVAILABLE" = true ]] && echo "true" || echo "false"),
-  "bpf_syscall_enabled": $([[ "$BPF_SYSCALL_ENABLED" = true ]] && echo "true" || ([[ "$BPF_SYSCALL_ENABLED" = false ]] && echo "false" || echo "null")),
-  "bpf_jit_enabled": $([[ "$BPF_JIT_ENABLED" = true ]] && echo "true" || ([[ "$BPF_JIT_ENABLED" = false ]] && echo "false" || echo "null")),
+  "ring_buffer_supported": $(json_bool "$RING_BUFFER_SUPPORTED"),
+  "bpf_filesystem_mounted": $(json_bool "$BPF_FILESYSTEM_MOUNTED"),
+  "btf_support_available": $(json_bool "$BTF_SUPPORT_AVAILABLE"),
+  "bpf_syscall_enabled": $(json_bool "$BPF_SYSCALL_ENABLED"),
+  "bpf_jit_enabled": $(json_bool "$BPF_JIT_ENABLED"),
   "architecture": "$ARCHITECTURE",
   "distribution": "$DISTRIBUTION"
 }

@@ -124,7 +124,7 @@ class EbpfCompatibilityCheckerTest < Minitest::Test
   def test_system_information_returns_nil_when_no_data
     # Create an instance with a custom data value
     checker = EbpfCompatibilityChecker.new(@temp_dir)
-    checker.instance_variable_set(:@data, nil)
+    checker.instance_variable_set(:@system_information, nil)
 
     assert_nil checker.system_information
   end
@@ -445,15 +445,6 @@ EOF
       #!/bin/bash
       echo "#{error_message}" >&2
       exit #{exit_code}
-    SCRIPT
-    File.chmod(0755, @ebpf_script_path)
-  end
-
-  def create_hanging_script(sleep_duration)
-    File.write(@ebpf_script_path, <<~SCRIPT)
-      #!/bin/bash
-      sleep #{sleep_duration}
-      echo '{"ebpf_supported": true}'
     SCRIPT
     File.chmod(0755, @ebpf_script_path)
   end
