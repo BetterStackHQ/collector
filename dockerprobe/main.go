@@ -1,3 +1,11 @@
+// Produces a CSV file associating process IDs to container IDs and names.
+// This CSV file is formatted as:
+//
+// pid,container_name,container_id,image_name
+// 1115,better-stack-collector,59e2ea91d8af,betterstack/collector:latest
+// 1020,your-container-replica-name-1,0dbc098bc64d,your-repository/your-image:latest
+//
+// This file is shared from the Beyla container to the Collector container via the docker-metadata volume mounted at /enrichment.
 package main
 
 import (
