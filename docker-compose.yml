@@ -31,7 +31,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.beyla
-    image: betterstack/beyla-enriched:latest
+    image: betterstack/collector-beyla:latest
     container_name: better-stack-beyla
     restart: always
     privileged: true
