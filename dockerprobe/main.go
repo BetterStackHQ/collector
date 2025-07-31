@@ -27,10 +27,10 @@ import (
 
 const (
 	defaultOutputPath   = "/enrichment/docker-mappings.csv"
-	defaultInterval     = 15
-	defaultTimeout      = 15 * time.Second
+	defaultInterval     = 15 // seconds; in line with default tickrate of Beyla collection
+	defaultTimeout      = 15 // seconds
 	debugLogLimit       = 5
-	shortContainerIDLen = 12
+	shortContainerIDLen = 12 // length of the short container ID (e.g. 0dbc098bc64d)
 )
 
 type config struct {
@@ -110,7 +110,7 @@ func (pm *pidMapper) run() {
 	ticker := time.NewTicker(pm.config.interval)
 	defer ticker.Stop()
 
-	for range ticker.C {
+	for range ticker.C { // ticker.C is a channel that emits a value every time the interval elapses
 		if err := pm.updateMappings(); err != nil {
 			log.Printf("Error updating mappings: %v", err)
 		}
@@ -118,7 +118,7 @@ func (pm *pidMapper) run() {
 }
 
 func (pm *pidMapper) updateMappings() error {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout*time.Second)
 	defer cancel()
 
 	containers, err := pm.listRunningContainers(ctx)
@@ -126,7 +126,8 @@ func (pm *pidMapper) updateMappings() error {
 		return err
 	}
 
-	pidMappings := make(map[string]containerInfo)
+	// Use pointers for containerInfo to shave off some memory when many PIDs are mapped to the same container
+	pidMappings := make(map[string]*containerInfo)
 
 	for _, cnt := range containers {
 		if err := pm.processContainer(ctx, cnt, pidMappings); err != nil {
@@ -135,7 +136,7 @@ func (pm *pidMapper) updateMappings() error {
 		}
 	}
 
-	if err := pm.writePIDMappings(pidMappings); err != nil {
+	if err := writeCSVFile(pm.config.outputPath, []string{"pid", "container_name", "container_id", "image_name"}, pidMappings); err != nil {
 		return fmt.Errorf("failed to write PID mappings: %w", err)
 	}
 
@@ -143,6 +144,7 @@ func (pm *pidMapper) updateMappings() error {
 }
 
 func (pm *pidMapper) listRunningContainers(ctx context.Context) ([]types.Container, error) {
+	// All: false means only list running containers.
 	containers, err := pm.client.ContainerList(ctx, container.ListOptions{
 		All: false,
 	})
@@ -152,7 +154,7 @@ func (pm *pidMapper) listRunningContainers(ctx context.Context) ([]types.Contain
 	return containers, nil
 }
 
-func (pm *pidMapper) processContainer(ctx context.Context, cnt types.Container, pidMappings map[string]containerInfo) error {
+func (pm *pidMapper) processContainer(ctx context.Context, cnt types.Container, pidMappings map[string]*containerInfo) error {
 	inspect, err := pm.client.ContainerInspect(ctx, cnt.ID)
 	if err != nil {
 		return err
@@ -162,7 +164,9 @@ func (pm *pidMapper) processContainer(ctx context.Context, cnt types.Container, 
 		return nil
 	}
 
-	info := containerInfo{
+	// Allocate struct once, reuse pointer multiple times to avoid memcpy overhead
+	// (assume the available allocator is not smart enough to reuse the same struct)
+	info := &containerInfo{
 		name:  strings.TrimPrefix(cnt.Names[0], "/"),
 		id:    cnt.ID[:shortContainerIDLen],
 		image: cnt.Image,
@@ -174,18 +178,8 @@ func (pm *pidMapper) processContainer(ctx context.Context, cnt types.Container, 
 	}
 
 	log.Printf("Mapped %d PIDs to container %s", len(pids), info.name)
-	logSamplePIDs(pids)
 
 	return nil
-}
-
-func logSamplePIDs(pids []int) {
-	for i, pid := range pids {
-		if i >= debugLogLimit {
-			break
-		}
-		log.Printf("  - PID %d", pid)
-	}
 }
 
 func getProcessDescendants(rootPid int) []int {
@@ -194,10 +188,10 @@ func getProcessDescendants(rootPid int) []int {
 
 	for len(toCheck) > 0 {
 		currentPid := toCheck[0]
-		toCheck = toCheck[1:]
+		toCheck = toCheck[1:] // compact implementation of FIFO queue
 
 		children := findChildProcesses(currentPid)
-		for _, childPid := range children {
+		for _, childPid := range children { // breadth-first search for descendants
 			if !slices.Contains(descendants, childPid) {
 				descendants = append(descendants, childPid)
 				toCheck = append(toCheck, childPid)
@@ -208,6 +202,18 @@ func getProcessDescendants(rootPid int) []int {
 	return descendants
 }
 
+// Scans the /proc directory to find all child processes of the given parent PID
+// Proc is structured as:
+// /proc/
+//
+//	/<pid>/
+//	  /stat
+//	  /task/
+//	    /<child_pid>/
+//	      /stat
+//
+// The stat file contains the parent PID in the format:
+// <pid> (<parent_pid>) ...
 func findChildProcesses(parentPid int) []int {
 	procDir, err := os.Open("/proc")
 	if err != nil {
@@ -216,74 +222,62 @@ func findChildProcesses(parentPid int) []int {
 	defer procDir.Close()
 
 	entries, err := procDir.Readdirnames(-1)
-	if err != nil {
+	if err != nil { // /proc is inaccessessible for some reason
 		return nil
 	}
 
 	var children []int
 	for _, entry := range entries {
-		pid, err := strconv.Atoi(entry)
+		pid, err := strconv.Atoi(entry) // entry is a string like "1234"; this should always be a valid integer, but handle errors just in case
 		if err != nil {
 			continue
 		}
 
-		ppid, err := getParentPID(pid)
+		ppid, err := getParentPID(pid) // there are some edge cases where the mapping child->parent is not available, e.g. when the child process is a zombie; ignore these cases
 		if err != nil {
 			continue
 		}
 
 		if ppid == parentPid {
-			children = append(children, pid)
+			children = append(children, pid) // found a child process of the parent PID that's not a zombie
 		}
 	}
 
 	return children
 }
 
+// Parse the <pid> (<parent_pid>) ... format of the stat file to get the parent PID
 func getParentPID(pid int) (int, error) {
 	statData, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
-		return 0, fmt.Errorf("failed to read stat file: %w", err)
+		return 0, fmt.Errorf("failed to read stat file: %w", err) // this _could_ happen on extremely old kernels, which we don't support
 	}
 
 	statStr := string(statData)
 	lastParen := strings.LastIndex(statStr, ")")
 	if lastParen == -1 {
-		return 0, fmt.Errorf("invalid stat format: no closing parenthesis")
+		return 0, fmt.Errorf("invalid stat format: no closing parenthesis") // this should never happen, but handle it just in case
 	}
 
 	fields := strings.Fields(statStr[lastParen+1:])
 	if len(fields) < 2 {
-		return 0, fmt.Errorf("invalid stat format: insufficient fields")
+		return 0, fmt.Errorf("invalid stat format: insufficient fields") // this _could_ happen on extremely old kernels, which we don't support, but handle it just in case
 	}
 
 	ppid, err := strconv.Atoi(fields[1])
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse parent PID: %w", err)
+		return 0, fmt.Errorf("failed to parse parent PID: %w", err) // this should never happen, but handle it just in case
 	}
 
 	return ppid, nil
 }
 
-func (pm *pidMapper) writePIDMappings(mappings map[string]containerInfo) error {
-	return writeCSVFile(pm.config.outputPath, []string{"pid", "container_name", "container_id", "image_name"},
-		func(w *csv.Writer) error {
-			for pid, info := range mappings {
-				if err := w.Write([]string{pid, info.name, info.id, info.image}); err != nil {
-					return fmt.Errorf("failed to write row: %w", err)
-				}
-			}
-			log.Printf("Updated PID mappings file with %d entries", len(mappings))
-			return nil
-		})
-}
-
-func writeCSVFile(path string, headers []string, writeRows func(*csv.Writer) error) error {
+func writeCSVFile(path string, headers []string, mappings map[string]*containerInfo) error {
 	tmpPath := path + ".tmp"
 
 	file, err := os.Create(tmpPath)
 	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
+		return fmt.Errorf("failed to create file: %w", err) // shouldn't happen except for EXTREME resource exhaustion on the host machine
 	}
 
 	success := false
@@ -297,24 +291,27 @@ func writeCSVFile(path string, headers []string, writeRows func(*csv.Writer) err
 	writer := csv.NewWriter(file)
 
 	if err := writer.Write(headers); err != nil {
-		return fmt.Errorf("failed to write header: %w", err)
+		return fmt.Errorf("failed to write header: %w", err) // file decided to close on us (again, extreme resource exhaustion)
 	}
 
-	if err := writeRows(writer); err != nil {
-		return err
+	for pid, info := range mappings {
+		if err := writer.Write([]string{pid, info.name, info.id, info.image}); err != nil {
+			return fmt.Errorf("failed to write row: %w", err) // file decided to close on us (again, extreme resource exhaustion)
+		}
 	}
+	log.Printf("Updated PID mappings file with %d entries", len(mappings))
 
 	writer.Flush()
 	if err := writer.Error(); err != nil {
-		return fmt.Errorf("CSV writer error: %w", err)
+		return fmt.Errorf("CSV writer error: %w", err) // generic CSV writer error - this would be a bug on our side
 	}
 
 	if err := file.Close(); err != nil {
-		return fmt.Errorf("failed to close file: %w", err)
+		return fmt.Errorf("failed to close file: %w", err) // really, REALLY shouldn't happen, but handle it just in case
 	}
 
 	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("failed to rename file: %w", err)
+		return fmt.Errorf("failed to rename file: %w", err) // possible with exhausted inodes
 	}
 
 	success = true
