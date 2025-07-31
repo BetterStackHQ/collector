@@ -271,8 +271,8 @@ class EbpfCompatibilityCheckerTest < Minitest::Test
   def test_verifies_json_flag_is_passed
     # Create a script that outputs different content based on the flag
     File.write(@ebpf_script_path, <<~SCRIPT)
-      #!/bin/bash
-      if [ "$1" == "--json" ]; then
+      #!/bin/sh
+      if [ "$1" = "--json" ]; then
         echo '{"ebpf_supported": true, "flag": "json"}'
       else
         echo '{"ebpf_supported": false, "flag": "none"}'
@@ -426,11 +426,9 @@ class EbpfCompatibilityCheckerTest < Minitest::Test
 
     # Use heredoc with proper escaping
     script_content = <<~SCRIPT
-      #!/bin/bash
-      if [ "$1" == "--json" ]; then
-        cat << 'EOF'
-#{json_output}
-EOF
+      #!/bin/sh
+      if [ "$1" = "--json" ]; then
+        printf '%s\\n' '#{json_output.gsub("'", "'\"'\"'")}'
       else
         echo "Human readable output"
       fi
@@ -442,7 +440,7 @@ EOF
 
   def create_failing_ebpf_script(error_message, exit_code)
     File.write(@ebpf_script_path, <<~SCRIPT)
-      #!/bin/bash
+      #!/bin/sh
       echo "#{error_message}" >&2
       exit #{exit_code}
     SCRIPT
