@@ -178,10 +178,6 @@ class EbpfCompatibilityCheckerTest < Minitest::Test
     assert_equal "json", checker.system_information["flag"]
   end
 
-
-
-
-
   private
 
   def create_mock_ebpf_script(output)
