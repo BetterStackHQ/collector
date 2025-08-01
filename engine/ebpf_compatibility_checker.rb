@@ -42,7 +42,8 @@ class EbpfCompatibilityChecker
         @system_information = {
           error: "eBPF check failed",
           exit_code: status.exitstatus,
-          stderr: stderr
+          stderr: stderr,
+          stdout: stdout,
         }
       end
     rescue JSON::ParserError => e
