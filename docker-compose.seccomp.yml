@@ -23,12 +23,18 @@ services:
       - /var/log:/host/var/log:ro
       # Collect Docker container logs
       - /var/lib/docker/containers:/host/var/lib/docker/containers:ro
+      # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this volume
+      # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
+      - docker-metadata:/enrichment:ro
     ports:
       # Bind to localhost only for security - Beyla will connect via host network
       - "127.0.0.1:34320:34320"
 
   beyla:
-    image: grafana/beyla:2.2.4
+    build:
+      context: .
+      dockerfile: Dockerfile.beyla
+    image: betterstack/collector-beyla:latest
     container_name: better-stack-beyla
     restart: always
     privileged: true
@@ -44,10 +50,22 @@ services:
       - BEYLA_BPF_TRACK_REQUEST_HEADERS=true
       - BEYLA_METRICS_INTERVAL=15s
       - BEYLA_CONFIG_PATH=/etc/beyla/beyla.yaml
+      # Enable dockerprobe by default (set to false to disable)
+      - ENABLE_DOCKERPROBE=${ENABLE_DOCKERPROBE:-true}
     volumes:
-      - ./beyla.yaml:/etc/beyla/beyla.yaml:ro
       - /sys/kernel/tracing:/sys/kernel/tracing:rw
       - /sys/kernel/debug:/sys/kernel/debug:rw
       - /sys/kernel/security:/sys/kernel/security:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      # Docker socket for dockerprobe
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this volume
+      # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
+      - docker-metadata:/enrichment:rw
     depends_on:
       - collector
+
+volumes:
+  docker-metadata:
+
+
