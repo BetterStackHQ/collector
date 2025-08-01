@@ -77,6 +77,7 @@ COPY kubernetes-discovery/0-default/discovered_pods.yaml /kubernetes-discovery/0
 COPY engine /engine
 COPY should_run_cluster_collector.rb /should_run_cluster_collector.rb
 COPY cluster-collector.sh /cluster-collector.sh
+COPY ebpf.sh /ebpf.sh
 
 # Create initial vector-config with symlinks to defaults
 RUN mkdir -p /vector-config/0-default \
@@ -93,7 +94,8 @@ RUN chmod +x /usr/local/bin/vector \
     && chmod +x /cluster-collector.sh \
     && chmod +x /vector.sh \
     && chmod +x /updater.rb \
-    && chmod +x /proxy.rb
+    && chmod +x /proxy.rb \
+    && chmod +x /ebpf.sh
 
 # Install tini and use it as init to handle signals properly
 ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
