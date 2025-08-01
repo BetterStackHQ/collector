@@ -69,6 +69,7 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 # Copy Ruby scripts
 COPY updater.rb /updater.rb
+COPY enrichment_table_watcher.rb /enrichment_table_watcher.rb
 COPY proxy.rb /proxy.rb
 COPY vector.sh /vector.sh
 COPY versions/0-default/vector.yaml /versions/0-default/vector.yaml
