@@ -48,6 +48,8 @@ services:
       - BEYLA_BPF_TRACK_REQUEST_HEADERS=true
       - BEYLA_METRICS_INTERVAL=15s
       - BEYLA_CONFIG_PATH=/etc/beyla/beyla.yaml
+      # Enable dockerprobe by default (set to false to disable)
+      - ENABLE_DOCKERPROBE=${ENABLE_DOCKERPROBE:-true}
     volumes:
       - /sys/kernel/tracing:/sys/kernel/tracing:rw
       - /sys/kernel/debug:/sys/kernel/debug:rw
