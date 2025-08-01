@@ -1,6 +1,7 @@
 require_relative 'utils'
 require_relative 'kubernetes_discovery'
 require_relative 'vector_config'
+require_relative 'ebpf_compatibility_checker'
 require 'net/http'
 require 'fileutils'
 require 'time'
@@ -20,6 +21,7 @@ class BetterStackClient
 
     @kubernetes_discovery = KubernetesDiscovery.new(working_dir)
     @vector_config = VectorConfig.new(working_dir)
+    @ebpf_compatibility_checker = EbpfCompatibilityChecker.new(working_dir)
   end
 
   def make_post_request(path, params)
@@ -70,7 +72,17 @@ class BetterStackClient
     ping_params[:configuration_version] = latest_version if latest_version # Only send version if one exists
     ping_params[:error] = read_error if read_error
 
+    # Include system_information only on first ping
+    if !@ebpf_compatibility_checker.reported? && @ebpf_compatibility_checker.system_information
+      ping_params[:system_information] = @ebpf_compatibility_checker.system_information.to_json
+    end
+
     response = make_post_request('/collector/ping', ping_params)
+
+    if response.code == '204' || response.code == '200'
+      @ebpf_compatibility_checker.mark_as_reported
+    end
+
     upstream_changed = process_ping(response.code, response.body)
 
     # Run kubernetes discovery if latest valid vector config uses kubernetes_discovery_*
