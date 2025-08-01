@@ -4,7 +4,7 @@
 if [ "${ENABLE_DOCKERPROBE}" = "true" ] || [ "${ENABLE_DOCKERPROBE}" = "1" ]; then
     echo "Enabling dockerprobe (ENABLE_DOCKERPROBE=${ENABLE_DOCKERPROBE})"
     # Replace autostart=false with autostart=true for dockerprobe
-    sed -i '/\[program:dockerprobe\]/,/^\[/ s/autostart=false/autostart=true/' /etc/supervisor/supervisord.conf
+    sed -i '/\[program:dockerprobe\]/,/^\[/ s/autostart=false/autostart=true/' /etc/supervisor/conf.d/supervisord.conf
 else
     echo "Dockerprobe disabled (ENABLE_DOCKERPROBE=${ENABLE_DOCKERPROBE})"
 fi
