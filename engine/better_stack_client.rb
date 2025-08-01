@@ -74,7 +74,7 @@ class BetterStackClient
 
     # Include system_information only on first ping
     if !@ebpf_compatibility_checker.reported? && @ebpf_compatibility_checker.system_information
-      ping_params[:system_information] = @ebpf_compatibility_checker.system_information
+      ping_params[:system_information] = @ebpf_compatibility_checker.system_information.to_json
     end
 
     response = make_post_request('/collector/ping', ping_params)
