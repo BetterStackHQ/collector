@@ -63,10 +63,6 @@ cd "$TEMP_DIR"
 # Clean up on exit
 trap "rm -rf $TEMP_DIR" EXIT
 
-# Download beyla.yaml
-curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/beyla.yaml \
-    -o beyla.yaml
-
 # Download appropriate compose file based on Docker version
 if [ "$USE_SECCOMP" = true ]; then
     # For older Docker versions, use the seccomp-enabled compose file

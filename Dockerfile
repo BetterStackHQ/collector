@@ -46,7 +46,7 @@ RUN mkdir -p /versions/0-default \
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
 ENV CLUSTER_COLLECTOR=false
-ENV COLLECTOR_VERSION=1.0.3
+ENV COLLECTOR_VERSION=1.0.4
 ENV VECTOR_VERSION=0.47.0
 ENV BEYLA_VERSION=2.2.4
 ENV CLUSTER_AGENT_VERSION=1.2.4
