@@ -20,3 +20,5 @@ attributes:
       include: ["service.name", "server.address", "http.response.status_code"]
     rpc_client_duration:
       include: ["service.name", "server.address", "rpc.grpc.status_code"]
+    target_info:
+      include: ["server.address"]
