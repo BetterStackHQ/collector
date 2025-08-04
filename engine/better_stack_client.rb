@@ -26,7 +26,7 @@ class BetterStackClient
     @kubernetes_discovery = KubernetesDiscovery.new(working_dir)
     @vector_config = VectorConfig.new(working_dir)
     @ebpf_compatibility_checker = EbpfCompatibilityChecker.new(working_dir)
-    @vector_enrichment_table = VectorEnrichmentTable.new(ENRICHMENT_TABLE_PATH)
+    @vector_enrichment_table = VectorEnrichmentTable.new(ENRICHMENT_TABLE_PATH, ENRICHMENT_TABLE_INCOMING_PATH)
   end
 
   def make_post_request(path, params)
