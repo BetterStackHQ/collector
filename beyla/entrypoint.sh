@@ -7,6 +7,8 @@ if [ "${ENABLE_DOCKERPROBE}" = "true" ] || [ "${ENABLE_DOCKERPROBE}" = "1" ]; th
     sed -i '/\[program:dockerprobe\]/,/^\[/ s/autostart=false/autostart=true/' /etc/supervisor/conf.d/supervisord.conf
 else
     echo "Dockerprobe disabled (ENABLE_DOCKERPROBE=${ENABLE_DOCKERPROBE})"
+    # failsafe for when dockerprobe is disabled - Vector needs a file to exist to load config correctly
+    echo "pid,container_name,container_id,image_name" > /enrichment/docker-mappings.csv
 fi
 
 # Start supervisord

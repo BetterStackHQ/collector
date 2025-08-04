@@ -84,12 +84,14 @@ class VectorConfigEdgeCasesTest < Minitest::Test
 
     # Should handle gracefully
     @vector_config.stub :system, true do
+      result = nil
       output = capture_io do
-        @vector_config.promote_dir(config_dir)
+        result = @vector_config.promote_dir(config_dir)
       end
 
       assert File.directory?(File.join(@vector_config_dir, 'current'))
-      assert_match(/Successfully promoted to current/, output.join)
+      assert_match(/Promoting/, output.join)
+      assert result
     end
   end
 
@@ -99,14 +101,15 @@ class VectorConfigEdgeCasesTest < Minitest::Test
 
     # Mock system call to return false (failure)
     @vector_config.stub :system, false do
+      result = nil
       output = capture_io do
         # Should not raise error, just continue
-        @vector_config.promote_dir(config_dir)
+        result = @vector_config.promote_dir(config_dir)
       end
 
       assert File.directory?(File.join(@vector_config_dir, 'current'))
-      assert_match(/Reloading vector/, output.join)
-      assert_match(/Successfully promoted to current/, output.join)
+      assert_match(/Promoting/, output.join)
+      assert result
     end
   end
 

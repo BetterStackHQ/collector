@@ -5,9 +5,13 @@ require_relative 'ebpf_compatibility_checker'
 require 'net/http'
 require 'fileutils'
 require 'time'
+require 'forwardable'
 
 class BetterStackClient
+  extend Forwardable
   include Utils
+
+  def_delegator :@vector_config, :reload_vector
 
   def initialize(working_dir)
     @base_url = (ENV['BASE_URL'] || 'https://telemetry.betterstack.com').chomp('/')
@@ -22,6 +26,7 @@ class BetterStackClient
     @kubernetes_discovery = KubernetesDiscovery.new(working_dir)
     @vector_config = VectorConfig.new(working_dir)
     @ebpf_compatibility_checker = EbpfCompatibilityChecker.new(working_dir)
+    @vector_enrichment_table = VectorEnrichmentTable.new(ENRICHMENT_TABLE_PATH)
   end
 
   def make_post_request(path, params)
@@ -101,9 +106,27 @@ class BetterStackClient
         return
       end
 
-      @vector_config.promote_dir(new_config_dir)
+      result = @vector_config.promote_dir(new_config_dir)
       clear_error
+      
+      return result
     end
+
+    false
+  end
+
+  def enrichment_table_changed?
+    @vector_enrichment_table.different?
+  end
+
+  def validate_enrichment_table
+    output = @vector_enrichment_table.validate_enrichment_table
+    unless output.nil?
+      write_error("Validation failed for enrichment table\n\n#{output}")
+      return output
+    end
+
+    nil
   end
 
   def process_ping(code, body)

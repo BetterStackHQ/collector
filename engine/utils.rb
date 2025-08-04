@@ -4,6 +4,8 @@ require 'json'
 require 'socket'
 
 module Utils
+  ENRICHMENT_TABLE_PATH = "/enrichment/docker-mappings.csv"
+
   # Shared and main.rb specific functions
   def latest_version
     # Assuming version directories are named like 'YYYY-MM-DDTHH:MM:SS'
