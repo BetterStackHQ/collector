@@ -23,7 +23,7 @@ class VectorEnrichmentTable
     @last_hash != new_hash
   end
 
-  def validate_enrichment_table
+  def validate
     puts "Validating enrichment table at #{path}"
 
     if !File.exist?(path)

@@ -595,7 +595,7 @@ class BetterStackClientTest < Minitest::Test
 
   def test_validate_enrichment_table_returns_error_when_enrichment_table_has_changed_and_validation_fails
     # Mock enrichment table to return true
-    @client.instance_variable_get(:@vector_enrichment_table).define_singleton_method(:validate_enrichment_table) { "Validation failed for enrichment table" }
+    @client.instance_variable_get(:@vector_enrichment_table).define_singleton_method(:validate) { "Validation failed for enrichment table" }
     result = @client.validate_enrichment_table
 
     assert_equal "Validation failed for enrichment table", result
@@ -603,7 +603,7 @@ class BetterStackClientTest < Minitest::Test
 
   def test_validate_enrichment_table_returns_nil_when_enrichment_table_has_changed_and_validation_passes
     # Mock enrichment table to return true
-    @client.instance_variable_get(:@vector_enrichment_table).define_singleton_method(:validate_enrichment_table) { nil }
+    @client.instance_variable_get(:@vector_enrichment_table).define_singleton_method(:validate) { nil }
     result = @client.validate_enrichment_table
 
     assert_nil result

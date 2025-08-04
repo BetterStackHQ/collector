@@ -60,80 +60,80 @@ class VectorEnrichmentTableTest < Minitest::Test
     end
   end
 
-  def test_validate_enrichment_table_file_not_found
+  def test_validate_file_not_found
     Dir.mktmpdir do |dir|
       enrichment_path = File.join(dir, 'enrichment_table.csv')
-      result = VectorEnrichmentTable.new(enrichment_path).validate_enrichment_table
+      result = VectorEnrichmentTable.new(enrichment_path).validate
       assert_equal "Enrichment table not found at #{enrichment_path}", result
     end
   end
 
-  def test_validate_enrichment_table_empty_file
+  def test_validate_empty_file
     Dir.mktmpdir do |dir|
       enrichment_path = File.join(dir, 'enrichment_table.csv')
       File.write(enrichment_path, '')
 
-      result = VectorEnrichmentTable.new(enrichment_path).validate_enrichment_table
+      result = VectorEnrichmentTable.new(enrichment_path).validate
       assert_equal "Enrichment table is empty at #{enrichment_path}", result
     end
   end
 
-  def test_validate_enrichment_table_invalid_header
+  def test_validate_invalid_header
     Dir.mktmpdir do |dir|
       enrichment_path = File.join(dir, 'enrichment_table.csv')
       File.write(enrichment_path, "wrong,header,format\n")
       
-      result = VectorEnrichmentTable.new(enrichment_path).validate_enrichment_table
+      result = VectorEnrichmentTable.new(enrichment_path).validate
       assert_equal "Enrichment table is not valid at #{enrichment_path}", result
     end
   end
 
-  def test_validate_enrichment_table_valid_file
+  def test_validate_valid_file
     Dir.mktmpdir do |dir|
       enrichment_path = File.join(dir, 'enrichment_table.csv')
       File.write(enrichment_path, "pid,container_name,container_id,image_name\n123,test-container,abc123,test-image\n")
       
-      result = VectorEnrichmentTable.new(enrichment_path).validate_enrichment_table
+      result = VectorEnrichmentTable.new(enrichment_path).validate
       assert_nil result
     end
   end
 
-  def test_validate_enrichment_table_with_whitespace_header
+  def test_validate_with_whitespace_header
     Dir.mktmpdir do |dir|
       enrichment_path = File.join(dir, 'enrichment_table.csv')
       File.write(enrichment_path, "  pid,container_name,container_id,image_name  \n123,test-container,abc123,test-image\n")
       
-      result = VectorEnrichmentTable.new(enrichment_path).validate_enrichment_table
+      result = VectorEnrichmentTable.new(enrichment_path).validate
       assert_nil result
     end
   end
 
-  def test_validate_enrichment_table_with_only_header
+  def test_validate_with_only_header
     Dir.mktmpdir do |dir|
       enrichment_path = File.join(dir, 'enrichment_table.csv')
       File.write(enrichment_path, "pid,container_name,container_id,image_name\n")
       
-      result = VectorEnrichmentTable.new(enrichment_path).validate_enrichment_table
+      result = VectorEnrichmentTable.new(enrichment_path).validate
       assert_nil result
     end
   end
 
-  def test_validate_enrichment_table_with_extra_columns_in_header
+  def test_validate_with_extra_columns_in_header
     Dir.mktmpdir do |dir|
       enrichment_path = File.join(dir, 'enrichment_table.csv')
       File.write(enrichment_path, "pid,container_name,container_id,image_name,extra\n")
       
-      result = VectorEnrichmentTable.new(enrichment_path).validate_enrichment_table
+      result = VectorEnrichmentTable.new(enrichment_path).validate
       assert_equal "Enrichment table is not valid at #{enrichment_path}", result
     end
   end
 
-  def test_validate_enrichment_table_with_missing_columns_in_header
+  def test_validate_with_missing_columns_in_header
     Dir.mktmpdir do |dir|
       enrichment_path = File.join(dir, 'enrichment_table.csv')
       File.write(enrichment_path, "pid,container_name,container_id\n")
       
-      result = VectorEnrichmentTable.new(enrichment_path).validate_enrichment_table
+      result = VectorEnrichmentTable.new(enrichment_path).validate
       assert_equal "Enrichment table is not valid at #{enrichment_path}", result
     end
   end

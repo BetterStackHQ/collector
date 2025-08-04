@@ -120,7 +120,7 @@ class BetterStackClient
   end
 
   def validate_enrichment_table
-    output = @vector_enrichment_table.validate_enrichment_table
+    output = @vector_enrichment_table.validate
     unless output.nil?
       write_error("Validation failed for enrichment table\n\n#{output}")
       return output
