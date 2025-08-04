@@ -115,9 +115,7 @@ class BetterStackClient
     false
   end
 
-  def enrichment_table_changed?
-    @vector_enrichment_table.different?
-  end
+  def enrichment_table_changed? = @vector_enrichment_table.different?
 
   def validate_enrichment_table
     output = @vector_enrichment_table.validate
@@ -128,6 +126,8 @@ class BetterStackClient
 
     nil
   end
+
+  def promote_enrichment_table = @vector_enrichment_table.promote
 
   def process_ping(code, body)
     case code

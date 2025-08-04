@@ -24,6 +24,8 @@ loop do
     if !output.nil?
       puts "Enrichment table validation failed"
       can_reload_vector = false
+    else
+      client.promote_enrichment_table
     end
   end
 
