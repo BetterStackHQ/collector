@@ -103,7 +103,7 @@ class BetterStackClient
       validate_output = @vector_config.validate_dir(new_config_dir)
       unless validate_output.nil?
         write_error("Validation failed for vector config with kubernetes_discovery\n\n#{validate_output}")
-        return
+        return false
       end
 
       result = @vector_config.promote_dir(new_config_dir)

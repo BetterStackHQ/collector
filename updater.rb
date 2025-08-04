@@ -13,7 +13,7 @@ iteration = 1
 # Main loop
 loop do
   enrichment_table_changed = client.enrichment_table_changed?
-  can_continue = true
+  can_reload_vector = true
   config_changed = false # error flag so we can make sure we only reload vector if we have a valid config
 
   # Validate enrichment table if it has changed
@@ -23,19 +23,19 @@ loop do
     puts "Enrichment table validation finished"
     if !output.nil?
       puts "Enrichment table validation failed"
-      can_continue = false
+      can_reload_vector = false
     end
   end
 
   # Only attempt to promote config if enrichment table is valid
-  if can_continue && iteration % PING_EVERY == 0
+  if iteration % PING_EVERY == 0
     iteration = 1
     puts "Starting ping"
     config_changed = client.ping
     puts "Ping finished"
   end
 
-  if can_continue && (enrichment_table_changed || config_changed)
+  if can_reload_vector && (enrichment_table_changed || config_changed)
     client.reload_vector
   end
 
