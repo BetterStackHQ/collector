@@ -78,6 +78,7 @@ COPY engine /engine
 COPY should_run_cluster_collector.rb /should_run_cluster_collector.rb
 COPY --chmod=755 cluster-collector.sh /cluster-collector.sh
 COPY --chmod=755 ebpf.sh /ebpf.sh
+COPY dockerprobe/docker-mappings.default.csv /enrichment/docker-mappings.csv
 
 # Create initial vector-config with symlinks to defaults
 RUN mkdir -p /vector-config/0-default \
