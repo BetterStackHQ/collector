@@ -2,12 +2,17 @@ require_relative 'utils'
 require_relative 'kubernetes_discovery'
 require_relative 'vector_config'
 require_relative 'ebpf_compatibility_checker'
+require_relative 'vector_enrichment_table'
 require 'net/http'
 require 'fileutils'
 require 'time'
+require 'forwardable'
 
 class BetterStackClient
+  extend Forwardable
   include Utils
+
+  def_delegator :@vector_config, :reload_vector
 
   def initialize(working_dir)
     @base_url = (ENV['BASE_URL'] || 'https://telemetry.betterstack.com').chomp('/')
@@ -22,6 +27,7 @@ class BetterStackClient
     @kubernetes_discovery = KubernetesDiscovery.new(working_dir)
     @vector_config = VectorConfig.new(working_dir)
     @ebpf_compatibility_checker = EbpfCompatibilityChecker.new(working_dir)
+    @vector_enrichment_table = VectorEnrichmentTable.new(ENRICHMENT_TABLE_PATH, ENRICHMENT_TABLE_INCOMING_PATH)
   end
 
   def make_post_request(path, params)
@@ -98,13 +104,31 @@ class BetterStackClient
       validate_output = @vector_config.validate_dir(new_config_dir)
       unless validate_output.nil?
         write_error("Validation failed for vector config with kubernetes_discovery\n\n#{validate_output}")
-        return
+        return false
       end
 
-      @vector_config.promote_dir(new_config_dir)
+      result = @vector_config.promote_dir(new_config_dir)
       clear_error
+      
+      return result
     end
+
+    false
   end
+
+  def enrichment_table_changed? = @vector_enrichment_table.different?
+
+  def validate_enrichment_table
+    output = @vector_enrichment_table.validate
+    unless output.nil?
+      write_error("Validation failed for enrichment table\n\n#{output}")
+      return output
+    end
+
+    nil
+  end
+
+  def promote_enrichment_table = @vector_enrichment_table.promote
 
   def process_ping(code, body)
     case code

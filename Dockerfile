@@ -26,14 +26,14 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Vector from vector image
-COPY --from=vector /usr/bin/vector /usr/local/bin/vector
+COPY --from=vector --chmod=755 /usr/bin/vector /usr/local/bin/vector
 COPY --from=vector /etc/vector /etc/vector
 
 # Copy Cluster Agent
-COPY --from=cluster-agent /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent
+COPY --from=cluster-agent --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent
 
 # Copy mdprobe
-COPY --from=mdprobe-builder /bin/mdprobe /usr/local/bin/mdprobe
+COPY --from=mdprobe-builder --chmod=755 /bin/mdprobe /usr/local/bin/mdprobe
 
 # Create necessary directories
 RUN mkdir -p /versions/0-default \
@@ -46,7 +46,7 @@ RUN mkdir -p /versions/0-default \
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
 ENV CLUSTER_COLLECTOR=false
-ENV COLLECTOR_VERSION=1.0.6
+ENV COLLECTOR_VERSION=1.0.7
 ENV VECTOR_VERSION=0.47.0
 ENV BEYLA_VERSION=2.2.4
 ENV CLUSTER_AGENT_VERSION=1.2.4
@@ -68,16 +68,17 @@ ENV TINI_SUBREAPER=true
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 # Copy Ruby scripts
-COPY updater.rb /updater.rb
-COPY proxy.rb /proxy.rb
-COPY vector.sh /vector.sh
+COPY --chmod=755 updater.rb /updater.rb
+COPY --chmod=755 proxy.rb /proxy.rb
+COPY --chmod=755 vector.sh /vector.sh
 COPY versions/0-default/vector.yaml /versions/0-default/vector.yaml
 COPY versions/0-default/databases.json /versions/0-default/databases.json
 COPY kubernetes-discovery/0-default/discovered_pods.yaml /kubernetes-discovery/0-default/discovered_pods.yaml
 COPY engine /engine
 COPY should_run_cluster_collector.rb /should_run_cluster_collector.rb
-COPY cluster-collector.sh /cluster-collector.sh
-COPY ebpf.sh /ebpf.sh
+COPY --chmod=755 cluster-collector.sh /cluster-collector.sh
+COPY --chmod=755 ebpf.sh /ebpf.sh
+COPY dockerprobe/docker-mappings.default.csv /enrichment/docker-mappings.csv
 
 # Create initial vector-config with symlinks to defaults
 RUN mkdir -p /vector-config/0-default \
@@ -86,16 +87,6 @@ RUN mkdir -p /vector-config/0-default \
     && ln -s /kubernetes-discovery/0-default /vector-config/0-default/kubernetes-discovery \
     && ln -s /vector-config/0-default /vector-config/current \
     && cp /versions/0-default/vector.yaml /vector-config/latest-valid-upstream/vector.yaml
-
-# Set permissions
-RUN chmod +x /usr/local/bin/vector \
-    && chmod +x /usr/local/bin/cluster-agent \
-    && chmod +x /usr/local/bin/mdprobe \
-    && chmod +x /cluster-collector.sh \
-    && chmod +x /vector.sh \
-    && chmod +x /updater.rb \
-    && chmod +x /proxy.rb \
-    && chmod +x /ebpf.sh
 
 # Install tini and use it as init to handle signals properly
 ENTRYPOINT ["/usr/bin/tini", "-s", "--"]

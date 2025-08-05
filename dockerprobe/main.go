@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	defaultOutputPath   = "/enrichment/docker-mappings.csv"
+	defaultOutputPath   = "/enrichment/docker-mappings.incoming.csv"
 	defaultInterval     = 15 // seconds; in line with default tickrate of Beyla collection
 	defaultTimeout      = 15 // seconds
 	debugLogLimit       = 5

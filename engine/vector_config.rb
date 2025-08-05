@@ -193,6 +193,10 @@ class VectorConfig
     # Move new config to current
     FileUtils.mv(config_dir, current_dir)
 
+    true
+  end
+
+  def reload_vector
     puts "Reloading vector..."
     system("supervisorctl signal HUP vector")
 
