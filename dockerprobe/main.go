@@ -295,7 +295,20 @@ func writeCSVFile(path string, headers []string, mappings map[string]*containerI
 		return fmt.Errorf("failed to write header: %w", err) // file decided to close on us (again, extreme resource exhaustion)
 	}
 
-	for pid, info := range mappings {
+	// Before writing, sort PIDs numerically for stable ordering in the CSV file
+	// This avoid unnecessary SIGHUPs to Vector when the PIDs are reordered
+	pids := make([]string, 0, len(mappings))
+	for pid := range mappings {
+		pids = append(pids, pid)
+	}
+	slices.SortFunc(pids, func(a, b string) int {
+		pidA, _ := strconv.Atoi(a)
+		pidB, _ := strconv.Atoi(b)
+		return pidA - pidB
+	})
+
+	for _, pid := range pids {
+		info := mappings[pid]
 		if err := writer.Write([]string{pid, info.name, info.id, info.image}); err != nil {
 			return fmt.Errorf("failed to write row: %w", err) // file decided to close on us (again, extreme resource exhaustion)
 		}
