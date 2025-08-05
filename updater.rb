@@ -25,7 +25,9 @@ loop do
       puts "Enrichment table validation failed"
       can_reload_vector = false
     else
+      puts "Promoting enrichment table"
       client.promote_enrichment_table
+      puts "Enrichment table promoted"
     end
   end
 
