@@ -1,3 +1,6 @@
+# Add Node Agent to the image
+FROM ghcr.io/coroot/coroot-node-agent:1.25.0 AS node-agent
+
 # Build dockerprobe
 FROM golang:1.24.4-alpine3.22 AS dockerprobe-builder
 WORKDIR /src
@@ -9,11 +12,14 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags='-s -w' -o /bin/dockerprobe .
 # Get Beyla files from official image
 FROM grafana/beyla:2.2.4 AS beyla-source
 
-# Final stage - Alpine based
-FROM alpine:3.22
+# Final stage - Using Debian for glibc compatibility with node-agent
+FROM debian:12-slim
 
 # Install supervisor and ca-certificates
-RUN apk add --no-cache supervisor ca-certificates
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends supervisor ca-certificates && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # Create necessary directories
 RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /enrichment
@@ -23,6 +29,9 @@ COPY --from=beyla-source --chmod=755 /beyla /usr/local/bin/beyla
 COPY --from=beyla-source /LICENSE /LICENSE
 COPY --from=beyla-source /NOTICE /NOTICE
 COPY --from=beyla-source /third_party_licenses.csv /third_party_licenses.csv
+
+# Copy Node Agent
+COPY --from=node-agent --chmod=755 /usr/bin/coroot-node-agent /usr/local/bin/node-agent
 
 # Copy dockerprobe binary with permissions
 COPY --from=dockerprobe-builder --chmod=755 /bin/dockerprobe /usr/local/bin/dockerprobe

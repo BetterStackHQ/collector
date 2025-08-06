@@ -26,7 +26,8 @@ services:
       - docker-metadata:/enrichment:rw
     ports:
       # Bind to localhost only for security - Beyla will connect via host network
-      - "127.0.0.1:34320:34320"
+      - "127.0.0.1:34320:34320" # Beyla metrics endpoint
+      - "127.0.0.1:33000:33000" # Vector proxy endpoint
 
   beyla:
     build:
