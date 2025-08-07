@@ -423,23 +423,27 @@ class KubernetesDiscovery
     remap_lines = []
 
     # Add labels
-    remap_lines << ".tags.\"k8s.namespace.name\" = \"#{endpoint_info[:namespace]}\""
-    remap_lines << ".tags.\"k8s.pod.name\" = \"#{endpoint_info[:pod]}\""
+    remap_lines << ".tags.\"resource.k8s.namespace.name\" = \"#{endpoint_info[:namespace]}\""
+    remap_lines << ".tags.\"resource.k8s.pod.name\" = \"#{endpoint_info[:pod]}\""
 
     # Add new k8s labels if present
-    remap_lines << ".tags.\"k8s.node.name\" = \"#{endpoint_info[:node_name]}\"" if endpoint_info[:node_name]
-    remap_lines << ".tags.\"k8s.pod.uid\" = \"#{endpoint_info[:pod_uid]}\"" if endpoint_info[:pod_uid]
-    remap_lines << ".tags.\"k8s.pod.start_time\" = \"#{endpoint_info[:start_time]}\"" if endpoint_info[:start_time]
+    remap_lines << ".tags.\"resource.k8s.node.name\" = \"#{endpoint_info[:node_name]}\"" if endpoint_info[:node_name]
+    remap_lines << ".tags.\"resource.k8s.pod.uid\" = \"#{endpoint_info[:pod_uid]}\"" if endpoint_info[:pod_uid]
+    remap_lines << ".tags.\"resource.k8s.pod.start_time\" = \"#{endpoint_info[:start_time]}\"" if endpoint_info[:start_time]
 
     # Add workload-specific labels
-    remap_lines << ".tags.\"k8s.deployment.name\" = \"#{endpoint_info[:deployment_name]}\"" if endpoint_info[:deployment_name]
-    remap_lines << ".tags.\"k8s.statefulset.name\" = \"#{endpoint_info[:statefulset_name]}\"" if endpoint_info[:statefulset_name]
-    remap_lines << ".tags.\"k8s.daemonset.name\" = \"#{endpoint_info[:daemonset_name]}\"" if endpoint_info[:daemonset_name]
-    remap_lines << ".tags.\"k8s.replicaset.name\" = \"#{endpoint_info[:replicaset_name]}\"" if endpoint_info[:replicaset_name]
+    remap_lines << ".tags.\"resource.k8s.deployment.name\" = \"#{endpoint_info[:deployment_name]}\"" if endpoint_info[:deployment_name]
+    remap_lines << ".tags.\"resource.k8s.statefulset.name\" = \"#{endpoint_info[:statefulset_name]}\"" if endpoint_info[:statefulset_name]
+    remap_lines << ".tags.\"resource.k8s.daemonset.name\" = \"#{endpoint_info[:daemonset_name]}\"" if endpoint_info[:daemonset_name]
+    remap_lines << ".tags.\"resource.k8s.replicaset.name\" = \"#{endpoint_info[:replicaset_name]}\"" if endpoint_info[:replicaset_name]
 
     # Add container names if present
     if endpoint_info[:container_names] && !endpoint_info[:container_names].empty?
-      remap_lines << ".tags.\"k8s.container.name\" = \"#{endpoint_info[:container_names].join(',')}\""
+      remap_lines << ".tags.\"resource.k8s.container.name\" = \"#{endpoint_info[:container_names].join(',')}\""
+    end
+
+    if endpoint_info[:service]
+      remap_lines << ".tags.\"resource.k8s.service.name\" = \"#{endpoint_info[:service]}\""
     end
 
     config['transforms'][transform_name]['source'] = remap_lines.join("\n")
