@@ -80,6 +80,8 @@ module Utils
   end
 
   def hostname
+    return ENV['HOSTNAME'] if ENV['HOSTNAME']
+
     # Try to get hostname from kubernetes mounted hostPath, if available
     if File.exist?('/host/proc/sys/kernel/hostname')
       return File.read('/host/proc/sys/kernel/hostname').strip
