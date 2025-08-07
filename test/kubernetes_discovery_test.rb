@@ -207,10 +207,10 @@ class KubernetesDiscoveryTest < Minitest::Test
 
     # Check remap source includes k8s labels
     remap_source = config['transforms'][transform_name]['source']
-    assert_match /\.tags\."k8s\.namespace\.name" = "test-namespace"/, remap_source
-    assert_match /\.tags\."k8s\.pod\.name" = "test-pod"/, remap_source
-    assert_match /\.tags\."k8s\.node\.name" = "test-node"/, remap_source
-    assert_match /\.tags\."k8s\.deployment\.name" = "test-app"/, remap_source
+    assert_match /\.tags\."resource\.k8s\.namespace\.name" = "test-namespace"/, remap_source
+    assert_match /\.tags\."resource\.k8s\.pod\.name" = "test-pod"/, remap_source
+    assert_match /\.tags\."resource\.k8s\.node\.name" = "test-node"/, remap_source
+    assert_match /\.tags\."resource\.k8s\.deployment\.name" = "test-app"/, remap_source
   end
 
   def test_generate_config_excludes_nil_labels
@@ -230,8 +230,8 @@ class KubernetesDiscoveryTest < Minitest::Test
     remap_source = config['transforms'][transform_name]['source']
 
     # Should include namespace and pod
-    assert_match /\.tags\."k8s\.namespace\.name" = "test-namespace"/, remap_source
-    assert_match /\.tags\."k8s\.pod\.name" = "test-pod"/, remap_source
+    assert_match /\.tags\."resource\.k8s\.namespace\.name" = "test-namespace"/, remap_source
+    assert_match /\.tags\."resource\.k8s\.pod\.name" = "test-pod"/, remap_source
 
     # Should not include nil fields
     refute_match /deployment_name/, remap_source

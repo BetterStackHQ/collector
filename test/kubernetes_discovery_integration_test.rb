@@ -156,7 +156,7 @@ class KubernetesDiscoveryIntegrationTest < Minitest::Test
                 webapp_config = YAML.load_file(webapp_file)
                 # Check transform remap source for k8s.deployment.name
                 transform_source = webapp_config['transforms'].values.first['source']
-                assert_match /\.tags\."k8s\.deployment\.name" = "webapp-deployment"/, transform_source
+                assert_match /\.tags\."resource\.k8s\.deployment\.name" = "webapp-deployment"/, transform_source
 
                 # Check job workload (cronjob pod)
                 job_file = config_files.find { |f| f.include?('cronjob') }
@@ -164,9 +164,9 @@ class KubernetesDiscoveryIntegrationTest < Minitest::Test
                 job_config = YAML.load_file(job_file)
                 # Jobs don't have deployment/statefulset/daemonset labels
                 transform_source = job_config['transforms'].values.first['source']
-                refute_match /k8s\.deployment\.name/, transform_source
-                refute_match /k8s\.statefulset\.name/, transform_source
-                refute_match /k8s\.daemonset\.name/, transform_source
+                refute_match /resource\.k8s\.deployment\.name/, transform_source
+                refute_match /resource\.k8s\.statefulset\.name/, transform_source
+                refute_match /resource\.k8s\.daemonset\.name/, transform_source
 
                 # Check standalone pod (no workload)
                 standalone_file = config_files.find { |f| f.include?('standalone') }
@@ -174,9 +174,9 @@ class KubernetesDiscoveryIntegrationTest < Minitest::Test
                 standalone_config = YAML.load_file(standalone_file)
                 transform_source = standalone_config['transforms'].values.first['source']
                 # Should have basic k8s labels but no workload labels
-                assert_match /k8s\.namespace\.name/, transform_source
-                assert_match /k8s\.pod\.name/, transform_source
-                refute_match /k8s\.deployment\.name/, transform_source
+                assert_match /resource\.k8s\.namespace\.name/, transform_source
+                assert_match /resource\.k8s\.pod\.name/, transform_source
+                refute_match /resource\.k8s\.deployment\.name/, transform_source
               end
             end
           end
