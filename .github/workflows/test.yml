@@ -28,3 +28,25 @@ jobs:
 
     - name: Validate Docker compose build
       run: docker compose build --no-cache
+
+  # The diff is expected to be:
+  # 8a9,10
+  # >     security_opt:
+  # >       - seccomp=collector-seccomp.json
+  # if there are more lines, it's likely drift and shouldn't be released
+  docker-compose-match:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: check diff between docker-compose.yml and docker-compose.seccomp.yml
+      run: |
+        DIFF_LINES=$(diff docker-compose.yml docker-compose.seccomp.yml | wc -l)
+        if [ "$DIFF_LINES" -ne 3 ]; then
+          echo "ERROR: Expected exactly 3 lines of diff, but got $DIFF_LINES lines"
+          echo "Diff output:"
+          diff docker-compose.yml docker-compose.seccomp.yml
+          exit 1
+        fi
+        echo "✓ Diff is exactly 3 lines as expected" 

@@ -170,6 +170,10 @@ class UtilsTest < Minitest::Test
   end
 
   def test_hostname
+    # Pretend hostname is not available to test other fallback mechanisms
+    original_hostname = ENV['HOSTNAME']
+    ENV['HOSTNAME'] = nil
+
     # Test fallback to Socket.gethostname when host files not available
     # Mock Socket.gethostname to return a known value
     original_method = Socket.method(:gethostname)
@@ -212,6 +216,13 @@ class UtilsTest < Minitest::Test
     # Restore original methods
     File.define_singleton_method(:exist?, original_exist)
     File.define_singleton_method(:read, original_read)
+
+    # Despite all the previous setup, if HOSTNAME is set, it should be used
+    ENV['HOSTNAME'] = 'host-from-env'
+    assert_equal "host-from-env", hostname
+
+    # Restore original env var
+    ENV['HOSTNAME'] = original_hostname
   end
 
 end
