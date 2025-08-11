@@ -1,5 +1,7 @@
 source 'https://rubygems.org'
 
+gem 'csv'
+
 group :development, :test do
   gem 'minitest'
   gem 'webmock'

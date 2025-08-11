@@ -46,7 +46,7 @@ RUN mkdir -p /versions/0-default \
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
 ENV CLUSTER_COLLECTOR=false
-ENV COLLECTOR_VERSION=1.0.14
+ENV COLLECTOR_VERSION=1.0.15
 ENV VECTOR_VERSION=0.47.0
 ENV BEYLA_VERSION=2.2.4
 ENV CLUSTER_AGENT_VERSION=1.2.4
@@ -79,6 +79,7 @@ COPY should_run_cluster_collector.rb /should_run_cluster_collector.rb
 COPY --chmod=755 cluster-collector.sh /cluster-collector.sh
 COPY --chmod=755 ebpf.sh /ebpf.sh
 COPY dockerprobe/docker-mappings.default.csv /enrichment/docker-mappings.csv
+COPY dockerprobe/databases.default.csv /enrichment/databases.csv
 
 # Create initial vector-config with symlinks to defaults
 RUN mkdir -p /vector-config/0-default \

@@ -6,6 +6,8 @@ require 'socket'
 module Utils
   ENRICHMENT_TABLE_PATH = "/enrichment/docker-mappings.csv"
   ENRICHMENT_TABLE_INCOMING_PATH = "/enrichment/docker-mappings.incoming.csv"
+  DATABASES_TABLE_PATH = "/enrichment/databases.csv"
+  DATABASES_TABLE_INCOMING_PATH = "/enrichment/databases.incoming.csv"
 
   # Shared and main.rb specific functions
   def latest_version

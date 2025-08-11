@@ -3,6 +3,7 @@ require_relative 'kubernetes_discovery'
 require_relative 'vector_config'
 require_relative 'ebpf_compatibility_checker'
 require_relative 'vector_enrichment_table'
+require_relative 'databases_enrichment_table'
 require 'net/http'
 require 'fileutils'
 require 'time'
@@ -27,7 +28,14 @@ class BetterStackClient
     @kubernetes_discovery = KubernetesDiscovery.new(working_dir)
     @vector_config = VectorConfig.new(working_dir)
     @ebpf_compatibility_checker = EbpfCompatibilityChecker.new(working_dir)
-    @vector_enrichment_table = VectorEnrichmentTable.new(ENRICHMENT_TABLE_PATH, ENRICHMENT_TABLE_INCOMING_PATH)
+
+    enrichment_path = File.join(working_dir, 'enrichment', 'docker-mappings.csv')
+    enrichment_incoming_path = File.join(working_dir, 'enrichment', 'docker-mappings.incoming.csv')
+    @vector_enrichment_table = VectorEnrichmentTable.new(enrichment_path, enrichment_incoming_path)
+
+    databases_path = File.join(working_dir, 'enrichment', 'databases.csv')
+    databases_incoming_path = File.join(working_dir, 'enrichment', 'databases.incoming.csv')
+    @databases_enrichment_table = DatabasesEnrichmentTable.new(databases_path, databases_incoming_path)
   end
 
   def make_post_request(path, params)
@@ -109,7 +117,7 @@ class BetterStackClient
 
       result = @vector_config.promote_dir(new_config_dir)
       clear_error
-      
+
       return result
     end
 
@@ -129,6 +137,20 @@ class BetterStackClient
   end
 
   def promote_enrichment_table = @vector_enrichment_table.promote
+
+  def databases_table_changed? = @databases_enrichment_table.different?
+
+  def validate_databases_table
+    output = @databases_enrichment_table.validate
+    unless output.nil?
+      write_error("Validation failed for databases enrichment table\n\n#{output}")
+      return output
+    end
+
+    nil
+  end
+
+  def promote_databases_table = @databases_enrichment_table.promote
 
   def process_ping(code, body)
     case code
@@ -197,6 +219,8 @@ class BetterStackClient
 
       puts "Downloading configuration files for version #{new_version}..."
       all_files_downloaded = true
+      databases_csv_exists = false
+
       data['files'].each do |file_info|
         # Assuming file_info is a hash {'url': '...', 'name': '...'} or just a URL string
         file_url = @base_url + (file_info.is_a?(Hash) ? file_info['path'] : file_info)
@@ -209,7 +233,10 @@ class BetterStackClient
           break
         end
 
-        path = "#{@working_dir}/versions/#{new_version}/#{filename}".gsub(/\/+/, '/')
+        # Track if databases.csv is included in this version
+        databases_csv_exists = true if filename == "databases.csv"
+
+        path = "#{@working_dir}/versions/#{new_version}/#{filename}".gsub(%r{/+}, '/')
         puts "Downloading #{filename} to #{path}"
 
         unless download_file(file_url, path)
@@ -234,8 +261,36 @@ class BetterStackClient
         return
       end
 
+      # Validate databases.csv if it exists in this version
+      if databases_csv_exists
+        databases_csv_path = File.join(version_dir, 'databases.csv')
+
+        # Get the incoming path from the databases_enrichment_table instance
+        incoming_path = @databases_enrichment_table.incoming_path
+
+        # Ensure the enrichment directory exists and copy to incoming path for validation
+        FileUtils.mkdir_p(File.dirname(incoming_path))
+        FileUtils.cp(databases_csv_path, incoming_path)
+
+        databases_validate_output = @databases_enrichment_table.validate
+        unless databases_validate_output.nil?
+          write_error("Validation failed for databases enrichment table\n\n#{databases_validate_output}")
+          # Clean up the incoming file on validation failure
+          FileUtils.rm_f(incoming_path)
+          return
+        end
+      end
+
+      # All validations passed, now promote everything
       @vector_config.promote_upstream_files(version_dir)
-      return true
+
+      # Promote databases.csv if it was included and validated
+      if databases_csv_exists
+        @databases_enrichment_table.promote
+        puts "Promoted databases.csv to #{@databases_enrichment_table.target_path}"
+      end
+
+      true
     else
       write_error("Failed to fetch configuration for version #{new_version}. Response code: #{code}")
     end
