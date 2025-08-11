@@ -2,7 +2,7 @@ require_relative 'utils'
 require_relative 'kubernetes_discovery'
 require_relative 'vector_config'
 require_relative 'ebpf_compatibility_checker'
-require_relative 'vector_enrichment_table'
+require_relative 'containers_enrichment_table'
 require_relative 'databases_enrichment_table'
 require 'net/http'
 require 'fileutils'
@@ -29,9 +29,9 @@ class BetterStackClient
     @vector_config = VectorConfig.new(working_dir)
     @ebpf_compatibility_checker = EbpfCompatibilityChecker.new(working_dir)
 
-    enrichment_path = File.join(working_dir, 'enrichment', 'docker-mappings.csv')
-    enrichment_incoming_path = File.join(working_dir, 'enrichment', 'docker-mappings.incoming.csv')
-    @vector_enrichment_table = VectorEnrichmentTable.new(enrichment_path, enrichment_incoming_path)
+    containers_path = File.join(working_dir, 'enrichment', 'docker-mappings.csv')
+    containers_incoming_path = File.join(working_dir, 'enrichment', 'docker-mappings.incoming.csv')
+    @containers_enrichment_table = ContainersEnrichmentTable.new(containers_path, containers_incoming_path)
 
     databases_path = File.join(working_dir, 'enrichment', 'databases.csv')
     databases_incoming_path = File.join(working_dir, 'enrichment', 'databases.incoming.csv')
@@ -124,10 +124,10 @@ class BetterStackClient
     false
   end
 
-  def enrichment_table_changed? = @vector_enrichment_table.different?
+  def enrichment_table_changed? = @containers_enrichment_table.different?
 
   def validate_enrichment_table
-    output = @vector_enrichment_table.validate
+    output = @containers_enrichment_table.validate
     unless output.nil?
       write_error("Validation failed for enrichment table\n\n#{output}")
       return output
@@ -136,7 +136,7 @@ class BetterStackClient
     nil
   end
 
-  def promote_enrichment_table = @vector_enrichment_table.promote
+  def promote_enrichment_table = @containers_enrichment_table.promote
 
   def databases_table_changed? = @databases_enrichment_table.different?
 
