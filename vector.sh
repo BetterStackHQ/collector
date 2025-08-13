@@ -17,10 +17,21 @@ echo "  AZ=${AZ}"
 export PROCFS_ROOT="/host/proc"
 export SYSFS_ROOT="/host/sys"
 
-# Ensure enrichment directory exists with dummy CSV if needed
+# Ensure enrichment directory exists
 if [ ! -d "/enrichment" ]; then
     echo "Creating /enrichment directory..."
     mkdir -p /enrichment
+fi
+
+# Copy default enrichment files if they don't exist
+if [ ! -f "/enrichment/databases.csv" ] && [ -f "/enrichment-defaults/databases.csv" ]; then
+    echo "Copying default databases.csv to /enrichment..."
+    cp /enrichment-defaults/databases.csv /enrichment/databases.csv
+fi
+
+if [ ! -f "/enrichment/docker-mappings.csv" ] && [ -f "/enrichment-defaults/docker-mappings.csv" ]; then
+    echo "Copying default docker-mappings.csv to /enrichment..."
+    cp /enrichment-defaults/docker-mappings.csv /enrichment/docker-mappings.csv
 fi
 
 echo "Starting Vector..."

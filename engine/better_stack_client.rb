@@ -253,13 +253,7 @@ class BetterStackClient
 
       puts "All files downloaded. Validating configuration..."
 
-      # Validate vector config
       version_dir = File.join(@working_dir, "versions", new_version)
-      validate_output = @vector_config.validate_upstream_files(version_dir)
-      unless validate_output.nil?
-        write_error("Validation failed for vector config in #{new_version}\n\n#{validate_output}")
-        return
-      end
 
       # Validate databases.csv if it exists in this version
       if databases_csv_exists
@@ -280,6 +274,14 @@ class BetterStackClient
           return
         end
       end
+
+      # Validate vector config
+      validate_output = @vector_config.validate_upstream_files(version_dir)
+      unless validate_output.nil?
+        write_error("Validation failed for vector config in #{new_version}\n\n#{validate_output}")
+        return
+      end
+
 
       # All validations passed, now promote everything
       @vector_config.promote_upstream_files(version_dir)
