@@ -81,7 +81,7 @@ COPY --chmod=755 cluster-collector.sh /cluster-collector.sh
 COPY --chmod=755 ebpf.sh /ebpf.sh
 # Copy default enrichment files to both locations
 # /enrichment-defaults is the source for copying at runtime
-# /enrichment is for backwards compatibility when not using volumes
+# /enrichment is for Kubernetes compatibility, since it's volume mounts work differently from compose/swarm
 COPY dockerprobe/docker-mappings.default.csv /enrichment-defaults/docker-mappings.csv
 COPY dockerprobe/databases.default.csv /enrichment-defaults/databases.csv
 COPY dockerprobe/docker-mappings.default.csv /enrichment/docker-mappings.csv
