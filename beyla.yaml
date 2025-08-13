@@ -10,9 +10,6 @@ otel_metrics_export:
     - application
     - application_process
 
-network:
-  enable: true
-
 attributes:
   select:
     http_server_request_duration:
@@ -23,5 +20,3 @@ attributes:
       include: ["service.name", "server.address", "http.response.status_code"]
     rpc_client_duration:
       include: ["service.name", "server.address", "rpc.grpc.status_code"]
-    beyla_network_flow_bytes:
-      include: ["src.name", "src.port", "dst.name", "dst.port"]
