@@ -2,9 +2,9 @@ require 'bundler/setup'
 require 'minitest/autorun'
 require 'tempfile'
 require 'fileutils'
-require_relative '../engine/vector_enrichment_table'
+require_relative '../engine/containers_enrichment_table'
 
-class VectorEnrichmentTableTest < Minitest::Test
+class ContainersEnrichmentTableTest < Minitest::Test
   def test_same_content_returns_false
     Dir.mktmpdir do |dir|
       target_path = File.join(dir, 'docker-mappings.csv')
@@ -12,7 +12,7 @@ class VectorEnrichmentTableTest < Minitest::Test
       File.write(target_path, "pid,container_name,container_id,image_name\n1234,name,deadbeefbad0,image")
       File.write(incoming_path, "pid,container_name,container_id,image_name\n1234,name,deadbeefbad0,image")
 
-      enrichment_table = VectorEnrichmentTable.new(target_path, incoming_path)
+      enrichment_table = ContainersEnrichmentTable.new(target_path, incoming_path)
       
       refute enrichment_table.different?
     end
@@ -22,7 +22,7 @@ class VectorEnrichmentTableTest < Minitest::Test
     Dir.mktmpdir do |dir|
       target_path = File.join(dir, 'docker-mappings.csv')
       incoming_path = File.join(dir, 'docker-mappings.incoming.csv')
-      enrichment_table = VectorEnrichmentTable.new(target_path, incoming_path)
+      enrichment_table = ContainersEnrichmentTable.new(target_path, incoming_path)
 
       File.write(target_path, "pid,container_name,container_id,image_name\n1234,name,deadbeefbad0,image")
       File.write(incoming_path, "pid,container_name,container_id,image_name\n1234,name,decafcoffee9,image")
@@ -32,7 +32,7 @@ class VectorEnrichmentTableTest < Minitest::Test
   end
 
   def test_imaginary_path_returns_nil
-    result = VectorEnrichmentTable.new('/imaginary/path.csv', '/imaginary/path.incoming.csv').different?
+    result = ContainersEnrichmentTable.new('/imaginary/path.csv', '/imaginary/path.incoming.csv').different?
     refute result
   end
 
@@ -40,7 +40,7 @@ class VectorEnrichmentTableTest < Minitest::Test
     Dir.mktmpdir do |dir|
       target_path = File.join(dir, 'docker-mappings.csv')
       incoming_path = File.join(dir, 'docker-mappings.incoming.csv')
-      enrichment_table = VectorEnrichmentTable.new(target_path, incoming_path)
+      enrichment_table = ContainersEnrichmentTable.new(target_path, incoming_path)
 
       refute enrichment_table.different?
     end
@@ -50,9 +50,9 @@ class VectorEnrichmentTableTest < Minitest::Test
     Dir.mktmpdir do |dir|
       target_path = File.join(dir, 'docker-mappings.csv')
       incoming_path = File.join(dir, 'docker-mappings.incoming.csv')
-      enrichment_table = VectorEnrichmentTable.new(target_path, incoming_path)
+      enrichment_table = ContainersEnrichmentTable.new(target_path, incoming_path)
 
-      assert_equal "Enrichment table not found at #{incoming_path}", enrichment_table.validate
+      assert_equal "Containers enrichment table not found at #{incoming_path}", enrichment_table.validate
     end
   end
 
@@ -60,12 +60,12 @@ class VectorEnrichmentTableTest < Minitest::Test
     Dir.mktmpdir do |dir|
       target_path = File.join(dir, 'docker-mappings.csv')
       incoming_path = File.join(dir, 'docker-mappings.incoming.csv')
-      enrichment_table = VectorEnrichmentTable.new(target_path, incoming_path)
+      enrichment_table = ContainersEnrichmentTable.new(target_path, incoming_path)
 
       File.write(incoming_path, '')
 
       result = enrichment_table.validate
-      assert_equal "Enrichment table is empty at #{incoming_path}", result
+      assert_equal "Containers enrichment table is empty at #{incoming_path}", result
     end
   end
 
@@ -73,12 +73,12 @@ class VectorEnrichmentTableTest < Minitest::Test
     Dir.mktmpdir do |dir|
       target_path = File.join(dir, 'docker-mappings.csv')
       incoming_path = File.join(dir, 'docker-mappings.incoming.csv')
-      enrichment_table = VectorEnrichmentTable.new(target_path, incoming_path)
+      enrichment_table = ContainersEnrichmentTable.new(target_path, incoming_path)
 
       File.write(incoming_path, "wrong,header,format\n")
       
       result = enrichment_table.validate
-      assert_equal "Enrichment table is not valid at #{incoming_path}", result
+      assert_equal "Containers enrichment table is not valid at #{incoming_path}", result
     end
   end
 
@@ -86,7 +86,7 @@ class VectorEnrichmentTableTest < Minitest::Test
     Dir.mktmpdir do |dir|
       target_path = File.join(dir, 'docker-mappings.csv')
       incoming_path = File.join(dir, 'docker-mappings.incoming.csv')
-      enrichment_table = VectorEnrichmentTable.new(target_path, incoming_path)
+      enrichment_table = ContainersEnrichmentTable.new(target_path, incoming_path)
 
       File.write(incoming_path, "pid,container_name,container_id,image_name\n123,test-container,abc123,test-image\n")
       
@@ -99,7 +99,7 @@ class VectorEnrichmentTableTest < Minitest::Test
     Dir.mktmpdir do |dir|
       target_path = File.join(dir, 'docker-mappings.csv')
       incoming_path = File.join(dir, 'docker-mappings.incoming.csv')
-      enrichment_table = VectorEnrichmentTable.new(target_path, incoming_path)
+      enrichment_table = ContainersEnrichmentTable.new(target_path, incoming_path)
 
       File.write(incoming_path, "  pid,container_name,container_id,image_name  \n123,test-container,abc123,test-image\n")
       
@@ -112,7 +112,7 @@ class VectorEnrichmentTableTest < Minitest::Test
     Dir.mktmpdir do |dir|
       target_path = File.join(dir, 'docker-mappings.csv')
       incoming_path = File.join(dir, 'docker-mappings.incoming.csv')
-      enrichment_table = VectorEnrichmentTable.new(target_path, incoming_path)
+      enrichment_table = ContainersEnrichmentTable.new(target_path, incoming_path)
 
       File.write(incoming_path, "pid,container_name,container_id,image_name\n")
       
@@ -125,12 +125,12 @@ class VectorEnrichmentTableTest < Minitest::Test
     Dir.mktmpdir do |dir|
       target_path = File.join(dir, 'docker-mappings.csv')
       incoming_path = File.join(dir, 'docker-mappings.incoming.csv')
-      enrichment_table = VectorEnrichmentTable.new(target_path, incoming_path)
+      enrichment_table = ContainersEnrichmentTable.new(target_path, incoming_path)
 
       File.write(incoming_path, "pid,container_name,container_id,image_name,extra\n")
       
       result = enrichment_table.validate
-      assert_equal "Enrichment table is not valid at #{incoming_path}", result
+      assert_equal "Containers enrichment table is not valid at #{incoming_path}", result
     end
   end
 
@@ -138,12 +138,12 @@ class VectorEnrichmentTableTest < Minitest::Test
     Dir.mktmpdir do |dir|
       target_path = File.join(dir, 'docker-mappings.csv')
       incoming_path = File.join(dir, 'docker-mappings.incoming.csv')
-      enrichment_table = VectorEnrichmentTable.new(target_path, incoming_path)
+      enrichment_table = ContainersEnrichmentTable.new(target_path, incoming_path)
 
       File.write(incoming_path, "pid,container_name,container_id\n")
       
       result = enrichment_table.validate
-      assert_equal "Enrichment table is not valid at #{incoming_path}", result
+      assert_equal "Containers enrichment table is not valid at #{incoming_path}", result
     end
   end
 
@@ -153,7 +153,7 @@ class VectorEnrichmentTableTest < Minitest::Test
       incoming_path = File.join(dir, 'docker-mappings.incoming.csv')
       content = "pid,container_name,container_id,image_name\n123,test-container,abc123,test-image\n"
       File.write(incoming_path, content)
-      enrichment_table = VectorEnrichmentTable.new(target_path, incoming_path)
+      enrichment_table = ContainersEnrichmentTable.new(target_path, incoming_path)
 
       enrichment_table.promote
 

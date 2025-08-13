@@ -560,6 +560,206 @@ class BetterStackClientTest < Minitest::Test
     assert error_content.include?("404")
   end
 
+  def test_process_configuration_handles_databases_csv
+    new_version = "2023-01-01T00:00:00"
+    version_dir = File.join(@test_dir, 'versions', new_version)
+    FileUtils.mkdir_p(version_dir)
+    
+    # Create enrichment directory
+    FileUtils.mkdir_p(File.join(@test_dir, 'enrichment'))
+
+    # Track method calls
+    vector_validate_called = false
+    vector_promote_called = false
+    databases_validate_called = false
+    databases_promote_called = false
+
+    # Mock vector_config methods
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:validate_upstream_files) do |dir|
+      vector_validate_called = true
+      nil # validation passes
+    end
+
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:promote_upstream_files) do |dir|
+      vector_promote_called = true
+    end
+
+    # Mock databases_enrichment_table methods
+    @client.instance_variable_get(:@databases_enrichment_table).define_singleton_method(:validate) do
+      databases_validate_called = true
+      nil # validation passes
+    end
+
+    @client.instance_variable_get(:@databases_enrichment_table).define_singleton_method(:promote) do
+      databases_promote_called = true
+    end
+
+    def @client.download_file(url, path)
+      FileUtils.mkdir_p(File.dirname(path))
+      
+      # Create different content for different files
+      if path.include?('databases.csv')
+        File.write(path, "identifier,container,service,host\ndb1,container1,service1,host1\n")
+      else
+        File.write(path, "test content")
+      end
+      return true
+    end
+
+    # Sample response data including databases.csv
+    code = "200"
+    body = {
+      files: [
+        { path: "/collector/file/vector.yaml", name: "vector.yaml" },
+        { path: "/collector/file/databases.json", name: "databases.json" },
+        { path: "/collector/file/databases.csv", name: "databases.csv" }
+      ]
+    }.to_json
+
+    @client.process_configuration(new_version, code, body)
+
+    # Test actual behavior - all files should be downloaded
+    assert File.exist?(File.join(version_dir, "vector.yaml"))
+    assert File.exist?(File.join(version_dir, "databases.json"))
+    assert File.exist?(File.join(version_dir, "databases.csv"))
+    
+    # Verify databases.csv content
+    databases_content = File.read(File.join(version_dir, "databases.csv"))
+    assert databases_content.include?("identifier,container,service,host")
+
+    # All validations and promotions should be called
+    assert vector_validate_called, "vector validate_upstream_files should be called"
+    assert vector_promote_called, "vector promote_upstream_files should be called"
+    assert databases_validate_called, "databases validate should be called"
+    assert databases_promote_called, "databases promote should be called"
+
+    # Reset the method to not affect other tests
+    class << @client
+      remove_method :download_file
+    end
+  end
+
+  def test_process_configuration_validates_databases_csv_headers
+    new_version = "2023-01-01T00:00:00"
+    version_dir = File.join(@test_dir, 'versions', new_version)
+    FileUtils.mkdir_p(version_dir)
+
+    # Track method calls
+    vector_promote_called = false
+    databases_promote_called = false
+
+    # Mock vector_config methods
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:validate_upstream_files) do |dir|
+      nil # validation passes
+    end
+
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:promote_upstream_files) do |dir|
+      vector_promote_called = true
+    end
+
+    # Mock databases_enrichment_table to fail validation
+    @client.instance_variable_get(:@databases_enrichment_table).define_singleton_method(:validate) do
+      "Databases enrichment table has invalid headers"
+    end
+
+    @client.instance_variable_get(:@databases_enrichment_table).define_singleton_method(:promote) do
+      databases_promote_called = true
+    end
+
+    def @client.download_file(url, path)
+      FileUtils.mkdir_p(File.dirname(path))
+      
+      # Create databases.csv with wrong headers
+      if path.include?('databases.csv')
+        File.write(path, "wrong,headers,here,now\n")
+      else
+        File.write(path, "test content")
+      end
+      return true
+    end
+
+    # Sample response data including databases.csv
+    code = "200"
+    body = {
+      files: [
+        { path: "/collector/file/vector.yaml", name: "vector.yaml" },
+        { path: "/collector/file/databases.csv", name: "databases.csv" }
+      ]
+    }.to_json
+
+    @client.process_configuration(new_version, code, body)
+
+    # Test actual behavior - should write error and not promote
+    assert File.exist?(File.join(@test_dir, 'errors.txt'))
+    error_content = File.read(File.join(@test_dir, 'errors.txt'))
+    assert error_content.include?("invalid headers")
+    
+    # Vector and databases should not be promoted when databases validation fails
+    assert !vector_promote_called, "vector should not be promoted when databases validation fails"
+    assert !databases_promote_called, "databases should not be promoted when validation fails"
+
+    # Reset the method to not affect other tests
+    class << @client
+      remove_method :download_file
+    end
+  end
+
+  def test_process_configuration_works_without_databases_csv
+    new_version = "2023-01-01T00:00:00"
+    version_dir = File.join(@test_dir, 'versions', new_version)
+    FileUtils.mkdir_p(version_dir)
+
+    # Track method calls
+    databases_validate_called = false
+    databases_promote_called = false
+
+    # Mock vector_config methods
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:validate_upstream_files) do |dir|
+      nil # validation passes
+    end
+
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:promote_upstream_files) do |dir|
+      # Promotion succeeds
+    end
+
+    # Mock databases_enrichment_table methods
+    @client.instance_variable_get(:@databases_enrichment_table).define_singleton_method(:validate) do
+      databases_validate_called = true
+      nil
+    end
+
+    @client.instance_variable_get(:@databases_enrichment_table).define_singleton_method(:promote) do
+      databases_promote_called = true
+    end
+
+    def @client.download_file(url, path)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "test content")
+      return true
+    end
+
+    # Sample response data WITHOUT databases.csv
+    code = "200"
+    body = {
+      files: [
+        { path: "/collector/file/vector.yaml", name: "vector.yaml" },
+        { path: "/collector/file/databases.json", name: "databases.json" }
+      ]
+    }.to_json
+
+    result = @client.process_configuration(new_version, code, body)
+
+    # Test actual behavior - should succeed without databases.csv
+    assert_equal true, result
+    assert !databases_validate_called, "databases validate should not be called when file not present"
+    assert !databases_promote_called, "databases promote should not be called when file not present"
+
+    # Reset the method to not affect other tests
+    class << @client
+      remove_method :download_file
+    end
+  end
+
 
   def test_cluster_collector_returns_false_on_409_response
     # Mock hostname method
@@ -595,7 +795,7 @@ class BetterStackClientTest < Minitest::Test
 
   def test_validate_enrichment_table_returns_error_when_enrichment_table_has_changed_and_validation_fails
     # Mock enrichment table to return true
-    @client.instance_variable_get(:@vector_enrichment_table).define_singleton_method(:validate) { "Validation failed for enrichment table" }
+    @client.instance_variable_get(:@containers_enrichment_table).define_singleton_method(:validate) { "Validation failed for enrichment table" }
     result = @client.validate_enrichment_table
 
     assert_equal "Validation failed for enrichment table", result
@@ -603,9 +803,51 @@ class BetterStackClientTest < Minitest::Test
 
   def test_validate_enrichment_table_returns_nil_when_enrichment_table_has_changed_and_validation_passes
     # Mock enrichment table to return true
-    @client.instance_variable_get(:@vector_enrichment_table).define_singleton_method(:validate) { nil }
+    @client.instance_variable_get(:@containers_enrichment_table).define_singleton_method(:validate) { nil }
     result = @client.validate_enrichment_table
 
     assert_nil result
+  end
+
+  def test_databases_table_changed_returns_true_when_different
+    @client.instance_variable_get(:@databases_enrichment_table).define_singleton_method(:different?) { true }
+    result = @client.databases_table_changed?
+    
+    assert_equal true, result
+  end
+
+  def test_databases_table_changed_returns_false_when_same
+    @client.instance_variable_get(:@databases_enrichment_table).define_singleton_method(:different?) { false }
+    result = @client.databases_table_changed?
+    
+    assert_equal false, result
+  end
+
+  def test_validate_databases_table_returns_error_when_validation_fails
+    @client.instance_variable_get(:@databases_enrichment_table).define_singleton_method(:validate) { "Invalid headers in databases.csv" }
+    result = @client.validate_databases_table
+    
+    assert_equal "Invalid headers in databases.csv", result
+    assert File.exist?(File.join(@test_dir, 'errors.txt'))
+    error_content = File.read(File.join(@test_dir, 'errors.txt'))
+    assert error_content.include?("Invalid headers")
+  end
+
+  def test_validate_databases_table_returns_nil_when_validation_passes
+    @client.instance_variable_get(:@databases_enrichment_table).define_singleton_method(:validate) { nil }
+    result = @client.validate_databases_table
+    
+    assert_nil result
+  end
+
+  def test_promote_databases_table_calls_promote
+    promote_called = false
+    @client.instance_variable_get(:@databases_enrichment_table).define_singleton_method(:promote) do
+      promote_called = true
+    end
+    
+    @client.promote_databases_table
+    
+    assert promote_called, "promote should be called on databases_enrichment_table"
   end
 end

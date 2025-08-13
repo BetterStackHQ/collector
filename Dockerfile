@@ -17,13 +17,13 @@ FROM debian:12.11-slim
 
 # Install required packages
 RUN apt-get update && apt-get install -y \
-    ruby \
-    supervisor \
-    curl \
-    bash \
-    tini \
-    jq \
-    && rm -rf /var/lib/apt/lists/*
+  ruby \
+  supervisor \
+  curl \
+  bash \
+  tini \
+  jq \
+  && rm -rf /var/lib/apt/lists/*
 
 # Copy Vector from vector image
 COPY --from=vector --chmod=755 /usr/bin/vector /usr/local/bin/vector
@@ -37,16 +37,16 @@ COPY --from=mdprobe-builder --chmod=755 /bin/mdprobe /usr/local/bin/mdprobe
 
 # Create necessary directories
 RUN mkdir -p /versions/0-default \
-    && mkdir -p /etc/supervisor/conf.d \
-    && mkdir -p /var/lib/vector \
-    && mkdir -p /var/log/supervisor \
-    && mkdir -p /kubernetes-discovery/0-default \
-    && mkdir -p /vector-config
+  && mkdir -p /etc/supervisor/conf.d \
+  && mkdir -p /var/lib/vector \
+  && mkdir -p /var/log/supervisor \
+  && mkdir -p /kubernetes-discovery/0-default \
+  && mkdir -p /vector-config
 
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
 ENV CLUSTER_COLLECTOR=false
-ENV COLLECTOR_VERSION=1.0.14
+ENV COLLECTOR_VERSION=1.0.15
 ENV VECTOR_VERSION=0.47.0
 ENV BEYLA_VERSION=2.2.4
 ENV CLUSTER_AGENT_VERSION=1.2.4
@@ -79,14 +79,15 @@ COPY should_run_cluster_collector.rb /should_run_cluster_collector.rb
 COPY --chmod=755 cluster-collector.sh /cluster-collector.sh
 COPY --chmod=755 ebpf.sh /ebpf.sh
 COPY dockerprobe/docker-mappings.default.csv /enrichment/docker-mappings.csv
+COPY dockerprobe/databases.default.csv /enrichment/databases.csv
 
 # Create initial vector-config with symlinks to defaults
 RUN mkdir -p /vector-config/0-default \
-    && mkdir -p /vector-config/latest-valid-upstream \
-    && ln -s /versions/0-default/vector.yaml /vector-config/0-default/vector.yaml \
-    && ln -s /kubernetes-discovery/0-default /vector-config/0-default/kubernetes-discovery \
-    && ln -s /vector-config/0-default /vector-config/current \
-    && cp /versions/0-default/vector.yaml /vector-config/latest-valid-upstream/vector.yaml
+  && mkdir -p /vector-config/latest-valid-upstream \
+  && ln -s /versions/0-default/vector.yaml /vector-config/0-default/vector.yaml \
+  && ln -s /kubernetes-discovery/0-default /vector-config/0-default/kubernetes-discovery \
+  && ln -s /vector-config/0-default /vector-config/current \
+  && cp /versions/0-default/vector.yaml /vector-config/latest-valid-upstream/vector.yaml
 
 # Install tini and use it as init to handle signals properly
 ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
