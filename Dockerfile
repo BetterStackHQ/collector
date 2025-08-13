@@ -41,12 +41,13 @@ RUN mkdir -p /versions/0-default \
   && mkdir -p /var/lib/vector \
   && mkdir -p /var/log/supervisor \
   && mkdir -p /kubernetes-discovery/0-default \
-  && mkdir -p /vector-config
+  && mkdir -p /vector-config \
+  && mkdir -p /enrichment-defaults
 
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
 ENV CLUSTER_COLLECTOR=false
-ENV COLLECTOR_VERSION=1.0.15
+ENV COLLECTOR_VERSION=1.0.16
 ENV VECTOR_VERSION=0.47.0
 ENV BEYLA_VERSION=2.2.4
 ENV CLUSTER_AGENT_VERSION=1.2.4
@@ -78,6 +79,11 @@ COPY engine /engine
 COPY should_run_cluster_collector.rb /should_run_cluster_collector.rb
 COPY --chmod=755 cluster-collector.sh /cluster-collector.sh
 COPY --chmod=755 ebpf.sh /ebpf.sh
+# Copy default enrichment files to both locations
+# /enrichment-defaults is the source for copying at runtime
+# /enrichment is for backwards compatibility when not using volumes
+COPY dockerprobe/docker-mappings.default.csv /enrichment-defaults/docker-mappings.csv
+COPY dockerprobe/databases.default.csv /enrichment-defaults/databases.csv
 COPY dockerprobe/docker-mappings.default.csv /enrichment/docker-mappings.csv
 COPY dockerprobe/databases.default.csv /enrichment/databases.csv
 
