@@ -674,21 +674,6 @@
 		},
 		{
 			"names": [
-				"clone3"
-			],
-			"action": "SCMP_ACT_ERRNO",
-			"errnoRet": 38,
-			"args": [],
-			"comment": "",
-			"includes": {},
-			"excludes": {
-				"caps": [
-					"CAP_SYS_ADMIN"
-				]
-			}
-		},
-		{
-			"names": [
 				"reboot"
 			],
 			"action": "SCMP_ACT_ALLOW",
