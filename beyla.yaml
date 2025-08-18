@@ -9,6 +9,28 @@ otel_metrics_export:
   features:
     - application
     - application_process
+  # Required to enable SQL database metrics collection
+  instrumentations:
+    - "*"
+
+otel_traces_export:
+  # Required to create trace spans for database operations
+  instrumentations:
+    - "*"
+
+ebpf:
+  # Without this, Beyla only detects MySQL/PostgreSQL binary protocols
+  # Enable to capture SQL from ORMs, connection poolers, or other databases
+  heuristic_sql_detect: true
+  
+  # Required for tracking prepared statements which use numeric IDs instead of SQL text
+  mysql_prepared_statements_cache_size: 100
+  
+  # Without adequate buffer size, long SQL queries get truncated
+  # 4096 bytes captures most queries without excessive memory usage
+  buffer_sizes:
+    mysql: 4096
+    postgres: 4096
 
 attributes:
   select:
@@ -20,3 +42,10 @@ attributes:
       include: ["service.name", "server.address", "http.response.status_code"]
     rpc_client_duration:
       include: ["service.name", "server.address", "rpc.grpc.status_code"]
+    sql_client_duration:
+      include: ["*"]
+    # CRITICAL: Without this, traces show only "SELECT" not the actual query
+    # Beyla hides db.query.text by default for security reasons
+    traces:
+      include:
+        - "db.query.text"
