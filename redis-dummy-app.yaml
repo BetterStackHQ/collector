@@ -1,0 +1,164 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-dummy-app
+data:
+  app.py: |
+    import os
+    import time
+    import redis
+    from flask import Flask, jsonify
+    
+    app = Flask(__name__)
+    
+    # Get Redis connection details from environment
+    redis_host = os.environ.get('REDIS_HOST', 'redis-master')
+    redis_port = int(os.environ.get('REDIS_PORT', 6379))
+    redis_password = os.environ.get('REDIS_PASSWORD', '')
+    
+    # Create Redis client
+    r = redis.Redis(
+        host=redis_host,
+        port=redis_port,
+        password=redis_password,
+        decode_responses=True
+    )
+    
+    @app.route('/')
+    def home():
+        return jsonify({"message": "Redis Dummy App", "endpoints": ["/ping", "/set/<key>/<value>", "/get/<key>", "/increment", "/stats"]})
+    
+    @app.route('/ping')
+    def ping_redis():
+        try:
+            result = r.ping()
+            return jsonify({"status": "success", "redis_ping": result})
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e)}), 500
+    
+    @app.route('/set/<key>/<value>')
+    def set_value(key, value):
+        try:
+            r.set(key, value)
+            return jsonify({"status": "success", "key": key, "value": value})
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e)}), 500
+    
+    @app.route('/get/<key>')
+    def get_value(key):
+        try:
+            value = r.get(key)
+            return jsonify({"status": "success", "key": key, "value": value})
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e)}), 500
+    
+    @app.route('/increment')
+    def increment_counter():
+        try:
+            counter = r.incr('visit_counter')
+            return jsonify({"status": "success", "visit_counter": counter})
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e)}), 500
+    
+    @app.route('/stats')
+    def stats():
+        try:
+            info = r.info()
+            return jsonify({
+                "status": "success",
+                "connected_clients": info.get('connected_clients'),
+                "used_memory_human": info.get('used_memory_human'),
+                "total_connections_received": info.get('total_connections_received'),
+                "total_commands_processed": info.get('total_commands_processed')
+            })
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e)}), 500
+    
+    if __name__ == '__main__':
+        # Background task to periodically interact with Redis
+        import threading
+        
+        def background_task():
+            counter = 0
+            while True:
+                try:
+                    counter += 1
+                    r.set(f'background_task_run', counter)
+                    r.expire('background_task_run', 60)  # Expire after 60 seconds
+                    print(f"Background task run #{counter}")
+                except Exception as e:
+                    print(f"Background task error: {e}")
+                time.sleep(30)
+        
+        thread = threading.Thread(target=background_task)
+        thread.daemon = True
+        thread.start()
+        
+        app.run(host='0.0.0.0', port=5000)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-dummy-app
+  labels:
+    app: redis-dummy-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: redis-dummy-app
+  template:
+    metadata:
+      labels:
+        app: redis-dummy-app
+    spec:
+      containers:
+      - name: redis-dummy-app
+        image: python:3.9-slim
+        ports:
+        - containerPort: 5000
+        env:
+        - name: REDIS_HOST
+          value: "redis-master"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis
+              key: redis-password
+        command: ["/bin/sh"]
+        args:
+          - -c
+          - |
+            pip install flask redis
+            python /app/app.py
+        volumeMounts:
+        - name: app-code
+          mountPath: /app
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: app-code
+        configMap:
+          name: redis-dummy-app
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-dummy-app
+  labels:
+    app: redis-dummy-app
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 5000
+    protocol: TCP
+  selector:
+    app: redis-dummy-app

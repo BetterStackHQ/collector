@@ -1,0 +1,284 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-dummy-app-v2
+data:
+  app.py: |
+    import os
+    import time
+    import redis
+    from flask import Flask, jsonify
+    
+    app = Flask(__name__)
+    
+    # Original Redis connection
+    redis_host = os.environ.get('REDIS_HOST', 'redis-master')
+    redis_port = int(os.environ.get('REDIS_PORT', 6379))
+    redis_password = os.environ.get('REDIS_PASSWORD', '')
+    
+    # New standalone Redis connection
+    redis_standalone_host = os.environ.get('REDIS_STANDALONE_HOST', 'redis-standalone')
+    redis_standalone_port = int(os.environ.get('REDIS_STANDALONE_PORT', 6379))
+    redis_standalone_password = os.environ.get('REDIS_STANDALONE_PASSWORD', '')
+    
+    # Create Redis clients
+    r = redis.Redis(
+        host=redis_host,
+        port=redis_port,
+        password=redis_password,
+        decode_responses=True
+    )
+    
+    r_standalone = redis.Redis(
+        host=redis_standalone_host,
+        port=redis_standalone_port,
+        password=redis_standalone_password,
+        decode_responses=True
+    )
+    
+    @app.route('/')
+    def home():
+        return jsonify({
+            "message": "Redis Dummy App v2",
+            "endpoints": [
+                "/ping", "/set/<key>/<value>", "/get/<key>",
+                "/standalone/ping", "/standalone/set/<key>/<value>", "/standalone/get/<key>",
+                "/copy/<key>", "/sync-all", "/compare/<key>", "/stats", "/standalone/stats"
+            ]
+        })
+    
+    @app.route('/ping')
+    def ping_redis():
+        try:
+            result = r.ping()
+            return jsonify({"status": "success", "redis_ping": result, "instance": "primary"})
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e), "instance": "primary"}), 500
+    
+    @app.route('/standalone/ping')
+    def ping_standalone():
+        try:
+            result = r_standalone.ping()
+            return jsonify({"status": "success", "redis_ping": result, "instance": "standalone"})
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e), "instance": "standalone"}), 500
+    
+    @app.route('/set/<key>/<value>')
+    def set_value(key, value):
+        try:
+            r.set(key, value)
+            return jsonify({"status": "success", "key": key, "value": value, "instance": "primary"})
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e), "instance": "primary"}), 500
+    
+    @app.route('/standalone/set/<key>/<value>')
+    def set_standalone_value(key, value):
+        try:
+            r_standalone.set(key, value)
+            return jsonify({"status": "success", "key": key, "value": value, "instance": "standalone"})
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e), "instance": "standalone"}), 500
+    
+    @app.route('/get/<key>')
+    def get_value(key):
+        try:
+            value = r.get(key)
+            return jsonify({"status": "success", "key": key, "value": value, "instance": "primary"})
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e), "instance": "primary"}), 500
+    
+    @app.route('/standalone/get/<key>')
+    def get_standalone_value(key):
+        try:
+            value = r_standalone.get(key)
+            return jsonify({"status": "success", "key": key, "value": value, "instance": "standalone"})
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e), "instance": "standalone"}), 500
+    
+    @app.route('/copy/<key>')
+    def copy_to_standalone(key):
+        try:
+            value = r.get(key)
+            if value is None:
+                return jsonify({"status": "error", "error": "Key not found in primary Redis"}), 404
+            r_standalone.set(key, value)
+            return jsonify({"status": "success", "key": key, "value": value, "copied_to": "standalone"})
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e)}), 500
+    
+    @app.route('/sync-all')
+    def sync_all_keys():
+        try:
+            keys = r.keys('*')
+            synced = []
+            for key in keys:
+                value = r.get(key)
+                if value:
+                    r_standalone.set(key, value)
+                    synced.append(key)
+            return jsonify({"status": "success", "synced_keys": synced, "count": len(synced)})
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e)}), 500
+    
+    @app.route('/compare/<key>')
+    def compare_key(key):
+        try:
+            primary_value = r.get(key)
+            standalone_value = r_standalone.get(key)
+            return jsonify({
+                "status": "success",
+                "key": key,
+                "primary_value": primary_value,
+                "standalone_value": standalone_value,
+                "match": primary_value == standalone_value
+            })
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e)}), 500
+    
+    @app.route('/increment')
+    def increment_counter():
+        try:
+            counter = r.incr('visit_counter')
+            return jsonify({"status": "success", "visit_counter": counter, "instance": "primary"})
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e), "instance": "primary"}), 500
+    
+    @app.route('/standalone/increment')
+    def increment_standalone_counter():
+        try:
+            counter = r_standalone.incr('visit_counter')
+            return jsonify({"status": "success", "visit_counter": counter, "instance": "standalone"})
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e), "instance": "standalone"}), 500
+    
+    @app.route('/stats')
+    def stats():
+        try:
+            info = r.info()
+            return jsonify({
+                "status": "success",
+                "instance": "primary",
+                "connected_clients": info.get('connected_clients'),
+                "used_memory_human": info.get('used_memory_human'),
+                "total_connections_received": info.get('total_connections_received'),
+                "total_commands_processed": info.get('total_commands_processed')
+            })
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e), "instance": "primary"}), 500
+    
+    @app.route('/standalone/stats')
+    def standalone_stats():
+        try:
+            info = r_standalone.info()
+            return jsonify({
+                "status": "success",
+                "instance": "standalone",
+                "connected_clients": info.get('connected_clients'),
+                "used_memory_human": info.get('used_memory_human'),
+                "total_connections_received": info.get('total_connections_received'),
+                "total_commands_processed": info.get('total_commands_processed')
+            })
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e), "instance": "standalone"}), 500
+    
+    if __name__ == '__main__':
+        # Background task to periodically interact with both Redis instances
+        import threading
+        
+        def background_task():
+            counter = 0
+            while True:
+                try:
+                    counter += 1
+                    # Write to primary
+                    r.set(f'background_task_run', counter)
+                    r.expire('background_task_run', 60)
+                    # Also write to standalone
+                    r_standalone.set(f'background_task_run_standalone', counter)
+                    r_standalone.expire('background_task_run_standalone', 60)
+                    print(f"Background task run #{counter} - wrote to both Redis instances")
+                except Exception as e:
+                    print(f"Background task error: {e}")
+                time.sleep(30)
+        
+        thread = threading.Thread(target=background_task)
+        thread.daemon = True
+        thread.start()
+        
+        app.run(host='0.0.0.0', port=5000)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-dummy-app-v2
+  labels:
+    app: redis-dummy-app-v2
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: redis-dummy-app-v2
+  template:
+    metadata:
+      labels:
+        app: redis-dummy-app-v2
+    spec:
+      containers:
+      - name: redis-dummy-app
+        image: python:3.9-slim
+        ports:
+        - containerPort: 5000
+        env:
+        - name: REDIS_HOST
+          value: "redis-master"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis
+              key: redis-password
+        - name: REDIS_STANDALONE_HOST
+          value: "redis-standalone"
+        - name: REDIS_STANDALONE_PORT
+          value: "6379"
+        - name: REDIS_STANDALONE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-standalone
+              key: redis-password
+        command: ["/bin/sh"]
+        args:
+          - -c
+          - |
+            pip install flask redis
+            python /app/app.py
+        volumeMounts:
+        - name: app-code
+          mountPath: /app
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: app-code
+        configMap:
+          name: redis-dummy-app-v2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-dummy-app-v2
+  labels:
+    app: redis-dummy-app-v2
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 5000
+    protocol: TCP
+  selector:
+    app: redis-dummy-app-v2

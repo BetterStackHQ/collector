@@ -1,0 +1,422 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-dummy-app
+data:
+  app.py: |
+    import os
+    import time
+    import mysql.connector
+    from mysql.connector import Error
+    from flask import Flask, jsonify
+    from datetime import datetime
+    
+    app = Flask(__name__)
+    
+    # Database connection details
+    db_config = {
+        'host': os.environ.get('MYSQL_HOST', 'mysql'),
+        'port': int(os.environ.get('MYSQL_PORT', 3306)),
+        'database': 'mysql',
+        'user': 'root',
+        'password': os.environ.get('MYSQL_ROOT_PASSWORD', 'mysql')
+    }
+    
+    def get_db_connection():
+        return mysql.connector.connect(**db_config)
+    
+    def init_db():
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # Create database if not exists
+            cursor.execute("CREATE DATABASE IF NOT EXISTS myapp")
+            cursor.execute("USE myapp")
+            
+            # Create products table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS products (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(100) NOT NULL,
+                    price DECIMAL(10, 2) NOT NULL,
+                    stock INT DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Create orders table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS orders (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    product_id INT,
+                    quantity INT NOT NULL,
+                    total_price DECIMAL(10, 2) NOT NULL,
+                    order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (product_id) REFERENCES products(id)
+                )
+            ''')
+            
+            # Create metrics table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS metrics (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    metric_name VARCHAR(100) NOT NULL,
+                    metric_value FLOAT NOT NULL,
+                    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            conn.commit()
+            cursor.close()
+            conn.close()
+            print("Database initialized successfully")
+        except Error as e:
+            print(f"Error initializing database: {e}")
+    
+    @app.route('/')
+    def home():
+        return jsonify({
+            "message": "MySQL Dummy App",
+            "endpoints": [
+                "/health",
+                "/products",
+                "/products/create/<name>/<price>/<stock>",
+                "/products/<id>",
+                "/orders",
+                "/orders/create/<product_id>/<quantity>",
+                "/metrics",
+                "/metrics/add/<name>/<value>",
+                "/stats"
+            ]
+        })
+    
+    @app.route('/health')
+    def health():
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+            cursor.close()
+            conn.close()
+            return jsonify({"status": "healthy", "database": "connected"})
+        except Error as e:
+            return jsonify({"status": "unhealthy", "error": str(e)}), 500
+    
+    @app.route('/products')
+    def get_products():
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("USE myapp")
+            cursor.execute("SELECT * FROM products ORDER BY created_at DESC LIMIT 10")
+            products = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            return jsonify({"status": "success", "products": products})
+        except Error as e:
+            return jsonify({"status": "error", "error": str(e)}), 500
+    
+    @app.route('/products/create/<name>/<price>/<stock>')
+    def create_product(name, price, stock):
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("USE myapp")
+            cursor.execute(
+                "INSERT INTO products (name, price, stock) VALUES (%s, %s, %s)",
+                (name, float(price), int(stock))
+            )
+            product_id = cursor.lastrowid
+            
+            # Record metric
+            cursor.execute(
+                "INSERT INTO metrics (metric_name, metric_value) VALUES (%s, %s)",
+                ("products_created", 1)
+            )
+            
+            conn.commit()
+            cursor.close()
+            conn.close()
+            return jsonify({
+                "status": "success",
+                "product_id": product_id,
+                "name": name,
+                "price": float(price),
+                "stock": int(stock)
+            })
+        except Error as e:
+            return jsonify({"status": "error", "error": str(e)}), 500
+    
+    @app.route('/products/<int:product_id>')
+    def get_product(product_id):
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("USE myapp")
+            cursor.execute("SELECT * FROM products WHERE id = %s", (product_id,))
+            product = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            
+            if product:
+                return jsonify({"status": "success", "product": product})
+            else:
+                return jsonify({"status": "error", "error": "Product not found"}), 404
+        except Error as e:
+            return jsonify({"status": "error", "error": str(e)}), 500
+    
+    @app.route('/orders')
+    def get_orders():
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("USE myapp")
+            cursor.execute("""
+                SELECT o.*, p.name as product_name 
+                FROM orders o 
+                JOIN products p ON o.product_id = p.id 
+                ORDER BY o.order_date DESC 
+                LIMIT 10
+            """)
+            orders = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            return jsonify({"status": "success", "orders": orders})
+        except Error as e:
+            return jsonify({"status": "error", "error": str(e)}), 500
+    
+    @app.route('/orders/create/<int:product_id>/<int:quantity>')
+    def create_order(product_id, quantity):
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("USE myapp")
+            
+            # Get product price
+            cursor.execute("SELECT price, stock FROM products WHERE id = %s", (product_id,))
+            result = cursor.fetchone()
+            
+            if not result:
+                return jsonify({"status": "error", "error": "Product not found"}), 404
+            
+            price, stock = result
+            
+            if stock < quantity:
+                return jsonify({"status": "error", "error": "Insufficient stock"}), 400
+            
+            total_price = price * quantity
+            
+            # Create order
+            cursor.execute(
+                "INSERT INTO orders (product_id, quantity, total_price) VALUES (%s, %s, %s)",
+                (product_id, quantity, total_price)
+            )
+            order_id = cursor.lastrowid
+            
+            # Update stock
+            cursor.execute(
+                "UPDATE products SET stock = stock - %s WHERE id = %s",
+                (quantity, product_id)
+            )
+            
+            # Record metric
+            cursor.execute(
+                "INSERT INTO metrics (metric_name, metric_value) VALUES (%s, %s)",
+                ("order_value", float(total_price))
+            )
+            
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            return jsonify({
+                "status": "success",
+                "order_id": order_id,
+                "product_id": product_id,
+                "quantity": quantity,
+                "total_price": float(total_price)
+            })
+        except Error as e:
+            return jsonify({"status": "error", "error": str(e)}), 500
+    
+    @app.route('/metrics')
+    def get_metrics():
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("USE myapp")
+            cursor.execute("SELECT * FROM metrics ORDER BY recorded_at DESC LIMIT 20")
+            metrics = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            return jsonify({"status": "success", "metrics": metrics})
+        except Error as e:
+            return jsonify({"status": "error", "error": str(e)}), 500
+    
+    @app.route('/metrics/add/<name>/<value>')
+    def add_metric(name, value):
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("USE myapp")
+            cursor.execute(
+                "INSERT INTO metrics (metric_name, metric_value) VALUES (%s, %s)",
+                (name, float(value))
+            )
+            metric_id = cursor.lastrowid
+            conn.commit()
+            cursor.close()
+            conn.close()
+            return jsonify({
+                "status": "success",
+                "metric_id": metric_id,
+                "name": name,
+                "value": float(value)
+            })
+        except Error as e:
+            return jsonify({"status": "error", "error": str(e)}), 500
+    
+    @app.route('/stats')
+    def stats():
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("USE myapp")
+            
+            # Get product count
+            cursor.execute("SELECT COUNT(*) FROM products")
+            product_count = cursor.fetchone()[0]
+            
+            # Get order count
+            cursor.execute("SELECT COUNT(*) FROM orders")
+            order_count = cursor.fetchone()[0]
+            
+            # Get total revenue
+            cursor.execute("SELECT SUM(total_price) FROM orders")
+            revenue = cursor.fetchone()[0] or 0
+            
+            # Get metric count
+            cursor.execute("SELECT COUNT(*) FROM metrics")
+            metric_count = cursor.fetchone()[0]
+            
+            cursor.close()
+            conn.close()
+            
+            return jsonify({
+                "status": "success",
+                "product_count": product_count,
+                "order_count": order_count,
+                "total_revenue": float(revenue),
+                "metric_count": metric_count
+            })
+        except Error as e:
+            return jsonify({"status": "error", "error": str(e)}), 500
+    
+    if __name__ == '__main__':
+        # Initialize database
+        time.sleep(10)  # Wait for database to be ready
+        init_db()
+        
+        # Background task to periodically write metrics
+        import threading
+        import random
+        
+        def background_task():
+            counter = 0
+            while True:
+                try:
+                    counter += 1
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("USE myapp")
+                    
+                    # Add random metric
+                    metric_value = random.uniform(0, 100)
+                    cursor.execute(
+                        "INSERT INTO metrics (metric_name, metric_value) VALUES (%s, %s)",
+                        (f"background_metric_{counter}", metric_value)
+                    )
+                    
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                    print(f"Background task run #{counter}")
+                except Error as e:
+                    print(f"Background task error: {e}")
+                time.sleep(30)
+        
+        thread = threading.Thread(target=background_task)
+        thread.daemon = True
+        thread.start()
+        
+        app.run(host='0.0.0.0', port=5000)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql-dummy-app
+  labels:
+    app: mysql-dummy-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mysql-dummy-app
+  template:
+    metadata:
+      labels:
+        app: mysql-dummy-app
+    spec:
+      containers:
+      - name: mysql-dummy-app
+        image: python:3.9-slim
+        ports:
+        - containerPort: 5000
+        env:
+        - name: MYSQL_HOST
+          value: "mysql"
+        - name: MYSQL_PORT
+          value: "3306"
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql
+              key: mysql-root-password
+        command: ["/bin/sh"]
+        args:
+          - -c
+          - |
+            apt-get update && apt-get install -y gcc
+            pip install flask mysql-connector-python
+            python /app/app.py
+        volumeMounts:
+        - name: app-code
+          mountPath: /app
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: app-code
+        configMap:
+          name: mysql-dummy-app
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-dummy-app
+  labels:
+    app: mysql-dummy-app
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 5000
+    protocol: TCP
+  selector:
+    app: mysql-dummy-app

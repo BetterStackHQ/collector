@@ -35,4 +35,7 @@ attributes:
     rpc_client_duration:
       include: ["service.name", "server.address", "rpc.grpc.status_code"]
     sql_client_duration:
-      include: ["*"]  # Include all SQL attributes including db_statement
+      include: ["*"]  # Include all SQL metrics attributes
+    traces:
+      include:
+        - "db.query.text"  # Enable SQL statement text in traces (hidden by default)
