@@ -9,6 +9,20 @@ otel_metrics_export:
   features:
     - application
     - application_process
+  instrumentations:
+    - "*"  # Enable all instrumentations including SQL
+
+otel_traces_export:
+  instrumentations:
+    - "*"  # Enable all instrumentations including SQL
+
+# Enable SQL detection
+ebpf:
+  heuristic_sql_detect: true  # Enable detection of SQL queries for non-native protocols
+  mysql_prepared_statements_cache_size: 100  # Cache size for MySQL prepared statements
+  buffer_sizes:
+    mysql: 4096     # Buffer size for MySQL data capture (0-8192)
+    postgres: 4096  # Buffer size for PostgreSQL data capture (0-8192)
 
 attributes:
   select:
@@ -20,3 +34,5 @@ attributes:
       include: ["service.name", "server.address", "http.response.status_code"]
     rpc_client_duration:
       include: ["service.name", "server.address", "rpc.grpc.status_code"]
+    sql_client_duration:
+      include: ["*"]  # Include all SQL attributes including db_statement
