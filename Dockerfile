@@ -1,9 +1,6 @@
 # Use Vector as the base image
 FROM timberio/vector:0.47.0-debian AS vector
 
-# Use Cluster Agent as another base
-FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
-
 # Build mdprobe
 FROM golang:1.24.4-alpine3.22 AS mdprobe-builder
 WORKDIR /src
@@ -29,9 +26,6 @@ RUN apt-get update && apt-get install -y \
 COPY --from=vector --chmod=755 /usr/bin/vector /usr/local/bin/vector
 COPY --from=vector /etc/vector /etc/vector
 
-# Copy Cluster Agent
-COPY --from=cluster-agent --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent
-
 # Copy mdprobe
 COPY --from=mdprobe-builder --chmod=755 /bin/mdprobe /usr/local/bin/mdprobe
 
@@ -47,7 +41,7 @@ RUN mkdir -p /versions/0-default \
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
 ENV CLUSTER_COLLECTOR=false
-ENV COLLECTOR_VERSION=1.0.18
+ENV COLLECTOR_VERSION=1.0.19
 ENV VECTOR_VERSION=0.47.0
 ENV BEYLA_VERSION=2.2.4
 ENV CLUSTER_AGENT_VERSION=1.2.4
@@ -76,8 +70,6 @@ COPY versions/0-default/vector.yaml /versions/0-default/vector.yaml
 COPY versions/0-default/databases.json /versions/0-default/databases.json
 COPY kubernetes-discovery/0-default/discovered_pods.yaml /kubernetes-discovery/0-default/discovered_pods.yaml
 COPY engine /engine
-COPY should_run_cluster_collector.rb /should_run_cluster_collector.rb
-COPY --chmod=755 cluster-collector.sh /cluster-collector.sh
 COPY --chmod=755 ebpf.sh /ebpf.sh
 # Copy default enrichment files to both locations
 # /enrichment-defaults is the source for copying at runtime
