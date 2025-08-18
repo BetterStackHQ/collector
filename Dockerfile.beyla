@@ -1,6 +1,9 @@
 # Add Node Agent to the image
 FROM ghcr.io/coroot/coroot-node-agent:1.25.0 AS node-agent
 
+# Add Cluster Agent to the image
+FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
+
 # Build dockerprobe
 FROM golang:1.24.4-alpine3.22 AS dockerprobe-builder
 WORKDIR /src
@@ -15,9 +18,9 @@ FROM grafana/beyla:2.2.4 AS beyla-source
 # Final stage - Using Debian for glibc compatibility with node-agent
 FROM debian:12-slim
 
-# Install supervisor and ca-certificates
+# Install supervisor, ca-certificates, and curl
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends supervisor ca-certificates && \
+    apt-get install -y --no-install-recommends supervisor ca-certificates curl && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -33,12 +36,16 @@ COPY --from=beyla-source /third_party_licenses.csv /third_party_licenses.csv
 # Copy Node Agent
 COPY --from=node-agent --chmod=755 /usr/bin/coroot-node-agent /usr/local/bin/node-agent
 
+# Copy Cluster Agent
+COPY --from=cluster-agent --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent
+
 # Copy dockerprobe binary with permissions
 COPY --from=dockerprobe-builder --chmod=755 /bin/dockerprobe /usr/local/bin/dockerprobe
 
 # Copy configuration files
 COPY beyla/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY --chmod=755 beyla/entrypoint.sh /entrypoint.sh
+COPY --chmod=755 beyla/cluster-collector.sh /cluster-collector.sh
 
 # Copy Beyla configuration
 COPY beyla.yaml /etc/beyla/beyla.yaml

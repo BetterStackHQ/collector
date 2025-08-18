@@ -41,7 +41,8 @@ rake test TESTOPTS="-v"
 
 1. **updater.rb** - Runs a 30-second loop calling `client.ping` to check for configuration updates
 2. **proxy.rb** - WEBrick server on port 33000 providing:
-   - `/v1/config` - Latest database configuration
+   - `/v1/config` - Latest database configuration (databases.json)
+   - `/v1/cluster-agent-enabled` - Returns "yes" or "no" based on BetterStackClient.cluster_collector?
    - `/v1/metrics` - Proxy to Vector metrics (localhost:39090)
 3. **engine/better_stack_client.rb** - API client handling all Better Stack communication
 4. **engine/utils.rb** - Shared utilities for version management, file operations, and error handling
@@ -55,13 +56,28 @@ rake test TESTOPTS="-v"
 
 ### Process Management
 
-Supervisor manages all processes with automatic restarts:
+**Collector Container** - Supervisor manages:
 - Vector (main data pipeline)
-- Cluster Agent (Kubernetes/database monitoring)
-- Beyla (eBPF application traces)
-- Ruby proxy and updater
+- Ruby proxy (serves configuration endpoints)
+- Ruby updater (checks for configuration updates)
 
-Logs available in `/var/log/supervisor/*`
+**Beyla Container** - Supervisor manages:
+- Beyla (eBPF application traces)
+- Node Agent (system metrics collection)
+- Cluster Agent (Kubernetes/database monitoring)
+- Dockerprobe (container metadata collection)
+
+Logs available in `/var/log/supervisor/*` in each container
+
+### Container Communication
+
+- **Beyla → Collector**: Via host network mode
+  - Cluster Agent polls `http://localhost:33000/v1/cluster-agent-enabled` to check if it should run
+  - Cluster Agent fetches database config from `http://localhost:33000/v1/config`
+  - Node Agent sends metrics to `http://localhost:33000`
+- **Shared Volume**: `docker-metadata` volume for enrichment tables
+  - Dockerprobe writes container metadata CSV
+  - Vector reads metadata for log/metric enrichment
 
 ### API Communication Patterns
 
