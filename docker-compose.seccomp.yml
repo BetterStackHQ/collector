@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: betterstack/collector:pr-31-sha-30a64a3
+    image: betterstack/collector-private:pr-31-sha-30a64a3
     container_name: better-stack-collector
     restart: always
     security_opt:
@@ -35,7 +35,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.beyla
-    image: betterstack/collector-beyla:pr-31-sha-30a64a3
+    image: betterstack/collector-beyla-private:pr-31-sha-30a64a3
     container_name: better-stack-beyla
     restart: always
     privileged: true
