@@ -125,7 +125,7 @@ for NODE in $NODES; do
             if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
                 set -e
                 echo "Running: Better Stack collector install..."
-                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/a8d75181226bedb8915dc626b57727e0dd41e74b/install.sh | \\
+                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/install.sh | \\
                   COLLECTOR_SECRET="$COLLECTOR_SECRET" bash
 
                 echo "Checking deployment status..."
@@ -164,7 +164,7 @@ EOF
                 echo "Containers removed. Waiting 3 seconds..."
                 sleep 3
                 echo "Installing Better Stack collector..."
-                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/a8d75181226bedb8915dc626b57727e0dd41e74b/install.sh | \\
+                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/install.sh | \\
                   COLLECTOR_SECRET="$COLLECTOR_SECRET" bash
 
                 echo "Checking deployment status..."

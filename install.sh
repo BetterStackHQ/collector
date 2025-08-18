@@ -66,15 +66,15 @@ trap "rm -rf $TEMP_DIR" EXIT
 # Download appropriate compose file based on Docker version
 if [ "$USE_SECCOMP" = true ]; then
     # For older Docker versions, use the seccomp-enabled compose file
-    curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/a7cd75768e36f2d773f893e5c11ef3fd413ea00c/docker-compose.seccomp.yml \
+    curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/docker-compose.seccomp.yml \
         -o docker-compose.yml
     
     # Also download the seccomp profile
-    curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/a7cd75768e36f2d773f893e5c11ef3fd413ea00c/collector-seccomp.json \
+    curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/collector-seccomp.json \
         -o collector-seccomp.json
 else
     # For newer Docker versions, use the standard compose file
-    curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/a7cd75768e36f2d773f893e5c11ef3fd413ea00c/docker-compose.yml \
+    curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/docker-compose.yml \
         -o docker-compose.yml
 fi
 
