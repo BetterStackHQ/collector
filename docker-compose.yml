@@ -51,13 +51,6 @@ services:
       - BEYLA_CONFIG_PATH=/etc/beyla/beyla.yaml
       # Enable dockerprobe by default (set to false to disable)
       - ENABLE_DOCKERPROBE=${ENABLE_DOCKERPROBE:-true}
-      # SQL detection and tracing configuration
-      - BEYLA_HEURISTIC_SQL_DETECT=true
-      - BEYLA_MYSQL_PREPARED_STATEMENTS_CACHE_SIZE=100
-      - BEYLA_BPF_BUFFER_SIZE_MYSQL=4096
-      - BEYLA_BPF_BUFFER_SIZE_POSTGRES=4096
-      - BEYLA_OTEL_METRICS_INSTRUMENTATIONS=*
-      - BEYLA_OTEL_TRACES_INSTRUMENTATIONS=*
     volumes:
       - /sys/kernel/tracing:/sys/kernel/tracing:rw
       - /sys/kernel/debug:/sys/kernel/debug:rw
