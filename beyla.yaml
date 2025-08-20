@@ -5,6 +5,8 @@ discovery:
   exclude_services:
     - exe_path: ".*/vector$"
 
+  exclude_otel_instrumented_services: false
+
 otel_metrics_export:
   features:
     - application
