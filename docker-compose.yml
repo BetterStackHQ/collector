@@ -13,6 +13,9 @@ services:
       - VECTOR_LOG_FORMAT=json
       # Pass hostname of host machine to collector; needs `export HOSTNAME` before running `docker compose up`
       - HOSTNAME
+      # Optional domain-based TLS issuance (Certbot) and proxy port
+      - DOMAIN
+      - PROXY_PORT
     volumes:
       # Let Vector collector host system metrics
       - /proc:/host/proc:ro
@@ -61,8 +64,13 @@ services:
       # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this volume
       # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
       - docker-metadata:/enrichment:rw
+      # Persist ACME certs and stable symlinks across restarts
+      - letsencrypt:/etc/letsencrypt
+      - ssl-certs:/etc/ssl
     depends_on:
       - collector
 
 volumes:
   docker-metadata:
+  letsencrypt:
+  ssl-certs:

@@ -20,6 +20,8 @@ RUN apt-get update && apt-get install -y \
   bash \
   tini \
   jq \
+  certbot \
+  openssl \
   && rm -rf /var/lib/apt/lists/*
 
 # Copy Vector from vector image
@@ -36,7 +38,8 @@ RUN mkdir -p /versions/0-default \
   && mkdir -p /var/log/supervisor \
   && mkdir -p /kubernetes-discovery/0-default \
   && mkdir -p /vector-config \
-  && mkdir -p /enrichment-defaults
+  && mkdir -p /enrichment-defaults \
+  && mkdir -p /etc/ssl
 
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
@@ -66,6 +69,8 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY --chmod=755 updater.rb /updater.rb
 COPY --chmod=755 proxy.rb /proxy.rb
 COPY --chmod=755 vector.sh /vector.sh
+COPY --chmod=755 certbot-runner.sh /certbot-runner.sh
+COPY --chmod=755 certbot-deploy-hook.sh /certbot-deploy-hook.sh
 COPY versions/0-default/vector.yaml /versions/0-default/vector.yaml
 COPY versions/0-default/databases.json /versions/0-default/databases.json
 COPY kubernetes-discovery/0-default/discovered_pods.yaml /kubernetes-discovery/0-default/discovered_pods.yaml
