@@ -156,7 +156,6 @@ class BetterStackClient
     case code
     when '204'
       puts "No updates available"
-      clear_error
       return
     when '200'
       data = JSON.parse(body)
@@ -168,7 +167,6 @@ class BetterStackClient
       else
         # Status is not 'new_version_available', could be an error message or other status
         puts "No new version. Status: #{data['status']}"
-        clear_error
         return
       end
     when '401', '403'

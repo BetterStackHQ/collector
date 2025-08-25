@@ -182,7 +182,7 @@ class BetterStackClientPingTest < Minitest::Test
     assert error_content.include?("Validation failed for vector config with kubernetes_discovery")
   end
 
-  def test_ping_clears_error_file_when_no_updates
+  def test_ping_does_not_clear_error_file_when_no_updates
     # Create an error file
     File.write(File.join(@test_dir, 'errors.txt'), "Previous error")
 
@@ -195,8 +195,8 @@ class BetterStackClientPingTest < Minitest::Test
 
     @client.ping
 
-    # Test actual behavior - should clear error file when no updates
+    # Test actual behavior - should NOT clear error file when no updates
     assert_requested(stub, times: 1)
-    assert !File.exist?(File.join(@test_dir, 'errors.txt')), "Error file should be cleared"
+    assert File.exist?(File.join(@test_dir, 'errors.txt')), "Error file should not be cleared"
   end
 end
