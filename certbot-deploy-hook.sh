@@ -9,12 +9,12 @@ set -euo pipefail
 echo "[certbot-deploy] Deploy hook triggered for domains: ${RENEWED_DOMAINS}"
 
 # Extract domain from the lineage path
-DOMAIN="${RENEWED_DOMAINS%% *}"  # Get first domain if multiple
-CERT_LIVE_DIR="/etc/letsencrypt/live/${DOMAIN}"
+TLS_DOMAIN="${RENEWED_DOMAINS%% *}"  # Get first domain if multiple
+CERT_LIVE_DIR="/etc/letsencrypt/live/${TLS_DOMAIN}"
 FULLCHAIN_PATH="${CERT_LIVE_DIR}/fullchain.pem"
 PRIVKEY_PATH="${CERT_LIVE_DIR}/privkey.pem"
-LINK_CERT="/etc/ssl/${DOMAIN}.pem"
-LINK_KEY="/etc/ssl/${DOMAIN}.key"
+LINK_CERT="/etc/ssl/${TLS_DOMAIN}.pem"
+LINK_KEY="/etc/ssl/${TLS_DOMAIN}.key"
 
 # Create or update symlinks to predictable locations
 if [[ -f "$FULLCHAIN_PATH" && -f "$PRIVKEY_PATH" ]]; then

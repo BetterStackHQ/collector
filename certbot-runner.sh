@@ -3,18 +3,18 @@ set -euo pipefail
 
 # Run under supervisord to manage issuance and renewals conditionally.
 
-DOMAIN="${DOMAIN:-}"
+TLS_DOMAIN="${TLS_DOMAIN:-}"
 
-if [[ -z "$DOMAIN" ]]; then
-  echo "[certbot] DOMAIN not set; certbot supervisor program will not run."
+if [[ -z "$TLS_DOMAIN" ]]; then
+  echo "[certbot] TLS_DOMAIN not set; certbot supervisor program will not run."
   exit 0
 fi
 
-CERT_LIVE_DIR="/etc/letsencrypt/live/${DOMAIN}"
+CERT_LIVE_DIR="/etc/letsencrypt/live/${TLS_DOMAIN}"
 FULLCHAIN_PATH="${CERT_LIVE_DIR}/fullchain.pem"
 PRIVKEY_PATH="${CERT_LIVE_DIR}/privkey.pem"
-LINK_CERT="/etc/ssl/${DOMAIN}.pem"
-LINK_KEY="/etc/ssl/${DOMAIN}.key"
+LINK_CERT="/etc/ssl/${TLS_DOMAIN}.pem"
+LINK_KEY="/etc/ssl/${TLS_DOMAIN}.key"
 
 ensure_links_and_reload() {
   # Ensure predictable symlinks and reload vector on success
@@ -47,14 +47,14 @@ has_valid_cert() {
 }
 
 issue_once() {
-  echo "[certbot] Attempting initial/repair issuance for ${DOMAIN}..."
+  echo "[certbot] Attempting initial/repair issuance for ${TLS_DOMAIN}..."
   if certbot certonly \
     --non-interactive \
     --standalone \
     --agree-tos \
     --register-unsafely-without-email \
     --preferred-challenges http \
-    -d "$DOMAIN" \
+    -d "$TLS_DOMAIN" \
     --deploy-hook /certbot-deploy-hook.sh; then
     echo "[certbot] Certificate issuance successful"
     return 0
@@ -75,7 +75,7 @@ renew_once() {
   fi
 }
 
-echo "[certbot] DOMAIN set to $DOMAIN; managing certificates."
+echo "[certbot] TLS_DOMAIN set to $TLS_DOMAIN; managing certificates."
 
 if has_valid_cert; then
   echo "[certbot] Valid certificate found. Starting 6-hour renewal check cycle."

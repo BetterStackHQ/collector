@@ -97,16 +97,16 @@ Logs available in `/var/log/supervisor/*` in each container
 - `BASE_URL` - API endpoint (default: https://telemetry.betterstack.com)
 - `CLUSTER_COLLECTOR` - Force cluster collector mode
 - `INGESTING_HOST`, `SOURCE_TOKEN` - Required for test server
-- `DOMAIN` (optional) - Fully-qualified domain name for TLS certificate management
-- `PROXY_PORT` (required with DOMAIN) - Host port for upstream proxy (cannot be 80, 33000, 34320, or 39090)
+- `TLS_DOMAIN` (optional) - Fully-qualified domain name for TLS certificate management
+- `PROXY_PORT` (required with TLS_DOMAIN) - Host port for upstream proxy (cannot be 80, 33000, 34320, or 39090)
 
 ### TLS Certificate Management (Certbot)
 
-When `DOMAIN` environment variable is set, the collector automatically manages TLS certificates via Let's Encrypt:
+When `TLS_DOMAIN` environment variable is set, the collector automatically manages TLS certificates via Let's Encrypt:
 
 #### Configuration
-- **DOMAIN**: Fully-qualified domain name (e.g., `collector.example.com`)
-- **PROXY_PORT**: Host port for upstream proxy traffic (required when DOMAIN is set)
+- **TLS_DOMAIN**: Fully-qualified domain name (e.g., `collector.example.com`)
+- **PROXY_PORT**: Host port for upstream proxy traffic (required when TLS_DOMAIN is set)
   - Must not be 80 (reserved for ACME validation)
   - Must not conflict with internal ports (33000, 34320, 39090)
 
@@ -114,8 +114,8 @@ When `DOMAIN` environment variable is set, the collector automatically manages T
 - **Initial acquisition**: Attempts every 10 minutes until successful
 - **Renewals**: Checked every 6 hours once a valid certificate exists
 - **Certificate locations**:
-  - `/etc/ssl/<DOMAIN>.pem` - Symlink to fullchain certificate
-  - `/etc/ssl/<DOMAIN>.key` - Symlink to private key
+  - `/etc/ssl/<TLS_DOMAIN>.pem` - Symlink to fullchain certificate
+  - `/etc/ssl/<TLS_DOMAIN>.key` - Symlink to private key
   - Both files have 0644 permissions for Vector access
 - **Vector reload**: Automatically signaled (HUP) after certificate updates
 

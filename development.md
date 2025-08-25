@@ -46,11 +46,11 @@ Tail collector logs:
 
 ### Domain-based TLS (optional)
 
-- `DOMAIN` (optional): Fully-qualified domain name. When set, the container runs Certbot under supervisord to manage a certificate via ACME HTTP-01 and exposes port `80/tcp` for validation.
-- `PROXY_PORT` (required when `DOMAIN` is set): Host port mapped to the in-container proxy on `33000`. Must be an integer and must not equal `80`.
+- `TLS_DOMAIN` (optional): Fully-qualified domain name. When set, the container runs Certbot under supervisord to manage a certificate via ACME HTTP-01 and exposes port `80/tcp` for validation.
+- `PROXY_PORT` (required when `TLS_DOMAIN` is set): Host port mapped to the in-container proxy. Must be an integer and must not equal `80`, `33000` or `34320`.
 - Certificate locations after issuance or renewal:
-  - `/etc/ssl/<DOMAIN>.pem` (symlink to fullchain.pem)
-  - `/etc/ssl/<DOMAIN>.key` (symlink to privkey.pem)
+  - `/etc/ssl/<TLS_DOMAIN>.pem` (symlink to fullchain.pem)
+  - `/etc/ssl/<TLS_DOMAIN>.key` (symlink to privkey.pem)
 - Vector reload behavior:
   - On successful issuance or renewal, Vector is signaled (HUP) to reload without container restart.
 - Retry cadence:

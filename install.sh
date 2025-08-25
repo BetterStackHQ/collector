@@ -54,13 +54,13 @@ if [ -z "$COLLECTOR_SECRET" ]; then
 fi
 
 # Optional domain/TLS and proxy port
-DOMAIN="${DOMAIN:-}"
+TLS_DOMAIN="${TLS_DOMAIN:-}"
 PROXY_PORT="${PROXY_PORT:-}"
 
-# Validate DOMAIN/PROXY_PORT semantics
-if [ -n "$DOMAIN" ]; then
+# Validate TLS_DOMAIN/PROXY_PORT semantics
+if [ -n "$TLS_DOMAIN" ]; then
     if [ -z "$PROXY_PORT" ]; then
-        echo "Error: DOMAIN is set but PROXY_PORT is missing. Set PROXY_PORT to the upstream/proxy port (and it must not be 80)."
+        echo "Error: TLS_DOMAIN is set but PROXY_PORT is missing. Set PROXY_PORT to the upstream/proxy port (and it must not be 80)."
         exit 1
     fi
     if ! [[ "$PROXY_PORT" =~ ^[0-9]+$ ]]; then
@@ -68,7 +68,7 @@ if [ -n "$DOMAIN" ]; then
         exit 1
     fi
     if [ "$PROXY_PORT" -eq 80 ]; then
-        echo "Error: PROXY_PORT must not equal 80 when DOMAIN is set (port 80 is reserved for ACME HTTP-01)."
+        echo "Error: PROXY_PORT must not equal 80 when TLS_DOMAIN is set (port 80 is reserved for ACME HTTP-01)."
         exit 1
     fi
     # Check for conflicts with internal ports
@@ -106,13 +106,13 @@ fi
 # Adjust Compose port exposure rules
 # - Keep existing localhost bindings: 34320 and 33000
 # - If PROXY_PORT present, add host mapping: ${PROXY_PORT}:${PROXY_PORT} (for upstream proxy in Vector)
-# - If DOMAIN present, add port 80 for ACME HTTP-01
+# - If TLS_DOMAIN present, add port 80 for ACME HTTP-01
 
 adjust_compose_ports() {
   local file="$1"
   local tmpfile
   tmpfile="$(mktemp)"
-  awk -v add80="$DOMAIN" -v addport="$PROXY_PORT" '
+  awk -v add80="$TLS_DOMAIN" -v addport="$PROXY_PORT" '
     BEGIN { inserted=0 }
     {
       # Remove previously inserted install lines for idempotence
@@ -136,9 +136,9 @@ adjust_compose_ports() {
 adjust_compose_ports docker-compose.yml
 
 # Pull images first
-COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="$HOSTNAME" DOMAIN="$DOMAIN" PROXY_PORT="$PROXY_PORT" \
+COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="$HOSTNAME" TLS_DOMAIN="$TLS_DOMAIN" PROXY_PORT="$PROXY_PORT" \
     $COMPOSE_CMD -p better-stack-collector pull
 
 # Run containers
-COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="$HOSTNAME" DOMAIN="$DOMAIN" PROXY_PORT="$PROXY_PORT" \
+COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="$HOSTNAME" TLS_DOMAIN="$TLS_DOMAIN" PROXY_PORT="$PROXY_PORT" \
     $COMPOSE_CMD -p better-stack-collector up -d
