@@ -81,6 +81,11 @@ fi
 # Set hostname if not provided
 HOSTNAME="${HOSTNAME:-$(hostname)}"
 
+# Set default values for environment variables
+BASE_URL="${BASE_URL:-https://telemetry.betterstack.com}"
+CLUSTER_COLLECTOR="${CLUSTER_COLLECTOR:-false}"
+ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
+
 # Create temporary directory and cd into it
 TEMP_DIR=$(mktemp -d)
 cd "$TEMP_DIR"
@@ -136,9 +141,21 @@ adjust_compose_ports() {
 adjust_compose_ports docker-compose.yml
 
 # Pull images first
-COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="$HOSTNAME" TLS_DOMAIN="$TLS_DOMAIN" PROXY_PORT="$PROXY_PORT" \
+COLLECTOR_SECRET="$COLLECTOR_SECRET" \
+BASE_URL="$BASE_URL" \
+CLUSTER_COLLECTOR="$CLUSTER_COLLECTOR" \
+ENABLE_DOCKERPROBE="$ENABLE_DOCKERPROBE" \
+HOSTNAME="$HOSTNAME" \
+TLS_DOMAIN="$TLS_DOMAIN" \
+PROXY_PORT="$PROXY_PORT" \
     $COMPOSE_CMD -p better-stack-collector pull
 
 # Run containers
-COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="$HOSTNAME" TLS_DOMAIN="$TLS_DOMAIN" PROXY_PORT="$PROXY_PORT" \
+COLLECTOR_SECRET="$COLLECTOR_SECRET" \
+BASE_URL="$BASE_URL" \
+CLUSTER_COLLECTOR="$CLUSTER_COLLECTOR" \
+ENABLE_DOCKERPROBE="$ENABLE_DOCKERPROBE" \
+HOSTNAME="$HOSTNAME" \
+TLS_DOMAIN="$TLS_DOMAIN" \
+PROXY_PORT="$PROXY_PORT" \
     $COMPOSE_CMD -p better-stack-collector up -d
