@@ -6,8 +6,8 @@ set -euo pipefail
 TLS_DOMAIN="${TLS_DOMAIN:-}"
 
 if [[ -z "$TLS_DOMAIN" ]]; then
-  echo "[certbot] TLS_DOMAIN not set; certbot supervisor program will not run."
-  exit 0
+  echo "[certbot] TLS_DOMAIN not set; sleeping indefinitely."
+  exec sleep infinity
 fi
 
 CERT_LIVE_DIR="/etc/letsencrypt/live/${TLS_DOMAIN}"
