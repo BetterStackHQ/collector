@@ -81,12 +81,23 @@ fi
 # Set hostname if not provided
 HOSTNAME="${HOSTNAME:-$(hostname)}"
 
-# Create temporary directory and cd into it
-TEMP_DIR=$(mktemp -d)
-cd "$TEMP_DIR"
+# Check if docker-compose.yml already exists
+if [ -f "docker-compose.yml" ]; then
+    echo "Error: docker-compose.yml already exists in the current directory"
+    exit 1
+fi
 
-# Clean up on exit
-trap "rm -rf $TEMP_DIR" EXIT
+# Check if beyla.yaml already exists
+if [ -f "beyla.yaml" ]; then
+    echo "Error: beyla.yaml already exists in the current directory"
+    exit 1
+fi
+
+# Check if collector-seccomp.json already exists (for older Docker versions)
+if [ "$USE_SECCOMP" = true ] && [ -f "collector-seccomp.json" ]; then
+    echo "Error: collector-seccomp.json already exists in the current directory"
+    exit 1
+fi
 
 # Download appropriate compose file based on Docker version
 if [ "$USE_SECCOMP" = true ]; then
@@ -135,10 +146,60 @@ adjust_compose_ports() {
 
 adjust_compose_ports docker-compose.yml
 
-# Pull images first
-COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="$HOSTNAME" TLS_DOMAIN="$TLS_DOMAIN" PROXY_PORT="$PROXY_PORT" \
-    $COMPOSE_CMD -p better-stack-collector pull
+# Add beyla.yaml volume mount
+add_beyla_volume() {
+  local file="$1"
+  local tmpfile
+  tmpfile="$(mktemp)"
+  awk '
+    /^  beyla:/ {
+      in_beyla=1
+    }
+    /^  [a-zA-Z0-9_-]+:/ && !/^  beyla:/ {
+      in_beyla=0
+    }
+    /^[^ ]/ {
+      in_beyla=0
+    }
+    {
+      print $0
+      # Add volume mount after the docker socket volume
+      if (in_beyla && $0 ~ /\/var\/run\/docker\.sock:\/var\/run\/docker\.sock:ro/) {
+        print "      # Custom beyla configuration"
+        print "      - ./beyla.yaml:/etc/beyla/beyla.yaml:ro"
+      }
+    }
+  ' "$file" > "$tmpfile"
+  mv "$tmpfile" "$file"
+}
 
-# Run containers
-COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="$HOSTNAME" TLS_DOMAIN="$TLS_DOMAIN" PROXY_PORT="$PROXY_PORT" \
-    $COMPOSE_CMD -p better-stack-collector up -d
+add_beyla_volume docker-compose.yml
+
+# Also download beyla.yaml for easier customization
+echo "Downloading beyla.yaml configuration file..."
+curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/beyla.yaml \
+    -o beyla.yaml
+
+
+# Print success message
+echo ""
+echo "✅ Better Stack Collector configuration prepared successfully!"
+echo ""
+echo "📁 Created files:"
+echo "   - docker-compose.yml"
+echo "   - beyla.yaml (eBPF configuration)"
+if [ "$USE_SECCOMP" = true ]; then
+    echo "   - collector-seccomp.json (seccomp profile for older Docker)"
+fi
+echo ""
+echo "📝 You can now modify these files as needed:"
+echo "   - Edit beyla.yaml to customize eBPF monitoring (e.g., exclude specific ports)"
+echo "   - Edit docker-compose.yml to add volume mounts or change configurations"
+echo ""
+echo "🚀 To start the collector, run:"
+echo "   COLLECTOR_SECRET=\"$COLLECTOR_SECRET\" HOSTNAME=\"$HOSTNAME\" TLS_DOMAIN=\"$TLS_DOMAIN\" PROXY_PORT=\"$PROXY_PORT\" \\"
+echo "     $COMPOSE_CMD -p better-stack-collector up -d"
+echo ""
+echo "🛑 To stop the collector, run:"
+echo "   COLLECTOR_SECRET=\"$COLLECTOR_SECRET\" HOSTNAME=\"$HOSTNAME\" TLS_DOMAIN=\"$TLS_DOMAIN\" PROXY_PORT=\"$PROXY_PORT\" \\"
+echo "     $COMPOSE_CMD -p better-stack-collector down"
