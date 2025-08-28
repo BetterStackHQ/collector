@@ -180,6 +180,9 @@ echo "Downloading beyla.yaml configuration file..."
 curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/beyla.yaml \
     -o beyla.yaml
 
+# Pull images first
+COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="$HOSTNAME" TLS_DOMAIN="$TLS_DOMAIN" PROXY_PORT="$PROXY_PORT" \
+    $COMPOSE_CMD -p better-stack-collector pull
 
 # Print success message
 echo ""
@@ -195,6 +198,10 @@ echo ""
 echo "📝 You can now modify these files as needed:"
 echo "   - Edit beyla.yaml to customize eBPF monitoring (e.g., exclude specific ports)"
 echo "   - Edit docker-compose.yml to add volume mounts or change configurations"
+echo ""
+echo "✨ To pull fresh pre-built images for both collector and beyla, run:"
+echo "   COLLECTOR_SECRET=\"$COLLECTOR_SECRET\" HOSTNAME=\"$HOSTNAME\" TLS_DOMAIN=\"$TLS_DOMAIN\" PROXY_PORT=\"$PROXY_PORT\" \\"
+echo "     $COMPOSE_CMD -p better-stack-collector pull"
 echo ""
 echo "🚀 To start the collector, run:"
 echo "   COLLECTOR_SECRET=\"$COLLECTOR_SECRET\" HOSTNAME=\"$HOSTNAME\" TLS_DOMAIN=\"$TLS_DOMAIN\" PROXY_PORT=\"$PROXY_PORT\" \\"
