@@ -13,6 +13,8 @@ class BetterStackClient
   extend Forwardable
   include Utils
 
+  NOT_CLEARABLE_ERRORS = ['Validation failed', 'Invalid configuration version', 'Invalid filename'].freeze
+
   def_delegator :@vector_config, :reload_vector
 
   def initialize(working_dir)
@@ -156,6 +158,8 @@ class BetterStackClient
     case code
     when '204'
       puts "No updates available"
+      # Clear transient errors not related to the configuration on successful, no-updates ping
+      clear_error if error_clearable? 
       return
     when '200'
       data = JSON.parse(body)
@@ -294,5 +298,12 @@ class BetterStackClient
     else
       write_error("Failed to fetch configuration for version #{new_version}. Response code: #{code}")
     end
+  end
+
+  def error_clearable?
+    last_error = read_error
+    return false if last_error.nil? # no need to clear if no error
+    last_error = URI.decode_www_form_component(last_error) if last_error
+    !NOT_CLEARABLE_ERRORS.any? { |error| last_error.include?(error) }
   end
 end
