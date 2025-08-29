@@ -182,9 +182,27 @@ class BetterStackClientPingTest < Minitest::Test
     assert error_content.include?("Validation failed for vector config with kubernetes_discovery")
   end
 
-  def test_ping_does_not_clear_error_file_when_no_updates
+  def test_ping_does_not_clear_not_clearable_error_file_when_no_updates
     # Create an error file
-    File.write(File.join(@test_dir, 'errors.txt'), "Previous error")
+    File.write(File.join(@test_dir, 'errors.txt'), "Validation failed for vector config with kubernetes_discovery")
+
+    # Mock ping response with no updates
+    stub = stub_request(:post, "https://telemetry.betterstack.com/api/collector/ping")
+      .to_return(status: 204)
+
+    # Mock kubernetes discovery
+    @client.instance_variable_get(:@kubernetes_discovery).define_singleton_method(:should_discover?) { false }
+
+    @client.ping
+
+    # Test actual behavior - should NOT clear error file with unclearable error on ping
+    assert_requested(stub, times: 1)
+    assert File.exist?(File.join(@test_dir, 'errors.txt')), "Error file should not be cleared"
+  end
+
+  def test_ping_does_clears_clearable_error_file_when_no_updates
+    # Create an error file
+    File.write(File.join(@test_dir, 'errors.txt'), "Ping failed: 520 Gateway Timeout")
 
     # Mock ping response with no updates
     stub = stub_request(:post, "https://telemetry.betterstack.com/api/collector/ping")
@@ -197,6 +215,6 @@ class BetterStackClientPingTest < Minitest::Test
 
     # Test actual behavior - should NOT clear error file when no updates
     assert_requested(stub, times: 1)
-    assert File.exist?(File.join(@test_dir, 'errors.txt')), "Error file should not be cleared"
+    assert !File.exist?(File.join(@test_dir, 'errors.txt')), "Error file should be cleared"
   end
 end
