@@ -40,12 +40,23 @@ fi
 # Check Docker Compose
 if docker compose version &> /dev/null; then
     COMPOSE_CMD="docker compose"
+    COMPOSE_VERSION=$(docker compose version --short 2>/dev/null || docker compose version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
 elif docker-compose version &> /dev/null; then
     COMPOSE_CMD="docker-compose"
+    COMPOSE_VERSION=$(docker-compose version --short 2>/dev/null || docker-compose version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
 else
     echo "Please install Docker Compose"
     exit 1
 fi
+
+# Check Docker Compose version is >= 1.25.0
+MIN_COMPOSE_VERSION="1.25.0"
+if version_lt "$COMPOSE_VERSION" "$MIN_COMPOSE_VERSION"; then
+    echo "Error: Docker Compose version $COMPOSE_VERSION is too old. Minimum required version is $MIN_COMPOSE_VERSION"
+    echo "Please upgrade Docker Compose: https://docs.docker.com/compose/install/"
+    exit 1
+fi
+echo "Detected Docker Compose version $COMPOSE_VERSION (>= $MIN_COMPOSE_VERSION)"
 
 # Check COLLECTOR_SECRET
 if [ -z "$COLLECTOR_SECRET" ]; then
@@ -80,6 +91,11 @@ fi
 
 # Set hostname if not provided
 HOSTNAME="${HOSTNAME:-$(hostname)}"
+
+# Set default values for environment variables
+BASE_URL="${BASE_URL:-https://telemetry.betterstack.com}"
+CLUSTER_COLLECTOR="${CLUSTER_COLLECTOR:-false}"
+ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
 
 # Create temporary directory and cd into it
 TEMP_DIR=$(mktemp -d)
@@ -136,9 +152,21 @@ adjust_compose_ports() {
 adjust_compose_ports docker-compose.yml
 
 # Pull images first
-COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="$HOSTNAME" TLS_DOMAIN="$TLS_DOMAIN" PROXY_PORT="$PROXY_PORT" \
+COLLECTOR_SECRET="$COLLECTOR_SECRET" \
+BASE_URL="$BASE_URL" \
+CLUSTER_COLLECTOR="$CLUSTER_COLLECTOR" \
+ENABLE_DOCKERPROBE="$ENABLE_DOCKERPROBE" \
+HOSTNAME="$HOSTNAME" \
+TLS_DOMAIN="$TLS_DOMAIN" \
+PROXY_PORT="$PROXY_PORT" \
     $COMPOSE_CMD -p better-stack-collector pull
 
 # Run containers
-COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="$HOSTNAME" TLS_DOMAIN="$TLS_DOMAIN" PROXY_PORT="$PROXY_PORT" \
+COLLECTOR_SECRET="$COLLECTOR_SECRET" \
+BASE_URL="$BASE_URL" \
+CLUSTER_COLLECTOR="$CLUSTER_COLLECTOR" \
+ENABLE_DOCKERPROBE="$ENABLE_DOCKERPROBE" \
+HOSTNAME="$HOSTNAME" \
+TLS_DOMAIN="$TLS_DOMAIN" \
+PROXY_PORT="$PROXY_PORT" \
     $COMPOSE_CMD -p better-stack-collector up -d

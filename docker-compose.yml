@@ -7,11 +7,11 @@ services:
     container_name: better-stack-collector
     restart: always
     environment:
-      - COLLECTOR_SECRET=${COLLECTOR_SECRET}
-      - BASE_URL=${BASE_URL:-https://telemetry.betterstack.com}
-      - CLUSTER_COLLECTOR=${CLUSTER_COLLECTOR:-false}
+      - COLLECTOR_SECRET
+      - BASE_URL
+      - CLUSTER_COLLECTOR
       - VECTOR_LOG_FORMAT=json
-      # Pass hostname of host machine to collector; needs `export HOSTNAME` before running `docker compose up`
+      # Pass hostname of host machine to collector
       - HOSTNAME
       # Optional domain-based TLS issuance (Certbot) and proxy port
       - TLS_DOMAIN
@@ -52,8 +52,8 @@ services:
       - BEYLA_BPF_TRACK_REQUEST_HEADERS=true
       - BEYLA_METRICS_INTERVAL=15s
       - BEYLA_CONFIG_PATH=/etc/beyla/beyla.yaml
-      # Enable dockerprobe by default (set to false to disable)
-      - ENABLE_DOCKERPROBE=${ENABLE_DOCKERPROBE:-true}
+      # Enable dockerprobe
+      - ENABLE_DOCKERPROBE
     volumes:
       - /sys/kernel/tracing:/sys/kernel/tracing:rw
       - /sys/kernel/debug:/sys/kernel/debug:rw
