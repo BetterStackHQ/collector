@@ -12,18 +12,22 @@ package main
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -103,25 +107,50 @@ func createDockerClient() (*client.Client, error) {
 	return client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 }
 
-func (pm *pidMapper) run() {
-	if err := pm.updateMappings(); err != nil {
-		log.Printf("Error updating mappings: %v", err)
-	}
-
-	ticker := time.NewTicker(pm.config.interval)
-	defer ticker.Stop()
-
-	for range ticker.C { // ticker.C is a channel that emits a value every time the interval elapses
-		if err := pm.updateMappings(); err != nil {
-			log.Printf("Error updating mappings: %v", err)
-		}
-	}
+// provides each iteration with a bounded time window
+// when the timeout is reached, the context is cancelled, with the cancellation being propagated down to e.g. docker API calls
+func runOnceWithTimeout(parent context.Context, pm *pidMapper, d time.Duration) error {
+	ctx, cancel := context.WithTimeout(parent, d)
+	defer cancel()
+	return pm.updateMappings(ctx)
 }
 
-func (pm *pidMapper) updateMappings() error {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout*time.Second)
-	defer cancel()
+func (pm *pidMapper) run() {
+	// set up signal handling for graceful shutdown
+	// this allows for a clean shutdown of the program when receiving SIGINT or SIGTERM
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
+	g, ctx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		ticker := time.NewTicker(pm.config.interval)
+		defer ticker.Stop()
+
+		if err := runOnceWithTimeout(ctx, pm, pm.config.interval); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("initial updateMappings error: %v", err)
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ticker.C:
+				if err := runOnceWithTimeout(ctx, pm, pm.config.interval); err != nil && !errors.Is(err, context.Canceled) {
+					log.Printf("updateMappings error: %v", err)
+				}
+			}
+		}
+	})
+
+	err := g.Wait()
+	if err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("run error: %v", err)
+	}
+	log.Printf("graceful shutdown complete")
+}
+
+func (pm *pidMapper) updateMappings(ctx context.Context) error {
 	containers, err := pm.listRunningContainers(ctx)
 	if err != nil {
 		return err
