@@ -48,9 +48,21 @@ services:
     pid: host
     network_mode: host
     mem_limit: 1536m
+    healthcheck:
+      test: |
+        MEM_USAGE=$$(cat /proc/1/status | grep VmRSS | awk '{print int($$2/1024)}') && \
+        THRESHOLD=1450 && \
+        if [ "$$MEM_USAGE" -gt "$$THRESHOLD" ]; then \
+          echo "Memory usage $${MEM_USAGE}MiB exceeds threshold $${THRESHOLD}MiB"; \
+          exit 1; \
+        fi
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 2
     environment:
       # Set Go memory limit to slightly less than container limit
-      - GOMEMLIMIT=1450MiB
+      - GOMEMLIMIT=1400MiB
       # Pass hostname of host machine to Beyla; needs `export HOSTNAME` before running `docker compose up`
       - HOSTNAME
       # Override OTLP endpoint to point to collector container
