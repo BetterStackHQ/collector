@@ -47,6 +47,8 @@ services:
     network_mode: host
     mem_limit: 1536m
     environment:
+      # Set Go memory limit to slightly less than container limit
+      - GOMEMLIMIT=1450MiB
       # Pass hostname of host machine to Beyla; needs `export HOSTNAME` before running `docker compose up`
       - HOSTNAME
       # Override OTLP endpoint to point to collector container
