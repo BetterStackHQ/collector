@@ -45,6 +45,7 @@ services:
     privileged: true
     pid: host
     network_mode: host
+    mem_limit: 1536m
     environment:
       # Pass hostname of host machine to Beyla; needs `export HOSTNAME` before running `docker compose up`
       - HOSTNAME
