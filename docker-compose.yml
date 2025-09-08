@@ -51,7 +51,7 @@ services:
         MEM_USAGE=$$(cat /proc/1/status | grep VmRSS | awk '{print int($$2/1024)}') && \
         THRESHOLD=1450 && \
         if [ "$$MEM_USAGE" -gt "$$THRESHOLD" ]; then \
-          echo "Memory usage $${E}MiB exceeds threshold $${THRESHOLD}MiB"; \
+          echo "Memory usage $${MEM_USAGE}MiB exceeds threshold $${THRESHOLD}MiB"; \
           exit 1; \
         fi
       interval: 30s
