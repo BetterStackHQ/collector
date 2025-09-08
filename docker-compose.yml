@@ -48,10 +48,15 @@ services:
     mem_limit: 1536m
     healthcheck:
       test: |
-        MEM_USAGE=$$(cat /proc/1/status | grep VmRSS | awk '{print int($$2/1024)}') && \
+        BEYLA_PID=$$(pgrep -f '^/usr/local/bin/beyla' | head -1) && \
+        if [ -z "$$BEYLA_PID" ]; then \
+          echo "Beyla process not found"; \
+          exit 1; \
+        fi && \
+        MEM_USAGE=$$(cat /proc/$$BEYLA_PID/status | grep VmRSS | awk '{print int($$2/1024)}') && \
         THRESHOLD=1450 && \
         if [ "$$MEM_USAGE" -gt "$$THRESHOLD" ]; then \
-          echo "Memory usage $${MEM_USAGE}MiB exceeds threshold $${THRESHOLD}MiB"; \
+          echo "Beyla memory usage $${MEM_USAGE}MiB exceeds threshold $${THRESHOLD}MiB"; \
           exit 1; \
         fi
       interval: 30s
