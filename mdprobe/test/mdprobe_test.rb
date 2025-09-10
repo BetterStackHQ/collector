@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require 'minitest/autorun'
+require 'webmock/minitest'
 require 'json'
 require 'tempfile'
 require 'fileutils'
@@ -51,7 +52,26 @@ class TestMdprobe < Minitest::Test
   end
 
   def test_output_format_no_provider
-    # No cloud provider detected
+    # No cloud provider detected - stub all metadata services to fail
+    # AWS
+    stub_request(:put, "http://169.254.169.254/latest/api/token").to_return(status: 404)
+    # Azure
+    stub_request(:get, "http://169.254.169.254/metadata/instance?api-version=2021-02-01").to_return(status: 404)
+    # GCP
+    stub_request(:get, "http://metadata.google.internal/computeMetadata/v1/instance/zone").to_return(status: 404)
+    # DigitalOcean
+    stub_request(:get, "http://169.254.169.254/metadata/v1/id").to_return(status: 404)
+    # Hetzner
+    stub_request(:get, "http://169.254.169.254/hetzner/v1/metadata").to_return(status: 404)
+    # Alibaba
+    stub_request(:get, "http://100.100.100.200/latest/meta-data/instance-id").to_return(status: 404)
+    # Scaleway
+    stub_request(:get, "http://169.254.42.42/conf").to_return(status: 404)
+    # IBM
+    stub_request(:put, "http://169.254.169.254/instance_identity/v1/token?version=2022-03-01").to_return(status: 404)
+    # Oracle
+    stub_request(:get, "http://169.254.169.254/opc/v2/instance").to_return(status: 404)
+    
     output = capture_stdout { @mdprobe.run }
     assert_equal "{}\n", output
   end
