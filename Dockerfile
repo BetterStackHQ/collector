@@ -1,14 +1,6 @@
 # Use Vector as the base image
 FROM timberio/vector:0.47.0-debian AS vector
 
-# Build mdprobe
-FROM golang:1.24.4-alpine3.22 AS mdprobe-builder
-WORKDIR /src
-COPY mdprobe/go.mod mdprobe/go.sum ./
-RUN go mod download
-COPY mdprobe/main.go ./
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags='-s -w' -o /bin/mdprobe .
-
 # Final stage
 FROM debian:12.11-slim
 
@@ -29,7 +21,7 @@ COPY --from=vector --chmod=755 /usr/bin/vector /usr/local/bin/vector
 COPY --from=vector /etc/vector /etc/vector
 
 # Copy mdprobe
-COPY --from=mdprobe-builder --chmod=755 /bin/mdprobe /usr/local/bin/mdprobe
+COPY mdprobe /mdprobe
 
 # Create necessary directories
 RUN mkdir -p /versions/0-default \
