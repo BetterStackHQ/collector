@@ -12,22 +12,24 @@ iteration = 1
 
 # Main loop
 loop do
+  # Check for enrichment table changes more frequently
+  # This reduces delay when containers are added/removed
   enrichment_table_changed = client.enrichment_table_changed?
   can_reload_vector = true
   config_changed = false # error flag so we can make sure we only reload vector if we have a valid config
 
   # Validate enrichment table if it has changed
   if enrichment_table_changed
-    puts "Validating enrichment table"
+    puts "[#{Time.now}] Validating enrichment table"
     output = client.validate_enrichment_table
-    puts "Enrichment table validation finished"
+    puts "[#{Time.now}] Enrichment table validation finished"
     if !output.nil?
-      puts "Enrichment table validation failed"
+      puts "[#{Time.now}] Enrichment table validation failed"
       can_reload_vector = false
     else
-      puts "Promoting enrichment table"
+      puts "[#{Time.now}] Promoting enrichment table"
       client.promote_enrichment_table
-      puts "Enrichment table promoted"
+      puts "[#{Time.now}] Enrichment table promoted"
     end
   end
 

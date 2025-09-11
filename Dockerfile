@@ -15,6 +15,8 @@ FROM debian:12.11-slim
 # Install required packages
 RUN apt-get update && apt-get install -y \
   ruby \
+  ruby-dev \
+  build-essential \
   supervisor \
   curl \
   bash \
@@ -22,6 +24,9 @@ RUN apt-get update && apt-get install -y \
   jq \
   certbot \
   openssl \
+  && gem install listen \
+  && apt-get remove -y build-essential ruby-dev \
+  && apt-get autoremove -y \
   && rm -rf /var/lib/apt/lists/*
 
 # Copy Vector from vector image
@@ -68,6 +73,7 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 # Copy Ruby scripts
 COPY --chmod=755 updater.rb /updater.rb
 COPY --chmod=755 proxy.rb /proxy.rb
+COPY --chmod=755 enrichment_watcher.rb /enrichment_watcher.rb
 COPY --chmod=755 vector.sh /vector.sh
 COPY --chmod=755 certbot-runner.sh /certbot-runner.sh
 COPY --chmod=755 certbot-deploy-hook.sh /certbot-deploy-hook.sh
