@@ -49,8 +49,16 @@ rake test TESTOPTS="-v"
 
 ### Configuration Management
 
-- Versions stored in `/versions/YYYY-MM-DDTHH:MM:SS/` directories
-- Active configuration via symlink: `/vector.yaml` → `/versions/[timestamp]/vector.yaml`
+- Configuration stored in `/vector-config/` directory structure:
+  - `/vector-config/current/` - Active configuration directory
+  - `/vector-config/current/vector.yaml` - Main Vector configuration
+  - `/vector-config/current/manual.vector.yaml` - Optional manual overrides
+  - `/vector-config/current/kubernetes-discovery/` - Kubernetes discovery configs
+  - `/vector-config/latest-valid-upstream/` - Latest validated upstream configuration
+- Version management:
+  - New configs created in `/vector-config/new_[timestamp]/` directories
+  - Validated configs promoted to `/vector-config/current/`
+  - Upstream files stored in `/versions/[timestamp]/` but copied to vector-config for use
 - Atomic updates: download → validate → promote → reload Vector (HUP signal)
 - Security: Validates configs to prevent `command:` directives
 
@@ -138,3 +146,4 @@ When TLS is configured, the container exposes:
 - Check `/errors.txt` for persistent error messages
 - Disable `fatal_handler` in supervisord.conf for debugging startup issues
 - Vector validation: `vector validate -c /path/to/vector.yaml`
+- Vector config location: `/vector-config/current/vector.yaml` (not `/vector.yaml`)
