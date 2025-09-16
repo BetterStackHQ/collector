@@ -9,11 +9,11 @@ services:
     security_opt:
       - seccomp=collector-seccomp.json
     environment:
-      - COLLECTOR_SECRET=${COLLECTOR_SECRET}
-      - BASE_URL=${BASE_URL:-https://telemetry.betterstack.com}
-      - CLUSTER_COLLECTOR=${CLUSTER_COLLECTOR:-false}
+      - COLLECTOR_SECRET
+      - BASE_URL
+      - CLUSTER_COLLECTOR
       - VECTOR_LOG_FORMAT=json
-      # Pass hostname of host machine to collector; needs `export HOSTNAME` before running `docker compose up`
+      # Pass hostname of host machine to collector
       - HOSTNAME
       # Optional domain-based TLS issuance (Certbot) and proxy port
       - TLS_DOMAIN
@@ -41,10 +41,33 @@ services:
     image: betterstack/collector-beyla:latest
     container_name: better-stack-beyla
     restart: always
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 90s
     privileged: true
     pid: host
     network_mode: host
+    mem_limit: 1536m
+    healthcheck:
+      test: |
+        BEYLA_PID=$$(pgrep -f '^/usr/local/bin/beyla' | head -1) && \
+        if [ -z "$$BEYLA_PID" ]; then \
+          echo "Beyla process not found"; \
+          exit 1; \
+        fi && \
+        MEM_USAGE=$$(cat /proc/$$BEYLA_PID/status | grep VmRSS | awk '{print int($$2/1024)}') && \
+        THRESHOLD=1450 && \
+        if [ "$$MEM_USAGE" -gt "$$THRESHOLD" ]; then \
+          echo "Beyla memory usage $${MEM_USAGE}MiB exceeds threshold $${THRESHOLD}MiB"; \
+          exit 1; \
+        fi
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 2
     environment:
+      # Set Go memory limit to slightly less than container limit
+      - GOMEMLIMIT=1400MiB
       # Pass hostname of host machine to Beyla; needs `export HOSTNAME` before running `docker compose up`
       - HOSTNAME
       # Override OTLP endpoint to point to collector container
@@ -54,8 +77,8 @@ services:
       - BEYLA_BPF_TRACK_REQUEST_HEADERS=true
       - BEYLA_METRICS_INTERVAL=15s
       - BEYLA_CONFIG_PATH=/etc/beyla/beyla.yaml
-      # Enable dockerprobe by default (set to false to disable)
-      - ENABLE_DOCKERPROBE=${ENABLE_DOCKERPROBE:-true}
+      # Enable dockerprobe
+      - ENABLE_DOCKERPROBE
     volumes:
       - /sys/kernel/tracing:/sys/kernel/tracing:rw
       - /sys/kernel/debug:/sys/kernel/debug:rw

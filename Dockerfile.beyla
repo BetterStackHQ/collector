@@ -13,14 +13,14 @@ COPY dockerprobe/main.go ./
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags='-s -w' -o /bin/dockerprobe .
 
 # Get Beyla files from official image
-FROM grafana/beyla:2.2.4 AS beyla-source
+FROM grafana/beyla:2.6.1 AS beyla-source
 
 # Final stage - Using Debian for glibc compatibility with node-agent
 FROM debian:12-slim
 
 # Install supervisor, ca-certificates, and curl
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends supervisor ca-certificates curl && \
+    apt-get install -y --no-install-recommends supervisor ca-certificates curl procps && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

@@ -2,7 +2,10 @@ module dockerprobe
 
 go 1.24.4
 
-require github.com/docker/docker v27.5.0+incompatible
+require (
+	github.com/docker/docker v27.5.0+incompatible
+	golang.org/x/sync v0.0.0-20201020160332-67f06af15bc9
+)
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect

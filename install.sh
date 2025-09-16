@@ -40,12 +40,23 @@ fi
 # Check Docker Compose
 if docker compose version &> /dev/null; then
     COMPOSE_CMD="docker compose"
+    COMPOSE_VERSION=$(docker compose version --short 2>/dev/null || docker compose version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
 elif docker-compose version &> /dev/null; then
     COMPOSE_CMD="docker-compose"
+    COMPOSE_VERSION=$(docker-compose version --short 2>/dev/null || docker-compose version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
 else
     echo "Please install Docker Compose"
     exit 1
 fi
+
+# Check Docker Compose version is >= 1.25.0
+MIN_COMPOSE_VERSION="1.25.0"
+if version_lt "$COMPOSE_VERSION" "$MIN_COMPOSE_VERSION"; then
+    echo "Error: Docker Compose version $COMPOSE_VERSION is too old. Minimum required version is $MIN_COMPOSE_VERSION"
+    echo "Please upgrade Docker Compose: https://docs.docker.com/compose/install/"
+    exit 1
+fi
+echo "Detected Docker Compose version $COMPOSE_VERSION (>= $MIN_COMPOSE_VERSION)"
 
 # Check COLLECTOR_SECRET
 if [ -z "$COLLECTOR_SECRET" ]; then
@@ -80,6 +91,11 @@ fi
 
 # Set hostname if not provided
 HOSTNAME="${HOSTNAME:-$(hostname)}"
+
+# Set default values for environment variables
+BASE_URL="${BASE_URL:-https://telemetry.betterstack.com}"
+CLUSTER_COLLECTOR="${CLUSTER_COLLECTOR:-false}"
+ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
 
 # Check if docker-compose.yml already exists
 if [ -f "docker-compose.yml" ]; then
@@ -181,7 +197,13 @@ curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/beyla.y
     -o beyla.yaml
 
 # Pull images first
-COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="$HOSTNAME" TLS_DOMAIN="$TLS_DOMAIN" PROXY_PORT="$PROXY_PORT" \
+COLLECTOR_SECRET="$COLLECTOR_SECRET" \
+BASE_URL="$BASE_URL" \
+CLUSTER_COLLECTOR="$CLUSTER_COLLECTOR" \
+ENABLE_DOCKERPROBE="$ENABLE_DOCKERPROBE" \
+HOSTNAME="$HOSTNAME" \
+TLS_DOMAIN="$TLS_DOMAIN" \
+PROXY_PORT="$PROXY_PORT" \
     $COMPOSE_CMD -p better-stack-collector pull
 
 # Print success message
@@ -200,13 +222,16 @@ echo "   - Edit beyla.yaml to customize eBPF monitoring (e.g., exclude specific 
 echo "   - Edit docker-compose.yml to add volume mounts or change configurations"
 echo ""
 echo "✨ To pull fresh pre-built images for both collector and beyla, run:"
-echo "   COLLECTOR_SECRET=\"$COLLECTOR_SECRET\" HOSTNAME=\"$HOSTNAME\" TLS_DOMAIN=\"$TLS_DOMAIN\" PROXY_PORT=\"$PROXY_PORT\" \\"
+echo "   COLLECTOR_SECRET=\"$COLLECTOR_SECRET\" BASE_URL=\"$BASE_URL\" CLUSTER_COLLECTOR=\"$CLUSTER_COLLECTOR\" \\"
+echo "   ENABLE_DOCKERPROBE=\"$ENABLE_DOCKERPROBE\" HOSTNAME=\"$HOSTNAME\" TLS_DOMAIN=\"$TLS_DOMAIN\" PROXY_PORT=\"$PROXY_PORT\" \\"
 echo "     $COMPOSE_CMD -p better-stack-collector pull"
 echo ""
 echo "🚀 To start the collector, run:"
-echo "   COLLECTOR_SECRET=\"$COLLECTOR_SECRET\" HOSTNAME=\"$HOSTNAME\" TLS_DOMAIN=\"$TLS_DOMAIN\" PROXY_PORT=\"$PROXY_PORT\" \\"
+echo "   COLLECTOR_SECRET=\"$COLLECTOR_SECRET\" BASE_URL=\"$BASE_URL\" CLUSTER_COLLECTOR=\"$CLUSTER_COLLECTOR\" \\"
+echo "   ENABLE_DOCKERPROBE=\"$ENABLE_DOCKERPROBE\" HOSTNAME=\"$HOSTNAME\" TLS_DOMAIN=\"$TLS_DOMAIN\" PROXY_PORT=\"$PROXY_PORT\" \\"
 echo "     $COMPOSE_CMD -p better-stack-collector up -d"
 echo ""
 echo "🛑 To stop the collector, run:"
-echo "   COLLECTOR_SECRET=\"$COLLECTOR_SECRET\" HOSTNAME=\"$HOSTNAME\" TLS_DOMAIN=\"$TLS_DOMAIN\" PROXY_PORT=\"$PROXY_PORT\" \\"
+echo "   COLLECTOR_SECRET=\"$COLLECTOR_SECRET\" BASE_URL=\"$BASE_URL\" CLUSTER_COLLECTOR=\"$CLUSTER_COLLECTOR\" \\"
+echo "   ENABLE_DOCKERPROBE=\"$ENABLE_DOCKERPROBE\" HOSTNAME=\"$HOSTNAME\" TLS_DOMAIN=\"$TLS_DOMAIN\" PROXY_PORT=\"$PROXY_PORT\" \\"
 echo "     $COMPOSE_CMD -p better-stack-collector down"
