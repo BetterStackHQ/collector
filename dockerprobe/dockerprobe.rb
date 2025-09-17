@@ -46,7 +46,7 @@ class Dockerprobe
 
     # Ensure output directory exists
     dir = File.dirname(@output_path)
-    FileUtils.mkdir_p(dir) unless File.directory?(dir)
+    FileUtils.mkdir_p(dir)
 
     # Set up signal handlers for graceful shutdown
     %w[INT TERM].each do |signal|
