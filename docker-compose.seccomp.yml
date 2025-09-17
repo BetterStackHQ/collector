@@ -15,8 +15,7 @@ services:
       - VECTOR_LOG_FORMAT=json
       # Pass hostname of host machine to collector
       - HOSTNAME
-      # Optional domain-based TLS issuance (Certbot) and proxy port
-      - TLS_DOMAIN
+      # Optional proxy port for upstream proxy mode
       - PROXY_PORT
     volumes:
       # Let Vector collector host system metrics

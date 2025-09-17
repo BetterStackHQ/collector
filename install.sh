@@ -122,13 +122,13 @@ fi
 # Adjust Compose port exposure rules
 # - Keep existing localhost bindings: 34320 and 33000
 # - If PROXY_PORT present, add host mapping: ${PROXY_PORT}:${PROXY_PORT} (for upstream proxy in Vector)
-# - If TLS_DOMAIN present, add port 80 for ACME HTTP-01
+# Note: Port 80 for ACME is now managed remotely via ssl_certificate_host configuration
 
 adjust_compose_ports() {
   local file="$1"
   local tmpfile
   tmpfile="$(mktemp)"
-  awk -v add80="$TLS_DOMAIN" -v addport="$PROXY_PORT" '
+  awk -v addport="$PROXY_PORT" '
     BEGIN { inserted=0 }
     {
       # Remove previously inserted install lines for idempotence
@@ -139,9 +139,8 @@ adjust_compose_ports() {
         if (addport != "") {
           print "      - \"" addport ":" addport "\" # install: proxy port"
         }
-        if (add80 != "") {
-          print "      - \"80:80\" # install: acme http-01"
-        }
+        # Port 80 is always exposed for potential ACME validation
+        print "      - \"80:80\" # install: acme http-01"
         inserted=1
       }
     }
@@ -157,7 +156,6 @@ BASE_URL="$BASE_URL" \
 CLUSTER_COLLECTOR="$CLUSTER_COLLECTOR" \
 ENABLE_DOCKERPROBE="$ENABLE_DOCKERPROBE" \
 HOSTNAME="$HOSTNAME" \
-TLS_DOMAIN="$TLS_DOMAIN" \
 PROXY_PORT="$PROXY_PORT" \
     $COMPOSE_CMD -p better-stack-collector pull
 
@@ -167,6 +165,5 @@ BASE_URL="$BASE_URL" \
 CLUSTER_COLLECTOR="$CLUSTER_COLLECTOR" \
 ENABLE_DOCKERPROBE="$ENABLE_DOCKERPROBE" \
 HOSTNAME="$HOSTNAME" \
-TLS_DOMAIN="$TLS_DOMAIN" \
 PROXY_PORT="$PROXY_PORT" \
     $COMPOSE_CMD -p better-stack-collector up -d

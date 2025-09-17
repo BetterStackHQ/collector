@@ -46,15 +46,20 @@ Tail collector logs:
 
 ### Domain-based TLS (optional)
 
-- `TLS_DOMAIN` (optional): Fully-qualified domain name. When set, the container runs Certbot under supervisord to manage a certificate via ACME HTTP-01 and exposes port `80/tcp` for validation.
-- `PROXY_PORT` (required when `TLS_DOMAIN` is set): Host port mapped to the in-container proxy. Must be an integer and must not equal `80`, `33000` or `34320`.
+- SSL certificate domain is now managed remotely via Better Stack API (no longer uses `TLS_DOMAIN` env var)
+- `PROXY_PORT` (optional): Host port mapped to the in-container proxy. Must be an integer and must not equal `80`, `33000` or `34320`.
+- Domain configuration:
+  - Domain is received in `ssl_certificate_host.txt` file with other configuration files
+  - Stored at `/etc/ssl_certificate_host.txt` in the container
+  - Certbot reads domain from this file instead of environment variable
 - Certificate locations after issuance or renewal:
-  - `/etc/ssl/<TLS_DOMAIN>.pem` (symlink to fullchain.pem)
-  - `/etc/ssl/<TLS_DOMAIN>.key` (symlink to privkey.pem)
+  - `/etc/ssl/<domain>.pem` (symlink to fullchain.pem)
+  - `/etc/ssl/<domain>.key` (symlink to privkey.pem)
 - Vector reload behavior:
   - On successful issuance or renewal, Vector is signaled (HUP) to reload without container restart.
+  - When domain changes, Vector validation is skipped for one ping cycle (30s) to allow certificate acquisition
 - Retry cadence:
-  - Issuance attempts: every 10 minutes until a valid cert exists
+  - Issuance attempts: immediate on domain change, then every 10 minutes until a valid cert exists
   - Renewals: every 6 hours when a valid cert exists
 
 ## Topology
