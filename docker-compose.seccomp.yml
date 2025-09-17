@@ -29,6 +29,8 @@ services:
       # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this volume
       # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
       - docker-metadata:/enrichment:rw
+      # Mount host root filesystem to enable reading custom log paths with Vector
+      - /:/host:ro
     ports:
       # Bind to localhost only for security - Beyla will connect via host network
       - "127.0.0.1:34320:34320" # Beyla metrics endpoint
