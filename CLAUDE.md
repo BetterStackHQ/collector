@@ -105,7 +105,8 @@ Logs available in `/var/log/supervisor/*` in each container
 - `BASE_URL` - API endpoint (default: https://telemetry.betterstack.com)
 - `CLUSTER_COLLECTOR` - Force cluster collector mode
 - `INGESTING_HOST`, `SOURCE_TOKEN` - Required for test server
-- `PROXY_PORT` (optional) - Host port for upstream proxy (cannot be 80, 33000, 34320, or 39090)
+- `PROXY_PORT` (optional) - Host port for upstream proxy (cannot be 80 when USE_TLS is set, cannot be 33000, 34320, or 39090)
+- `USE_TLS` (optional) - Indicates TLS should be used; when set, port 80 will be exposed for ACME validation. Only used by install.sh.
 
 ### TLS Certificate Management (Certbot)
 
