@@ -3,11 +3,11 @@ set -euo pipefail
 
 # Run mdprobe to get instance metadata
 echo "Getting instance metadata..."
-METADATA_JSON=$(/usr/local/bin/mdprobe)
+METADATA_JSON=$(/usr/bin/ruby /mdprobe/mdprobe.rb)
 
 # Parse JSON and extract region and availability zone using jq
-export REGION=$(echo "$METADATA_JSON" | jq -r '.Region // "unknown"')
-export AZ=$(echo "$METADATA_JSON" | jq -r '.AvailabilityZone // "unknown"')
+export REGION=$(echo "$METADATA_JSON" | jq -r '.region // "unknown"')
+export AZ=$(echo "$METADATA_JSON" | jq -r '.availability_zone // "unknown"')
 
 echo "Extracted metadata:"
 echo "  REGION=${REGION}"
