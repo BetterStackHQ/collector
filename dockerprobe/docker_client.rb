@@ -6,12 +6,14 @@ require 'uri'
 
 # Net::HTTP subclass for Unix socket support
 class UnixSocketHttp < Net::HTTP
-  def initialize(socket_path)
-    super('localhost', nil)
-    @socket_path = socket_path
+  attr_accessor :socket_path
+
+  def initialize(address, port = nil)
+    super(address, port)
   end
 
   def connect
+    raise "Socket path not set" unless @socket_path
     @socket = Net::BufferedIO.new(UNIXSocket.new(@socket_path))
     on_connect
   end
@@ -47,7 +49,11 @@ class DockerClient
   private
 
   def http
-    @http ||= UnixSocketHttp.new(@socket_path)
+    @http ||= begin
+      h = UnixSocketHttp.new('localhost', nil)
+      h.socket_path = @socket_path
+      h
+    end
   end
 
   def get(path)
