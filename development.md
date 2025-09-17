@@ -46,8 +46,8 @@ Tail collector logs:
 
 ### Domain-based TLS (optional)
 
-- SSL certificate domain is now managed remotely via Better Stack API (no longer uses `TLS_DOMAIN` env var)
-- `PROXY_PORT` (optional): Host port mapped to the in-container proxy. Must be an integer and must not equal `80`, `33000` or `34320`.
+- SSL certificate domain is now managed remotely via Better Stack API
+- `PROXY_PORT` (optional): Host port mapped to the in-container proxy. Must be an integer and must not equal `33000` or `34320`. Must not equal `80` when domain is given - certbot binds to it.
 - Domain configuration:
   - Domain is received in `ssl_certificate_host.txt` file with other configuration files
   - Stored at `/etc/ssl_certificate_host.txt` in the container
