@@ -273,7 +273,7 @@ class BetterStackClient
       if ssl_certificate_host_exists
         domain_changed = @ssl_certificate_manager.process_ssl_certificate_host(ssl_certificate_host_content || '')
         if domain_changed
-          puts "SSL certificate domain changed - will skip Vector validation for this update cycle"
+          puts "SSL certificate domain changed, will skip Vector validation for this update cycle if certificate not ready"
           skip_vector_validation = @ssl_certificate_manager.should_skip_validation?
         end
       end
@@ -302,6 +302,7 @@ class BetterStackClient
       if skip_vector_validation
         puts "Skipping Vector validation and promotion due to pending SSL certificate"
       else
+        puts "Proceeding with Vector validation"
         validate_output = @vector_config.validate_upstream_files(version_dir)
         if validate_output
           write_error("Validation failed for vector config in #{new_version}\n\n#{validate_output}")
