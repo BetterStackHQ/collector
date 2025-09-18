@@ -19,13 +19,8 @@ services:
       - TLS_DOMAIN
       - PROXY_PORT
     volumes:
-      # Let Vector collector host system metrics
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-      # Collect host logs
-      - /var/log:/host/var/log:ro
-      # Collect Docker container logs
-      - /var/lib/docker/containers:/host/var/lib/docker/containers:ro
+      # Mount host root filesystem to enable reading system metrics, logs (including logs outside /var/log), and container data
+      - /:/host:ro
       # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this volume
       # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
       - docker-metadata:/enrichment:rw
