@@ -161,7 +161,7 @@ class BetterStackClient
     when '204'
       puts "No updates available"
       # Clear transient errors not related to the configuration on successful, no-updates ping
-      clear_error if error_clearable? 
+      clear_error if error_clearable?
       return
     when '200'
       data = JSON.parse(body)
@@ -254,6 +254,7 @@ class BetterStackClient
 
         # Read ssl_certificate_host content for processing
         if filename == "ssl_certificate_host.txt"
+          puts "Got SSL certificate host: #{ssl_certificate_host_content}"
           ssl_certificate_host_content = File.read(path).strip rescue ''
         end
       end
@@ -327,7 +328,7 @@ class BetterStackClient
         FileUtils.rm_rf(version_dir)
       end
 
-      true
+      !skip_vector_validation
     else
       write_error("Failed to fetch configuration for version #{new_version}. Response code: #{code}")
     end
