@@ -2,11 +2,19 @@
 set -euo pipefail
 
 # Run under supervisord to manage issuance and renewals conditionally.
+# Domain is now read from /etc/ssl_certificate_host.txt file
 
-TLS_DOMAIN="${TLS_DOMAIN:-}"
+DOMAIN_FILE="/etc/ssl_certificate_host.txt"
+
+# Read domain from file
+if [[ -f "$DOMAIN_FILE" ]]; then
+  TLS_DOMAIN=$(cat "$DOMAIN_FILE" | tr -d '[:space:]')
+else
+  TLS_DOMAIN=""
+fi
 
 if [[ -z "$TLS_DOMAIN" ]]; then
-  echo "[certbot] TLS_DOMAIN not set; sleeping indefinitely."
+  echo "[certbot] No domain configured in $DOMAIN_FILE; sleeping indefinitely."
   exec sleep infinity
 fi
 
@@ -75,7 +83,19 @@ renew_once() {
   fi
 }
 
-echo "[certbot] TLS_DOMAIN set to $TLS_DOMAIN; managing certificates."
+echo "[certbot] Domain configured as $TLS_DOMAIN from $DOMAIN_FILE; managing certificates."
+
+# Always attempt issuance immediately on startup/restart if cert doesn't exist
+# This handles the case where domain just changed and we need to get a cert quickly
+if ! has_valid_cert; then
+  echo "[certbot] No valid certificate found. Attempting immediate issuance..."
+  if issue_once; then
+    echo "[certbot] Certificate obtained successfully."
+    ensure_links_and_reload
+  else
+    echo "[certbot] Initial issuance attempt failed. Will retry every 10 minutes."
+  fi
+fi
 
 if has_valid_cert; then
   echo "[certbot] Valid certificate found. Starting 6-hour renewal check cycle."

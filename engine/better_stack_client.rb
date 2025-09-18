@@ -4,6 +4,7 @@ require_relative 'vector_config'
 require_relative 'ebpf_compatibility_checker'
 require_relative 'containers_enrichment_table'
 require_relative 'databases_enrichment_table'
+require_relative 'ssl_certificate_manager'
 require 'net/http'
 require 'fileutils'
 require 'time'
@@ -30,6 +31,7 @@ class BetterStackClient
     @kubernetes_discovery = KubernetesDiscovery.new(working_dir)
     @vector_config = VectorConfig.new(working_dir)
     @ebpf_compatibility_checker = EbpfCompatibilityChecker.new(working_dir)
+    @ssl_certificate_manager = SSLCertificateManager.new(nil)  # Use default /etc path for production
 
     containers_path = File.join(working_dir, 'enrichment', 'docker-mappings.csv')
     containers_incoming_path = File.join(working_dir, 'enrichment', 'docker-mappings.incoming.csv')
@@ -159,7 +161,7 @@ class BetterStackClient
     when '204'
       puts "No updates available"
       # Clear transient errors not related to the configuration on successful, no-updates ping
-      clear_error if error_clearable? 
+      clear_error if error_clearable?
       return
     when '200'
       data = JSON.parse(body)
@@ -222,6 +224,8 @@ class BetterStackClient
       puts "Downloading configuration files for version #{new_version}..."
       all_files_downloaded = true
       databases_csv_exists = false
+      ssl_certificate_host_exists = false
+      ssl_certificate_host_content = nil
 
       data['files'].each do |file_info|
         # Assuming file_info is a hash {'url': '...', 'name': '...'} or just a URL string
@@ -235,8 +239,9 @@ class BetterStackClient
           break
         end
 
-        # Track if databases.csv is included in this version
+        # Track special files
         databases_csv_exists = true if filename == "databases.csv"
+        ssl_certificate_host_exists = true if filename == "ssl_certificate_host.txt"
 
         path = "#{@working_dir}/versions/#{new_version}/#{filename}".gsub(%r{/+}, '/')
         puts "Downloading #{filename} to #{path}"
@@ -246,6 +251,12 @@ class BetterStackClient
           all_files_downloaded = false
           break # Stop trying to download other files
         end
+
+        # Read ssl_certificate_host content for processing
+        if filename == "ssl_certificate_host.txt"
+          puts "Got SSL certificate host: #{ssl_certificate_host_content}"
+          ssl_certificate_host_content = File.read(path).strip rescue ''
+        end
       end
 
       unless all_files_downloaded
@@ -253,9 +264,19 @@ class BetterStackClient
         return
       end
 
-      puts "All files downloaded. Validating configuration..."
+      puts "All files downloaded. Processing configuration..."
 
       version_dir = File.join(@working_dir, "versions", new_version)
+
+      # Process SSL certificate host if included
+      skip_vector_validation = false
+      if ssl_certificate_host_exists
+        domain_changed = @ssl_certificate_manager.process_ssl_certificate_host(ssl_certificate_host_content || '')
+        if domain_changed
+          puts "SSL certificate domain changed, will skip Vector validation for this update cycle if certificate not ready"
+          skip_vector_validation = @ssl_certificate_manager.should_skip_validation?
+        end
+      end
 
       # Validate databases.csv if it exists in this version
       if databases_csv_exists
@@ -277,16 +298,20 @@ class BetterStackClient
         end
       end
 
-      # Validate vector config
-      validate_output = @vector_config.validate_upstream_files(version_dir)
-      unless validate_output.nil?
-        write_error("Validation failed for vector config in #{new_version}\n\n#{validate_output}")
-        return
+      # Validate and promote vector config only if not skipping
+      if skip_vector_validation
+        puts "Skipping Vector validation and promotion due to pending SSL certificate"
+      else
+        puts "Proceeding with Vector validation"
+        validate_output = @vector_config.validate_upstream_files(version_dir)
+        if validate_output
+          write_error("Validation failed for vector config in #{new_version}\n\n#{validate_output}")
+          return
+        end
+
+        # Only promote vector config if validation passed
+        @vector_config.promote_upstream_files(version_dir)
       end
-
-
-      # All validations passed, now promote everything
-      @vector_config.promote_upstream_files(version_dir)
 
       # Promote databases.csv if it was included and validated
       if databases_csv_exists
@@ -294,7 +319,17 @@ class BetterStackClient
         puts "Promoted databases.csv to #{@databases_enrichment_table.target_path}"
       end
 
-      true
+      # Reset SSL manager flag for next ping cycle
+      @ssl_certificate_manager.reset_change_flag if ssl_certificate_host_exists
+
+      # Clean up version directory if we skipped vector validation
+      # This ensures we'll get the config again on next ping
+      if skip_vector_validation
+        puts "Removing version directory to retry vector config on next ping cycle"
+        FileUtils.rm_rf(version_dir)
+      end
+
+      !skip_vector_validation
     else
       write_error("Failed to fetch configuration for version #{new_version}. Response code: #{code}")
     end

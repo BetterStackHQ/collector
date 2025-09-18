@@ -850,4 +850,273 @@ class BetterStackClientTest < Minitest::Test
     
     assert promote_called, "promote should be called on databases_enrichment_table"
   end
+
+  def test_process_configuration_with_ssl_certificate_host
+    new_version = "2023-01-01T00:00:00"
+    version_dir = File.join(@test_dir, 'versions', new_version)
+    FileUtils.mkdir_p(version_dir)
+
+    # Track SSL manager method calls
+    process_ssl_called = false
+    processed_domain = nil
+    should_skip = false
+    reset_called = false
+
+    # Mock SSL certificate manager
+    ssl_manager = @client.instance_variable_get(:@ssl_certificate_manager)
+    ssl_manager.define_singleton_method(:process_ssl_certificate_host) do |domain|
+      process_ssl_called = true
+      processed_domain = domain
+      true # domain changed
+    end
+    ssl_manager.define_singleton_method(:should_skip_validation?) do
+      should_skip
+    end
+    ssl_manager.define_singleton_method(:reset_change_flag) do
+      reset_called = true
+    end
+
+    # Mock other required methods
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:validate_upstream_files) do |dir|
+      nil # validation passes
+    end
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:promote_upstream_files) do |dir|
+      # no-op
+    end
+
+    def @client.download_file(url, path)
+      FileUtils.mkdir_p(File.dirname(path))
+      if path.end_with?('ssl_certificate_host.txt')
+        File.write(path, 'new.example.com')
+      else
+        File.write(path, 'test content')
+      end
+      true
+    end
+
+    # Sample response with ssl_certificate_host.txt
+    code = "200"
+    body = {
+      files: [
+        { path: "/collector/file/vector.yaml", name: "vector.yaml" },
+        { path: "/collector/file/ssl_certificate_host.txt", name: "ssl_certificate_host.txt" }
+      ]
+    }.to_json
+
+    @client.process_configuration(new_version, code, body)
+
+    # Verify SSL processing
+    assert process_ssl_called, "process_ssl_certificate_host should be called"
+    assert_equal 'new.example.com', processed_domain
+    assert reset_called, "reset_change_flag should be called"
+
+    # Reset the method
+    class << @client
+      remove_method :download_file
+    end
+  end
+
+  def test_process_configuration_skips_validation_and_promotion_when_ssl_pending
+    new_version = "2023-01-01T00:00:00"
+    version_dir = File.join(@test_dir, 'versions', new_version)
+    FileUtils.mkdir_p(version_dir)
+
+    # Track validation and promotion calls
+    validate_called = false
+    promote_called = false
+
+    # Mock SSL certificate manager to indicate skip validation
+    ssl_manager = @client.instance_variable_get(:@ssl_certificate_manager)
+    ssl_manager.define_singleton_method(:process_ssl_certificate_host) do |domain|
+      true # domain changed
+    end
+    ssl_manager.define_singleton_method(:should_skip_validation?) do
+      true # should skip
+    end
+    ssl_manager.define_singleton_method(:reset_change_flag) do
+      # no-op
+    end
+
+    # Mock vector_config - neither validate nor promote should be called
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:validate_upstream_files) do |dir|
+      validate_called = true
+      nil
+    end
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:promote_upstream_files) do |dir|
+      promote_called = true
+    end
+
+    def @client.download_file(url, path)
+      FileUtils.mkdir_p(File.dirname(path))
+      if path.end_with?('ssl_certificate_host.txt')
+        File.write(path, 'new.example.com')
+      else
+        File.write(path, 'test content')
+      end
+      true
+    end
+
+    # Sample response with ssl_certificate_host.txt
+    code = "200"
+    body = {
+      files: [
+        { path: "/collector/file/vector.yaml", name: "vector.yaml" },
+        { path: "/collector/file/ssl_certificate_host.txt", name: "ssl_certificate_host.txt" }
+      ]
+    }.to_json
+
+    @client.process_configuration(new_version, code, body)
+
+    # Verify both validation and promotion were skipped
+    assert !validate_called, "validate_upstream_files should NOT be called when SSL validation should be skipped"
+    assert !promote_called, "promote_upstream_files should NOT be called when validation is skipped"
+
+    # Verify version directory was cleaned up
+    assert !File.exist?(version_dir), "Version directory should be removed when skipping validation"
+
+    # Reset the method
+    class << @client
+      remove_method :download_file
+    end
+  end
+
+  def test_process_configuration_promotes_databases_when_ssl_skips_vector
+    new_version = "2023-01-01T00:00:00"
+    version_dir = File.join(@test_dir, 'versions', new_version)
+    FileUtils.mkdir_p(version_dir)
+
+    # Track what gets promoted
+    vector_promote_called = false
+    databases_promote_called = false
+
+    # Mock SSL certificate manager to indicate skip validation
+    ssl_manager = @client.instance_variable_get(:@ssl_certificate_manager)
+    ssl_manager.define_singleton_method(:process_ssl_certificate_host) do |domain|
+      true # domain changed
+    end
+    ssl_manager.define_singleton_method(:should_skip_validation?) do
+      true # should skip vector validation
+    end
+    ssl_manager.define_singleton_method(:reset_change_flag) do
+      # no-op
+    end
+
+    # Mock vector_config - should NOT be promoted
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:validate_upstream_files) do |dir|
+      nil # won't be called
+    end
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:promote_upstream_files) do |dir|
+      vector_promote_called = true
+    end
+
+    # Mock databases_enrichment_table - SHOULD be promoted
+    @client.instance_variable_get(:@databases_enrichment_table).define_singleton_method(:validate) do
+      nil # validation passes
+    end
+    @client.instance_variable_get(:@databases_enrichment_table).define_singleton_method(:promote) do
+      databases_promote_called = true
+    end
+    test_dir = @test_dir
+    @client.instance_variable_get(:@databases_enrichment_table).define_singleton_method(:incoming_path) do
+      File.join(test_dir, 'enrichment', 'databases.incoming.csv')
+    end
+    @client.instance_variable_get(:@databases_enrichment_table).define_singleton_method(:target_path) do
+      File.join(test_dir, 'enrichment', 'databases.csv')
+    end
+
+    def @client.download_file(url, path)
+      FileUtils.mkdir_p(File.dirname(path))
+      if path.end_with?('ssl_certificate_host.txt')
+        File.write(path, 'new.example.com')
+      elsif path.end_with?('databases.csv')
+        File.write(path, "identifier,container,service,host\ndb1,container1,service1,host1")
+      else
+        File.write(path, 'test content')
+      end
+      true
+    end
+
+    # Sample response with ssl_certificate_host.txt and databases.csv
+    code = "200"
+    body = {
+      files: [
+        { path: "/collector/file/vector.yaml", name: "vector.yaml" },
+        { path: "/collector/file/ssl_certificate_host.txt", name: "ssl_certificate_host.txt" },
+        { path: "/collector/file/databases.csv", name: "databases.csv" }
+      ]
+    }.to_json
+
+    @client.process_configuration(new_version, code, body)
+
+    # Verify vector was NOT promoted but databases WAS promoted
+    assert !vector_promote_called, "Vector config should NOT be promoted when validation is skipped"
+    assert databases_promote_called, "Databases.csv SHOULD be promoted even when vector is skipped"
+
+    # Verify version directory was cleaned up
+    assert !File.exist?(version_dir), "Version directory should be removed when skipping validation"
+
+    # Reset the method
+    class << @client
+      remove_method :download_file
+    end
+  end
+
+  def test_process_configuration_with_empty_ssl_certificate_host
+    new_version = "2023-01-01T00:00:00"
+    version_dir = File.join(@test_dir, 'versions', new_version)
+    FileUtils.mkdir_p(version_dir)
+
+    # Track SSL processing
+    processed_domain = nil
+
+    # Mock SSL certificate manager
+    ssl_manager = @client.instance_variable_get(:@ssl_certificate_manager)
+    ssl_manager.define_singleton_method(:process_ssl_certificate_host) do |domain|
+      processed_domain = domain
+      true # domain changed to empty
+    end
+    ssl_manager.define_singleton_method(:should_skip_validation?) do
+      false # don't skip for empty domain
+    end
+    ssl_manager.define_singleton_method(:reset_change_flag) do
+      # no-op
+    end
+
+    # Mock other methods
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:validate_upstream_files) do |dir|
+      nil # validation passes
+    end
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:promote_upstream_files) do |dir|
+      # no-op
+    end
+
+    def @client.download_file(url, path)
+      FileUtils.mkdir_p(File.dirname(path))
+      if path.end_with?('ssl_certificate_host.txt')
+        File.write(path, '') # empty file
+      else
+        File.write(path, 'test content')
+      end
+      true
+    end
+
+    # Sample response with ssl_certificate_host.txt
+    code = "200"
+    body = {
+      files: [
+        { path: "/collector/file/vector.yaml", name: "vector.yaml" },
+        { path: "/collector/file/ssl_certificate_host.txt", name: "ssl_certificate_host.txt" }
+      ]
+    }.to_json
+
+    @client.process_configuration(new_version, code, body)
+
+    # Verify empty domain was processed
+    assert_equal '', processed_domain
+
+    # Reset the method
+    class << @client
+      remove_method :download_file
+    end
+  end
 end

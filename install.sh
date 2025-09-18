@@ -64,27 +64,24 @@ if [ -z "$COLLECTOR_SECRET" ]; then
     exit 1
 fi
 
-# Optional domain/TLS and proxy port
-TLS_DOMAIN="${TLS_DOMAIN:-}"
+# Optional proxy port and TLS indicator
 PROXY_PORT="${PROXY_PORT:-}"
+USE_TLS="${USE_TLS:-}"
 
-# Validate TLS_DOMAIN/PROXY_PORT semantics
-if [ -n "$TLS_DOMAIN" ]; then
-    if [ -z "$PROXY_PORT" ]; then
-        echo "Error: TLS_DOMAIN is set but PROXY_PORT is missing. Set PROXY_PORT to the upstream/proxy port (and it must not be 80)."
-        exit 1
-    fi
+# Validate PROXY_PORT if set
+if [ -n "$PROXY_PORT" ]; then
     if ! [[ "$PROXY_PORT" =~ ^[0-9]+$ ]]; then
         echo "Error: PROXY_PORT must be an integer."
-        exit 1
-    fi
-    if [ "$PROXY_PORT" -eq 80 ]; then
-        echo "Error: PROXY_PORT must not equal 80 when TLS_DOMAIN is set (port 80 is reserved for ACME HTTP-01)."
         exit 1
     fi
     # Check for conflicts with internal ports
     if [ "$PROXY_PORT" -eq 33000 ] || [ "$PROXY_PORT" -eq 34320 ] || [ "$PROXY_PORT" -eq 39090 ]; then
         echo "Error: PROXY_PORT cannot be 33000, 34320, or 39090 as these are internal collector ports."
+        exit 1
+    fi
+    # If USE_TLS is set and PROXY_PORT is 80, that's a conflict
+    if [ -n "$USE_TLS" ] && [ "$PROXY_PORT" -eq 80 ]; then
+        echo "Error: PROXY_PORT cannot be 80 when USE_TLS is set (port 80 is reserved for ACME HTTP-01)."
         exit 1
     fi
 fi
@@ -122,13 +119,20 @@ fi
 # Adjust Compose port exposure rules
 # - Keep existing localhost bindings: 34320 and 33000
 # - If PROXY_PORT present, add host mapping: ${PROXY_PORT}:${PROXY_PORT} (for upstream proxy in Vector)
-# - If TLS_DOMAIN present, add port 80 for ACME HTTP-01
+# - Add port 80 for ACME validation when PROXY_PORT==443 or USE_TLS is set (and PROXY_PORT!=80)
 
 adjust_compose_ports() {
   local file="$1"
   local tmpfile
   tmpfile="$(mktemp)"
-  awk -v add80="$TLS_DOMAIN" -v addport="$PROXY_PORT" '
+
+  # Determine if we should bind port 80
+  local bind80=""
+  if [ "$PROXY_PORT" = "443" ] || ([ -n "$USE_TLS" ] && [ "$PROXY_PORT" != "80" ]); then
+    bind80="yes"
+  fi
+
+  awk -v addport="$PROXY_PORT" -v add80="$bind80" '
     BEGIN { inserted=0 }
     {
       # Remove previously inserted install lines for idempotence
@@ -157,7 +161,6 @@ BASE_URL="$BASE_URL" \
 CLUSTER_COLLECTOR="$CLUSTER_COLLECTOR" \
 ENABLE_DOCKERPROBE="$ENABLE_DOCKERPROBE" \
 HOSTNAME="$HOSTNAME" \
-TLS_DOMAIN="$TLS_DOMAIN" \
 PROXY_PORT="$PROXY_PORT" \
     $COMPOSE_CMD -p better-stack-collector pull
 
@@ -167,6 +170,5 @@ BASE_URL="$BASE_URL" \
 CLUSTER_COLLECTOR="$CLUSTER_COLLECTOR" \
 ENABLE_DOCKERPROBE="$ENABLE_DOCKERPROBE" \
 HOSTNAME="$HOSTNAME" \
-TLS_DOMAIN="$TLS_DOMAIN" \
 PROXY_PORT="$PROXY_PORT" \
     $COMPOSE_CMD -p better-stack-collector up -d
