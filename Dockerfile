@@ -83,7 +83,8 @@ RUN mkdir -p /vector-config/0-default \
   && ln -s /versions/0-default/vector.yaml /vector-config/0-default/vector.yaml \
   && ln -s /kubernetes-discovery/0-default /vector-config/0-default/kubernetes-discovery \
   && ln -s /vector-config/0-default /vector-config/current \
-  && cp /versions/0-default/vector.yaml /vector-config/latest-valid-upstream/vector.yaml
+  && cp /versions/0-default/vector.yaml /vector-config/latest-valid-upstream/vector.yaml \
+  && touch /first-boot.txt
 
 # Install tini and use it as init to handle signals properly
 ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
