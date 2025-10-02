@@ -204,6 +204,10 @@ class VectorConfig
       File.rename(temp_link, current_link)
 
       puts "Atomically promoted #{config_dir} to current"
+
+      # Clean up old directories after successful promotion
+      cleanup_old_directories
+
       true
     rescue => e
       # Cleanup temp link if it exists
@@ -229,5 +233,41 @@ class VectorConfig
     system("supervisorctl signal HUP vector")
 
     puts "Successfully promoted to current"
+  end
+
+  # Clean up old vector-config directories, keeping only the most recent ones
+  def cleanup_old_directories(keep_count = 5)
+    # Get all new_* directories
+    new_dirs = Dir.glob(File.join(@vector_config_dir, "new_*")).select { |f| File.directory?(f) }
+
+    # Sort by timestamp in directory name (newest last)
+    new_dirs.sort!
+
+    # Resolve symlinks to find directories that are currently in use
+    current_link = File.join(@vector_config_dir, "current")
+    previous_link = File.join(@vector_config_dir, "previous")
+
+    in_use = []
+    [current_link, previous_link].each do |link|
+      if File.symlink?(link)
+        target = File.readlink(link)
+        # Convert relative path to absolute if needed
+        target = File.absolute_path(target, @vector_config_dir) unless target.start_with?('/')
+        in_use << target
+      end
+    end
+
+    # Filter out directories that are currently in use
+    deletable = new_dirs.reject { |dir| in_use.include?(dir) }
+
+    # Keep only the most recent directories
+    if deletable.length > keep_count
+      to_delete = deletable[0...(deletable.length - keep_count)]
+      to_delete.each do |dir|
+        puts "Cleaning up old vector-config directory: #{File.basename(dir)}"
+        FileUtils.rm_rf(dir)
+      end
+      puts "Cleaned up #{to_delete.length} old vector-config directories"
+    end
   end
 end
