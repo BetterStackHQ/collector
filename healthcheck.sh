@@ -34,11 +34,11 @@ while true; do
         sleep 30
     fi
 
-    # Check if Vector is healthy
-    VECTOR_HEALTH=$(curl -s http://localhost:8686/health 2>/dev/null || echo "FAILED")
+    # Check if Vector is healthy (returns JSON: {"ok":true} or {"ok":false})
+    VECTOR_HEALTH=$(curl -s http://localhost:8686/health 2>/dev/null | jq -r '.ok' 2>/dev/null || echo "error")
 
-    if [ "$VECTOR_HEALTH" != "ok" ]; then
-        echo "$(date): Vector health check failed - not responding or unhealthy"
+    if [ "$VECTOR_HEALTH" != "true" ]; then
+        echo "$(date): Vector health check failed - not responding or unhealthy ($VECTOR_HEALTH)"
     else
         # Check what sinks Vector has configured
         # If only console sink exists, something is wrong
