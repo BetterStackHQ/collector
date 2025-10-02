@@ -61,6 +61,7 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY --chmod=755 updater.rb /updater.rb
 COPY --chmod=755 proxy.rb /proxy.rb
 COPY --chmod=755 vector.sh /vector.sh
+COPY --chmod=755 healthcheck.sh /healthcheck.sh
 COPY --chmod=755 certbot-runner.sh /certbot-runner.sh
 COPY --chmod=755 certbot-deploy-hook.sh /certbot-deploy-hook.sh
 COPY versions/0-default/vector.yaml /versions/0-default/vector.yaml
