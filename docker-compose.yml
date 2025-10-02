@@ -6,6 +6,14 @@ services:
     image: betterstack/collector:latest
     container_name: better-stack-collector
     restart: always
+    sysctls:
+      - fs.inotify.max_user_watches=524288
+      - fs.inotify.max_user_instances=8192
+      - fs.file-max=2097152
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     environment:
       - COLLECTOR_SECRET
       - BASE_URL
