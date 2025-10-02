@@ -34,5 +34,30 @@ if [ ! -f "/enrichment/docker-mappings.csv" ] && [ -f "/enrichment-defaults/dock
     cp /enrichment-defaults/docker-mappings.csv /enrichment/docker-mappings.csv
 fi
 
+# Validate config files exist and are readable
+CONFIG_DIR="/vector-config/current"
+if [ ! -d "$CONFIG_DIR" ]; then
+    echo "ERROR: Config directory $CONFIG_DIR does not exist!"
+    echo "Attempting to restore from last known good config..."
+    if [ -d "/vector-config/latest-valid-upstream" ]; then
+        mkdir -p "$CONFIG_DIR"
+        cp -r /vector-config/latest-valid-upstream/* "$CONFIG_DIR/"
+        echo "Restored configuration from latest-valid-upstream"
+    else
+        echo "FATAL: No valid configuration available"
+        exit 1
+    fi
+fi
+
+# Check if we have actual config files
+CONFIG_COUNT=$(find "$CONFIG_DIR" -name "*.yaml" -type f 2>/dev/null | wc -l)
+if [ "$CONFIG_COUNT" -eq 0 ]; then
+    echo "ERROR: No YAML config files found in $CONFIG_DIR"
+    echo "Vector cannot start without configuration"
+    # Exit with 127 - "command not found" - indicates critical config missing
+    exit 127
+fi
+
+echo "Found $CONFIG_COUNT config files in $CONFIG_DIR"
 echo "Starting Vector..."
-exec /usr/local/bin/vector --config /vector-config/current/\*.yaml --config /vector-config/current/kubernetes-discovery/\*.yaml
+exec /usr/local/bin/vector --config "$CONFIG_DIR"/*.yaml --config "$CONFIG_DIR"/kubernetes-discovery/*.yaml
