@@ -38,6 +38,29 @@ Tail collector logs:
 - **Docker image failing to start because one of the processes crashes?**
   Disable the `fatal_handler` in supervisor.conf, start the collector again, log into the container and look into /var/log/supervisor/\* logs.
 
+- **Vector loses configuration and shows only console sink?**
+  This indicates Vector lost access to `/vector-config/current/`. The collector includes several recovery mechanisms:
+  - Health check (`healthcheck.sh`) monitors Vector every 60s and restarts if only console sink detected
+  - Supervisor will retry Vector 10 times before triggering container restart
+  - Check Vector sinks: `docker exec -it better-stack-collector curl -s http://localhost:8686/graphql -H "Content-Type: application/json" -d '{"query":"{ sinks { edges { node { componentId } } } }"}'`
+
+- **"Too many open files" or inotify errors?**
+  The collector sets higher system limits via:
+  - Kubernetes: Init container with `CAP_SYS_ADMIN` capability
+  - Docker Compose: `sysctls` settings in docker-compose.yml
+  - If still occurring, check current limits: `docker exec -it better-stack-collector cat /proc/sys/fs/inotify/max_user_watches`
+
+- **Vector won't start - exit code 127?**
+  This means Vector found no config files in `/vector-config/current/`. The startup script (`vector.sh`) will:
+  1. Try to restore from `/vector-config/latest-valid-upstream/`
+  2. Exit with code 127 if no configs available
+  3. Supervisor will retry 10 times, then container restarts
+
+- **Debugging configuration updates:**
+  - Check updater logs: `docker exec -it better-stack-collector tail -f /var/log/supervisor/updater.out.log`
+  - Verify current config: `docker exec -it better-stack-collector ls -la /vector-config/current/`
+  - Check symlink target: `docker exec -it better-stack-collector readlink /vector-config/current`
+
 ## Environment Variables
 
 - `COLLECTOR_SECRET` (required): Your Better Stack collector secret

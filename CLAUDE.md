@@ -146,6 +146,52 @@ The container always exposes:
 - Manual renewal test: `docker exec <container> certbot renew --dry-run`
 - Force certbot restart: `docker exec <container> supervisorctl restart certbot`
 
+### Vector Crash Recovery Mechanisms
+
+The collector includes multiple layers of protection against Vector configuration loss:
+
+#### 1. Configuration Validation at Startup (`vector.sh`)
+- Validates `/vector-config/current/` directory exists before starting Vector
+- Checks for actual YAML config files (not just directory presence)
+- Attempts to restore from `/vector-config/latest-valid-upstream/` if current is missing
+- Exits with code 127 (critical failure) if no configs found, triggering supervisor retry
+
+#### 2. Atomic Configuration Updates (`engine/vector_config.rb`)
+- Uses symlinks for `/vector-config/current` instead of moving directories
+- Creates temp symlink first, then atomically renames to 'current'
+- Backs up previous config to 'previous' link before switching
+- Restores backup if promotion fails, preventing partial states
+
+#### 3. Supervisor Restart Policy (`supervisord.conf`)
+- `startretries=10`: Attempts 10 restarts before giving up (was 3)
+- `startsecs=10`: Vector must stay up 10 seconds to be considered started
+- `stopwaitsecs=30`: Gives Vector 30 seconds for graceful shutdown
+- `exitcodes=0,1,2`: Only retries for normal errors, not persistent failures
+- Exit codes 3+ trigger FATAL state → container restart via Kubernetes
+
+#### 4. Health Monitoring (`healthcheck.sh`)
+- Runs every 60 seconds checking Vector's sink configuration
+- Detects console-only sink (indicates lost configuration)
+- Force restarts Vector if only console sink or no sinks configured
+- Provides early detection of configuration loss scenarios
+
+#### 5. System Resource Limits
+- **Kubernetes**: Init container sets higher inotify/file descriptor limits
+- **Docker Compose**: sysctls configured in compose file
+- Prevents "too many open files" errors during config reloads
+- Settings:
+  - `fs.inotify.max_user_watches=524288` (default: 8192)
+  - `fs.inotify.max_user_instances=8192` (default: 128)
+  - `fs.file-max=2097152`
+  - `ulimit nofile=65536`
+
+### Known Issues and Solutions
+
+**Problem**: Vector loses configuration after SIGHUP reload in Kubernetes
+- **Cause**: Vector loses filesystem access to `/vector-config/current/` directory
+- **Symptoms**: Vector running with console-only sink, buffer directory missing
+- **Recovery**: Health check detects and restarts Vector, or pod restarts after retries exhausted
+
 ### Development Tips
 
 - Use `should_run_cluster_collector.rb` exit codes: 0=yes, 1=no, 2=error
@@ -153,3 +199,4 @@ The container always exposes:
 - Disable `fatal_handler` in supervisord.conf for debugging startup issues
 - Vector validation: `vector validate -c /path/to/vector.yaml`
 - Vector config location: `/vector-config/current/vector.yaml` (not `/vector.yaml`)
+- Monitor Vector sinks: `curl -s http://localhost:8686/graphql -H "Content-Type: application/json" -d '{"query":"{ sinks { edges { node { componentId } } } }"}'`
