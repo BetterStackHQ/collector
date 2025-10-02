@@ -8,6 +8,24 @@ CHECK_INTERVAL=60  # seconds between checks
 
 echo "$(date): Starting Vector health check monitor (interval: ${CHECK_INTERVAL}s)"
 
+# Function to safely restart Vector
+safe_restart_vector() {
+    local reason="$1"
+
+    # Check Vector's current state before restarting
+    local VECTOR_STATE=$(supervisorctl status vector | awk '{print $2}')
+    echo "$(date): Vector current state: $VECTOR_STATE (reason: $reason)"
+
+    if [ "$VECTOR_STATE" = "RUNNING" ]; then
+        echo "$(date): Force restarting Vector..."
+        supervisorctl restart vector
+    elif [ "$VECTOR_STATE" = "STARTING" ]; then
+        echo "$(date): Vector is already starting, waiting for it to stabilize..."
+    else
+        echo "$(date): Vector is in state $VECTOR_STATE, supervisor will handle it"
+    fi
+}
+
 while true; do
     # Give Vector some time to start up on first run
     if [ ! -f "/tmp/healthcheck-started" ]; then
@@ -31,8 +49,7 @@ while true; do
 
         if [ -z "$SINKS" ]; then
             echo "$(date): ERROR: Vector has no sinks configured"
-            echo "$(date): Force restarting Vector..."
-            supervisorctl restart vector
+            safe_restart_vector "no sinks configured"
         else
             # Count how many sinks we have
             SINK_COUNT=$(echo "$SINKS" | wc -l)
@@ -40,8 +57,7 @@ while true; do
             # Check if only console sink exists (emergency/fallback mode)
             if [ "$SINK_COUNT" -eq 1 ] && echo "$SINKS" | grep -q "^console$"; then
                 echo "$(date): ERROR: Vector running with console-only sink (lost configuration)"
-                echo "$(date): Force restarting Vector..."
-                supervisorctl restart vector
+                safe_restart_vector "console-only sink (lost configuration)"
             elif ! echo "$SINKS" | grep -q "better_stack_http"; then
                 # Check if we're missing expected Better Stack sinks
                 echo "$(date): WARNING: Vector missing Better Stack HTTP sinks"
