@@ -7,7 +7,7 @@ services:
     container_name: better-stack-collector
     restart: always
     healthcheck:
-      test: ["/healthcheck.sh"]
+      test: ["CMD", "/healthcheck.sh"]
       interval: 30s
       timeout: 10s
       start_period: 60s

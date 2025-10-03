@@ -9,7 +9,7 @@ services:
     security_opt:
       - seccomp=collector-seccomp.json
     healthcheck:
-      test: ["/healthcheck.sh"]
+      test: ["CMD", "/healthcheck.sh"]
       interval: 30s
       timeout: 10s
       start_period: 60s
