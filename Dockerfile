@@ -36,7 +36,7 @@ RUN mkdir -p /versions/0-default \
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
 ENV CLUSTER_COLLECTOR=false
-ENV COLLECTOR_VERSION=1.0.30
+ENV COLLECTOR_VERSION=1.0.31
 ENV VECTOR_VERSION=0.47.0
 ENV BEYLA_VERSION=2.2.4
 ENV CLUSTER_AGENT_VERSION=1.2.4
@@ -61,6 +61,7 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY --chmod=755 updater.rb /updater.rb
 COPY --chmod=755 proxy.rb /proxy.rb
 COPY --chmod=755 vector.sh /vector.sh
+COPY --chmod=755 healthcheck.sh /healthcheck.sh
 COPY --chmod=755 certbot-runner.sh /certbot-runner.sh
 COPY --chmod=755 certbot-deploy-hook.sh /certbot-deploy-hook.sh
 COPY versions/0-default/vector.yaml /versions/0-default/vector.yaml
@@ -82,7 +83,8 @@ RUN mkdir -p /vector-config/0-default \
   && ln -s /versions/0-default/vector.yaml /vector-config/0-default/vector.yaml \
   && ln -s /kubernetes-discovery/0-default /vector-config/0-default/kubernetes-discovery \
   && ln -s /vector-config/0-default /vector-config/current \
-  && cp /versions/0-default/vector.yaml /vector-config/latest-valid-upstream/vector.yaml
+  && cp /versions/0-default/vector.yaml /vector-config/latest-valid-upstream/vector.yaml \
+  && touch /first-boot.txt
 
 # Install tini and use it as init to handle signals properly
 ENTRYPOINT ["/usr/bin/tini", "-s", "--"]

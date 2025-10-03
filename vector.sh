@@ -34,5 +34,36 @@ if [ ! -f "/enrichment/docker-mappings.csv" ] && [ -f "/enrichment-defaults/dock
     cp /enrichment-defaults/docker-mappings.csv /enrichment/docker-mappings.csv
 fi
 
+# Check for first boot
+if [ -f "/first-boot.txt" ]; then
+    echo "First boot detected, skipping config validation..."
+    # Remove the first boot marker
+    rm -f /first-boot.txt
+else
+    # Validate config files exist and are readable
+    if [ ! -d "/vector-config/current" ]; then
+        echo "ERROR: Config directory /vector-config/current does not exist!"
+        echo "Attempting to restore from last known good config..."
+        if [ -d "/vector-config/latest-valid-upstream" ]; then
+            mkdir -p "/vector-config/current"
+            cp -r /vector-config/latest-valid-upstream/* "/vector-config/current/"
+            echo "Restored configuration from latest-valid-upstream"
+        else
+            echo "FATAL: No valid configuration available"
+            exit 1
+        fi
+    fi
+
+    # Check if we have actual config files (follow symlinks with -L)
+    CONFIG_COUNT=$(find -L "/vector-config/current" -name "*.yaml" -type f 2>/dev/null | wc -l)
+    if [ "$CONFIG_COUNT" -eq 0 ]; then
+        echo "ERROR: No YAML config files found in /vector-config/current"
+        echo "Vector cannot start without configuration"
+        # Exit with 127 - "command not found" - indicates critical config missing
+        exit 127
+    fi
+
+    echo "Found $CONFIG_COUNT config files in /vector-config/current"
+fi
 echo "Starting Vector..."
 exec /usr/local/bin/vector --config /vector-config/current/\*.yaml --config /vector-config/current/kubernetes-discovery/\*.yaml

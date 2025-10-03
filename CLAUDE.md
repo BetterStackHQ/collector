@@ -68,6 +68,7 @@ rake test TESTOPTS="-v"
 - Vector (main data pipeline)
 - Ruby proxy (serves configuration endpoints)
 - Ruby updater (checks for configuration updates)
+- Certbot (TLS certificate management)
 
 **Beyla Container** - Supervisor manages:
 - Beyla (eBPF application traces)
@@ -146,6 +147,47 @@ The container always exposes:
 - Manual renewal test: `docker exec <container> certbot renew --dry-run`
 - Force certbot restart: `docker exec <container> supervisorctl restart certbot`
 
+### Vector Crash Recovery Mechanisms
+
+The collector includes multiple layers of protection against Vector configuration loss:
+
+#### 1. Configuration Validation at Startup (`vector.sh`)
+- Validates `/vector-config/current/` directory exists before starting Vector
+- Checks for actual YAML config files (not just directory presence)
+- Attempts to restore from `/vector-config/latest-valid-upstream/` if current is missing
+- Exits with code 127 (critical failure) if no configs found, triggering supervisor retry
+
+#### 2. Atomic Configuration Updates (`engine/vector_config.rb`)
+- Uses symlinks for `/vector-config/current` instead of moving directories
+- Creates temp symlink first, then atomically renames to 'current'
+- Backs up previous config to 'previous' link before switching
+- Restores backup if promotion fails, preventing partial states
+
+#### 3. Supervisor Restart Policy (`supervisord.conf`)
+- `startretries=3`: Attempts 3 restarts before giving up
+- `startsecs=10`: Vector must stay up 10 seconds to be considered started
+- `stopwaitsecs=30`: Gives Vector 30 seconds for graceful shutdown
+- `exitcodes=0,1,2`: Only retries for normal errors, not persistent failures
+- Exit codes 3+ trigger FATAL state → container restart via fatal_handler
+
+#### 4. Health Monitoring (`healthcheck.sh`)
+- **Docker Compose/Swarm**: Health check runs every 30s, container restarts after 3 consecutive failures
+- **Kubernetes**: Liveness probe runs every 30s, pod restarts after 3 consecutive failures
+- Checks Vector's `/health` endpoint and GraphQL API sink configuration
+- Detects unhealthy states:
+  - Vector not responding
+  - No sinks configured
+  - Console-only sink (indicates lost configuration)
+  - Missing Better Stack HTTP sinks (warning only)
+- Returns exit code 0 (healthy) or 1 (unhealthy)
+
+### Known Issues and Solutions
+
+**Problem**: Vector loses configuration after SIGHUP reload in Kubernetes
+- **Cause**: Vector loses filesystem access to `/vector-config/current/` directory
+- **Symptoms**: Vector running with console-only sink, buffer directory missing
+- **Recovery**: Health check detects and restarts Vector, or pod restarts after retries exhausted
+
 ### Development Tips
 
 - Use `should_run_cluster_collector.rb` exit codes: 0=yes, 1=no, 2=error
@@ -153,3 +195,4 @@ The container always exposes:
 - Disable `fatal_handler` in supervisord.conf for debugging startup issues
 - Vector validation: `vector validate -c /path/to/vector.yaml`
 - Vector config location: `/vector-config/current/vector.yaml` (not `/vector.yaml`)
+- Monitor Vector sinks: `curl -s http://localhost:8686/graphql -H "Content-Type: application/json" -d '{"query":"{ sinks { edges { node { componentId } } } }"}'`

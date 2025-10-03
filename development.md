@@ -38,6 +38,18 @@ Tail collector logs:
 - **Docker image failing to start because one of the processes crashes?**
   Disable the `fatal_handler` in supervisor.conf, start the collector again, log into the container and look into /var/log/supervisor/\* logs.
 
+- **Vector loses configuration and shows only console sink?**
+  This indicates Vector lost access to `/vector-config/current/`. The collector includes several recovery mechanisms:
+  - Health check (`healthcheck.sh`) runs every 30s via Docker/Kubernetes health probes
+  - Container/pod restarts after 3 consecutive health check failures
+  - Supervisor will retry Vector 3 times before triggering container restart via fatal_handler (in case Vector reports exit code 3+ on restart)
+  - Check Vector sinks: `docker exec -it better-stack-collector curl -s http://localhost:8686/graphql -H "Content-Type: application/json" -d '{"query":"{ sinks { edges { node { componentId } } } }"}'`
+
+- **Debugging configuration updates:**
+  - Check updater logs: `docker exec -it better-stack-collector tail -f /var/log/supervisor/updater.out.log`
+  - Verify current config: `docker exec -it better-stack-collector ls -la /vector-config/current/`
+  - Check symlink target: `docker exec -it better-stack-collector readlink /vector-config/current`
+
 ## Environment Variables
 
 - `COLLECTOR_SECRET` (required): Your Better Stack collector secret

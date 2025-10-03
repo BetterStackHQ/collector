@@ -183,17 +183,49 @@ class VectorConfig
   def promote_dir(config_dir)
     puts "Promoting #{config_dir} to /vector-config/current..."
 
-    current_dir = File.join(@vector_config_dir, "current")
+    current_link = File.join(@vector_config_dir, "current")
+    backup_link = File.join(@vector_config_dir, "previous")
+    temp_link = File.join(@vector_config_dir, "current.tmp.#{Time.now.utc.to_f}")
 
-    # Remove old current if it exists
-    if File.exist?(current_dir)
-      FileUtils.rm_rf(current_dir)
+    begin
+      # Create new symlink pointing to config_dir
+      File.symlink(config_dir, temp_link)
+
+      # Backup current link if it exists (might fail if current doesn't exist, that's ok)
+      if File.exist?(current_link)
+        begin
+          File.rename(current_link, backup_link)
+        rescue => e
+          puts "Warning: Could not backup current link: #{e.message}"
+        end
+      end
+
+      # Atomically replace current with new link
+      File.rename(temp_link, current_link)
+
+      puts "Atomically promoted #{config_dir} to current"
+
+      # Clean up old directories after successful promotion
+      cleanup_old_directories
+
+      true
+    rescue => e
+      # Cleanup temp link if it exists
+      FileUtils.rm_f(temp_link)
+
+      # Try to restore backup if promotion failed and current is missing
+      if !File.exist?(current_link) && File.exist?(backup_link)
+        begin
+          File.rename(backup_link, current_link)
+          puts "Restored previous config due to promotion error"
+        rescue => restore_error
+          puts "Failed to restore backup: #{restore_error.message}"
+        end
+      end
+
+      puts "Error promoting config: #{e.message}"
+      raise
     end
-
-    # Move new config to current
-    FileUtils.mv(config_dir, current_dir)
-
-    true
   end
 
   def reload_vector
@@ -201,5 +233,41 @@ class VectorConfig
     system("supervisorctl signal HUP vector")
 
     puts "Successfully promoted to current"
+  end
+
+  # Clean up old vector-config directories, keeping only the most recent ones
+  def cleanup_old_directories(keep_count = 5)
+    # Get all new_* directories
+    new_dirs = Dir.glob(File.join(@vector_config_dir, "new_*")).select { |f| File.directory?(f) }
+
+    # Sort by timestamp in directory name (newest last)
+    new_dirs.sort!
+
+    # Resolve symlinks to find directories that are currently in use
+    current_link = File.join(@vector_config_dir, "current")
+    previous_link = File.join(@vector_config_dir, "previous")
+
+    in_use = []
+    [current_link, previous_link].each do |link|
+      if File.symlink?(link)
+        target = File.readlink(link)
+        # Convert relative path to absolute if needed
+        target = File.absolute_path(target, @vector_config_dir) unless target.start_with?('/')
+        in_use << target
+      end
+    end
+
+    # Filter out directories that are currently in use
+    deletable = new_dirs.reject { |dir| in_use.include?(dir) }
+
+    # Keep only the most recent directories
+    if deletable.length > keep_count
+      to_delete = deletable[0...(deletable.length - keep_count)]
+      to_delete.each do |dir|
+        puts "Cleaning up old vector-config directory: #{File.basename(dir)}"
+        FileUtils.rm_rf(dir)
+      end
+      puts "Cleaned up #{to_delete.length} old vector-config directories"
+    end
   end
 end

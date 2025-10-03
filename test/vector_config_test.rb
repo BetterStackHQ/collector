@@ -179,24 +179,120 @@ class VectorConfigTest < Minitest::Test
     FileUtils.mkdir_p(config_dir)
 
     # Create old current directory with a marker file
-    current_path = File.join(@vector_config_dir, 'current')
-    FileUtils.mkdir_p(current_path)
-    File.write(File.join(current_path, 'old_marker.txt'), 'old content')
+    old_current_dir = File.join(@vector_config_dir, 'old_current')
+    FileUtils.mkdir_p(old_current_dir)
+    File.write(File.join(old_current_dir, 'old_marker.txt'), 'old content')
+
+    # Create current as symlink to old directory
+    current_link = File.join(@vector_config_dir, 'current')
+    File.symlink(old_current_dir, current_link)
 
     # Create a marker in new config
     File.write(File.join(config_dir, 'new_marker.txt'), 'new content')
 
-    # Mock system call for supervisorctl
-    @vector_config.stub :system, true do
-      @vector_config.promote_dir(config_dir)
+    # Mock cleanup_old_directories to avoid side effects in test
+    @vector_config.stub :cleanup_old_directories, nil do
+      @vector_config.stub :system, true do
+        @vector_config.promote_dir(config_dir)
 
-      # Test actual outcomes - directory movement
-      assert File.directory?(current_path), "Current directory should exist"
-      assert !File.exist?(config_dir), "Original config directory should be moved"
+        # Test actual outcomes - symlink behavior
+        assert File.symlink?(current_link), "Current should be a symlink"
+        assert File.exist?(config_dir), "Original config directory should still exist"
 
-      # Check that old content was replaced with new content
-      assert !File.exist?(File.join(current_path, 'old_marker.txt')), "Old marker should be gone"
-      assert File.exist?(File.join(current_path, 'new_marker.txt')), "New marker should be present"
+        # Check that current symlink points to new config directory
+        assert_equal config_dir, File.readlink(current_link)
+
+        # Check that content is accessible through the symlink
+        assert !File.exist?(File.join(current_link, 'old_marker.txt')), "Old marker should not be accessible through current"
+        assert File.exist?(File.join(current_link, 'new_marker.txt')), "New marker should be accessible through current"
+      end
     end
+  end
+
+  def test_cleanup_old_directories
+    # Create 10 old directories
+    old_dirs = []
+    10.times do |i|
+      timestamp = Time.now.utc.strftime('%Y-%m-%dT%H:%M:%S.%6NZ')
+      dir_name = File.join(@vector_config_dir, "new_2023-01-0#{i}T00:00:00.#{sprintf('%06d', i)}Z")
+      FileUtils.mkdir_p(dir_name)
+      File.write(File.join(dir_name, 'test.txt'), "content #{i}")
+      old_dirs << dir_name
+      sleep 0.001 # Ensure unique timestamps
+    end
+
+    # Create current and previous symlinks pointing to some directories
+    current_dir = old_dirs[8]
+    previous_dir = old_dirs[7]
+
+    current_link = File.join(@vector_config_dir, 'current')
+    previous_link = File.join(@vector_config_dir, 'previous')
+
+    File.symlink(current_dir, current_link)
+    File.symlink(previous_dir, previous_link)
+
+    # Run cleanup with keep_count=3
+    @vector_config.cleanup_old_directories(3)
+
+    # Check results
+    # Directories 0-4 should be deleted (5 oldest not in use)
+    (0..4).each do |i|
+      assert !File.exist?(old_dirs[i]), "Old directory #{i} should be deleted"
+    end
+
+    # Directories 5-6 should exist (kept as part of keep_count=3)
+    (5..6).each do |i|
+      assert File.exist?(old_dirs[i]), "Directory #{i} should be kept"
+    end
+
+    # Directories 7-8 should exist (in use as previous/current)
+    assert File.exist?(old_dirs[7]), "Directory 7 should exist (previous)"
+    assert File.exist?(old_dirs[8]), "Directory 8 should exist (current)"
+
+    # Directory 9 should exist (most recent, part of keep_count)
+    assert File.exist?(old_dirs[9]), "Directory 9 should be kept (most recent)"
+  end
+
+  def test_cleanup_old_directories_with_relative_symlinks
+    # Create directories
+    dir1 = File.join(@vector_config_dir, 'new_2023-01-01T00:00:00.000001Z')
+    dir2 = File.join(@vector_config_dir, 'new_2023-01-02T00:00:00.000002Z')
+
+    FileUtils.mkdir_p(dir1)
+    FileUtils.mkdir_p(dir2)
+
+    # Create current as relative symlink
+    current_link = File.join(@vector_config_dir, 'current')
+    Dir.chdir(@vector_config_dir) do
+      File.symlink('new_2023-01-02T00:00:00.000002Z', 'current')
+    end
+
+    # Run cleanup with keep_count=0 (should still keep dir2 as it's in use)
+    @vector_config.cleanup_old_directories(0)
+
+    # dir2 should still exist as it's referenced by current
+    assert File.exist?(dir2), "Directory referenced by current should not be deleted"
+
+    # dir1 should be deleted
+    assert !File.exist?(dir1), "Unreferenced directory should be deleted"
+  end
+
+  def test_cleanup_old_directories_ignores_non_new_directories
+    # Create various directories
+    new_dir = File.join(@vector_config_dir, 'new_2023-01-01T00:00:00.000001Z')
+    other_dir = File.join(@vector_config_dir, 'latest-valid-upstream')
+    random_dir = File.join(@vector_config_dir, 'some-other-dir')
+
+    FileUtils.mkdir_p(new_dir)
+    FileUtils.mkdir_p(other_dir)
+    FileUtils.mkdir_p(random_dir)
+
+    # Run cleanup
+    @vector_config.cleanup_old_directories(0)
+
+    # Only new_* directory should be deleted
+    assert !File.exist?(new_dir), "Old new_* directory should be deleted"
+    assert File.exist?(other_dir), "Non-new directory should not be deleted"
+    assert File.exist?(random_dir), "Non-new directory should not be deleted"
   end
 end

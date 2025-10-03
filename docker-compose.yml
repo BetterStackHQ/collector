@@ -6,6 +6,12 @@ services:
     image: betterstack/collector:latest
     container_name: better-stack-collector
     restart: always
+    healthcheck:
+      test: ["CMD", "/healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
     environment:
       - COLLECTOR_SECRET
       - BASE_URL
