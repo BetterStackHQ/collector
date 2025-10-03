@@ -16,6 +16,12 @@ services:
       nofile:
         soft: 65536
         hard: 65536
+    healthcheck:
+      test: ["/healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
     environment:
       - COLLECTOR_SECRET
       - BASE_URL
