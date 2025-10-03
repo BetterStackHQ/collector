@@ -68,6 +68,7 @@ rake test TESTOPTS="-v"
 - Vector (main data pipeline)
 - Ruby proxy (serves configuration endpoints)
 - Ruby updater (checks for configuration updates)
+- Certbot (TLS certificate management)
 
 **Beyla Container** - Supervisor manages:
 - Beyla (eBPF application traces)
@@ -163,27 +164,22 @@ The collector includes multiple layers of protection against Vector configuratio
 - Restores backup if promotion fails, preventing partial states
 
 #### 3. Supervisor Restart Policy (`supervisord.conf`)
-- `startretries=10`: Attempts 10 restarts before giving up (was 3)
+- `startretries=3`: Attempts 3 restarts before giving up
 - `startsecs=10`: Vector must stay up 10 seconds to be considered started
 - `stopwaitsecs=30`: Gives Vector 30 seconds for graceful shutdown
 - `exitcodes=0,1,2`: Only retries for normal errors, not persistent failures
-- Exit codes 3+ trigger FATAL state → container restart via Kubernetes
+- Exit codes 3+ trigger FATAL state → container restart via fatal_handler
 
 #### 4. Health Monitoring (`healthcheck.sh`)
-- Runs every 60 seconds checking Vector's sink configuration
-- Detects console-only sink (indicates lost configuration)
-- Force restarts Vector if only console sink or no sinks configured
-- Provides early detection of configuration loss scenarios
-
-#### 5. System Resource Limits
-- **Kubernetes**: Init container sets higher inotify/file descriptor limits
-- **Docker Compose**: sysctls configured in compose file
-- Prevents "too many open files" errors during config reloads
-- Settings:
-  - `fs.inotify.max_user_watches=524288` (default: 8192)
-  - `fs.inotify.max_user_instances=8192` (default: 128)
-  - `fs.file-max=2097152`
-  - `ulimit nofile=65536`
+- **Docker Compose/Swarm**: Health check runs every 30s, container restarts after 3 consecutive failures
+- **Kubernetes**: Liveness probe runs every 30s, pod restarts after 3 consecutive failures
+- Checks Vector's `/health` endpoint and GraphQL API sink configuration
+- Detects unhealthy states:
+  - Vector not responding
+  - No sinks configured
+  - Console-only sink (indicates lost configuration)
+  - Missing Better Stack HTTP sinks (warning only)
+- Returns exit code 0 (healthy) or 1 (unhealthy)
 
 ### Known Issues and Solutions
 
