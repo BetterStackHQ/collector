@@ -54,6 +54,7 @@ fi
 
 # Use SSH_CMD from environment or default to ssh
 SSH_CMD="${SSH_CMD:-ssh}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
 
 print_blue "Connecting to swarm manager: $MANAGER_NODE"
 [[ "$ACTION" != "install" ]] && print_blue "Action: $ACTION"
@@ -126,7 +127,7 @@ for NODE in $NODES; do
                 set -e
                 echo "Running: Better Stack collector install..."
                 curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/install.sh | \\
-                  COLLECTOR_SECRET="$COLLECTOR_SECRET" bash
+                  COLLECTOR_SECRET="$COLLECTOR_SECRET" IMAGE_TAG="$IMAGE_TAG" bash
 
                 echo "Checking deployment status..."
                 docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"
@@ -165,7 +166,7 @@ EOF
                 sleep 3
                 echo "Installing Better Stack collector..."
                 curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/install.sh | \\
-                  COLLECTOR_SECRET="$COLLECTOR_SECRET" bash
+                  COLLECTOR_SECRET="$COLLECTOR_SECRET" IMAGE_TAG="$IMAGE_TAG" bash
 
                 echo "Checking deployment status..."
                 docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"

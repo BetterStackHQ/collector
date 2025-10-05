@@ -153,7 +153,23 @@ adjust_compose_ports() {
   mv "$tmpfile" "$file"
 }
 
+adjust_image_tag() {
+  local file="$1"
+  local tag="$2"
+  local tmpfile
+  tmpfile="$(mktemp)"
+
+  sed "s/:latest/:${tag}/g" "$file" > "$tmpfile"
+  mv "$tmpfile" "$file"
+}
+
 adjust_compose_ports docker-compose.yml
+
+# Replace :latest tag if IMAGE_TAG is set
+if [ -n "$IMAGE_TAG" ]; then
+    echo "Replacing :latest with :$IMAGE_TAG in compose file"
+    adjust_image_tag docker-compose.yml "$IMAGE_TAG"
+fi
 
 # Pull images first
 COLLECTOR_SECRET="$COLLECTOR_SECRET" \
