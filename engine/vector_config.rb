@@ -5,6 +5,9 @@ require_relative 'kubernetes_discovery'
 
 class VectorConfig
   include Utils
+
+  VECTOR_CONFIG_FILES = ['vector.yaml', 'manual.vector.yaml', 'process_discovery.vector.yaml'].freeze
+
   MINIMAL_KUBERNETES_DISCOVERY_CONFIG = <<~YAML
     ---
     sources:
@@ -28,26 +31,18 @@ class VectorConfig
   # Validate upstream vector.yaml file using minimal kubernetes discovery config
   # Validate upstream config files (vector.yaml, manual.vector.yaml, and/or process_discovery.vector.yaml)
   def validate_upstream_files(version_dir)
-    vector_yaml_path = File.join(version_dir, "vector.yaml")
-    manual_vector_yaml_path = File.join(version_dir, "manual.vector.yaml")
-    process_discovery_yaml_path = File.join(version_dir, "process_discovery.vector.yaml")
-
-    # At least one config file must exist
-    if !File.exist?(vector_yaml_path) && !File.exist?(manual_vector_yaml_path) && !File.exist?(process_discovery_yaml_path)
-      return "No vector.yaml, manual.vector.yaml, or process_discovery.vector.yaml found in #{version_dir}"
+    # Check if at least one config file exists
+    config_paths = VECTOR_CONFIG_FILES.map { |filename| File.join(version_dir, filename) }
+    if config_paths.none? { |path| File.exist?(path) }
+      return "None of: #{VECTOR_CONFIG_FILES.join(', ')} found in #{version_dir}"
     end
 
     # Check for command: directives in all files (security check)
-    if File.exist?(vector_yaml_path) && File.read(vector_yaml_path).include?('command:')
-      return 'vector.yaml must not contain command: directives'
-    end
-
-    if File.exist?(manual_vector_yaml_path) && File.read(manual_vector_yaml_path).include?('command:')
-      return 'manual.vector.yaml must not contain command: directives'
-    end
-
-    if File.exist?(process_discovery_yaml_path) && File.read(process_discovery_yaml_path).include?('command:')
-      return 'process_discovery.vector.yaml must not contain command: directives'
+    VECTOR_CONFIG_FILES.each do |filename|
+      file_path = File.join(version_dir, filename)
+      if File.exist?(file_path) && File.read(file_path).include?('command:')
+        return "#{filename} must not contain command: directives"
+      end
     end
 
     timestamp = Time.now.utc.strftime('%Y-%m-%dT%H:%M:%S')
@@ -58,28 +53,22 @@ class VectorConfig
 
     begin
       # Copy existing config files
-      if File.exist?(vector_yaml_path)
-        FileUtils.cp(vector_yaml_path, "#{tmp_dir}/vector.yaml")
-        puts "Copied vector.yaml (#{File.size(vector_yaml_path)} bytes)"
-      end
-
-      if File.exist?(manual_vector_yaml_path)
-        FileUtils.cp(manual_vector_yaml_path, "#{tmp_dir}/manual.vector.yaml")
-        puts "Copied manual.vector.yaml (#{File.size(manual_vector_yaml_path)} bytes)"
-      end
-
-      if File.exist?(process_discovery_yaml_path)
-        FileUtils.cp(process_discovery_yaml_path, "#{tmp_dir}/process_discovery.vector.yaml")
-        puts "Copied process_discovery.vector.yaml (#{File.size(process_discovery_yaml_path)} bytes)"
+      VECTOR_CONFIG_FILES.each do |filename|
+        source_path = File.join(version_dir, filename)
+        if File.exist?(source_path)
+          FileUtils.cp(source_path, "#{tmp_dir}/#{filename}")
+          puts "Copied #{filename} (#{File.size(source_path)} bytes)"
+        end
       end
       FileUtils.mkdir_p("#{tmp_dir}/kubernetes-discovery")
       File.write("#{tmp_dir}/kubernetes-discovery/minimal.yaml", MINIMAL_KUBERNETES_DISCOVERY_CONFIG)
 
       # Build validation command with available files
       validate_files = []
-      validate_files << "#{tmp_dir}/vector.yaml" if File.exist?("#{tmp_dir}/vector.yaml")
-      validate_files << "#{tmp_dir}/manual.vector.yaml" if File.exist?("#{tmp_dir}/manual.vector.yaml")
-      validate_files << "#{tmp_dir}/process_discovery.vector.yaml" if File.exist?("#{tmp_dir}/process_discovery.vector.yaml")
+      VECTOR_CONFIG_FILES.each do |filename|
+        file_path = "#{tmp_dir}/#{filename}"
+        validate_files << file_path if File.exist?(file_path)
+      end
       validate_files << "#{tmp_dir}/kubernetes-discovery/*.yaml"
 
       validate_cmd = "REGION=unknown AZ=unknown vector validate #{validate_files.join(' ')} 2>&1"
@@ -103,22 +92,14 @@ class VectorConfig
     # Copy files to temporary directory first
     FileUtils.mkdir_p(temp_upstream_dir)
 
-    # Copy vector.yaml if it exists
-    vector_yaml_path = File.join(version_dir, "vector.yaml")
-    if File.exist?(vector_yaml_path)
-      FileUtils.cp(vector_yaml_path, File.join(temp_upstream_dir, "vector.yaml"))
-    end
-
-    # Copy manual.vector.yaml if it exists
-    manual_vector_yaml_path = File.join(version_dir, "manual.vector.yaml")
-    if File.exist?(manual_vector_yaml_path)
-      FileUtils.cp(manual_vector_yaml_path, File.join(temp_upstream_dir, "manual.vector.yaml"))
-    end
-
-    # Copy process_discovery.vector.yaml if it exists
-    process_discovery_yaml_path = File.join(version_dir, "process_discovery.vector.yaml")
-    if File.exist?(process_discovery_yaml_path)
-      FileUtils.cp(process_discovery_yaml_path, File.join(temp_upstream_dir, "process_discovery.vector.yaml"))
+    # Copy config files if they exist
+    promoted_files = []
+    VECTOR_CONFIG_FILES.each do |filename|
+      source_path = File.join(version_dir, filename)
+      if File.exist?(source_path)
+        FileUtils.cp(source_path, File.join(temp_upstream_dir, filename))
+        promoted_files << filename
+      end
     end
 
     # Replace the old directory with the new one (not atomic but good enough)
@@ -126,10 +107,6 @@ class VectorConfig
     FileUtils.mv(temp_upstream_dir, latest_valid_upstream_dir)
 
     # Report what was promoted
-    promoted_files = []
-    promoted_files << "vector.yaml" if File.exist?(vector_yaml_path)
-    promoted_files << "manual.vector.yaml" if File.exist?(manual_vector_yaml_path)
-    promoted_files << "process_discovery.vector.yaml" if File.exist?(process_discovery_yaml_path)
     puts "Promoted #{promoted_files.join(', ')} to latest-valid-upstream"
   end
 
@@ -185,9 +162,10 @@ class VectorConfig
 
     # Build list of files to validate
     validate_files = []
-    validate_files << "#{config_dir}/vector.yaml" if File.exist?("#{config_dir}/vector.yaml")
-    validate_files << "#{config_dir}/manual.vector.yaml" if File.exist?("#{config_dir}/manual.vector.yaml")
-    validate_files << "#{config_dir}/process_discovery.vector.yaml" if File.exist?("#{config_dir}/process_discovery.vector.yaml")
+    VECTOR_CONFIG_FILES.each do |filename|
+      file_path = "#{config_dir}/#{filename}"
+      validate_files << file_path if File.exist?(file_path)
+    end
     validate_files << "#{config_dir}/kubernetes-discovery/*.yaml"
 
     validate_cmd = "REGION=unknown AZ=unknown vector validate #{validate_files.join(' ')} 2>&1"
