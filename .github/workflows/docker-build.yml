@@ -104,6 +104,10 @@ jobs:
             # Tagged versions go to public repo
             echo "repository=betterstack/collector-beyla" >> $GITHUB_OUTPUT
             echo "push=true" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF}" == refs/heads/main ]]; then
+            # Main branch goes to public repo as `canary` version
+            echo "repository=betterstack/collector-beyla" >> $GITHUB_OUTPUT
+            echo "push=true" >> $GITHUB_OUTPUT
           else
             # Everything else goes to private repo
             echo "repository=betterstack/collector-beyla-private" >> $GITHUB_OUTPUT
@@ -119,8 +123,8 @@ jobs:
             # For version tags, tag as version and latest (public repo)
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            # For main branch, tag as main-sha (private repo)
-            type=raw,value=main-sha-{{sha}},enable=${{ github.ref == 'refs/heads/main' }}
+            # For main branch, tag as canary (public repo)
+            type=raw,value=canary,enable=${{ github.ref == 'refs/heads/main' }}
             # For pull requests, tag as pr-number-sha (private repo)
             type=raw,value=pr-${{ github.event.pull_request.number }}-sha-{{sha}},enable=${{ github.event_name == 'pull_request' }}
 
