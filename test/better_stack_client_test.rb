@@ -1119,4 +1119,47 @@ class BetterStackClientTest < Minitest::Test
       remove_method :download_file
     end
   end
+
+  def test_download_file_includes_hostname_parameter
+    new_version = "2023-01-01T00:00:00"
+
+    # Mock hostname method
+    original_hostname = @client.method(:hostname)
+    @client.define_singleton_method(:hostname) { "test-host-123" }
+
+    # Mock vector_config methods
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:validate_upstream_files) do |dir|
+      nil # validation passes
+    end
+    @client.instance_variable_get(:@vector_config).define_singleton_method(:promote_upstream_files) do |dir|
+      # no-op
+    end
+
+    # Stub the actual HTTP requests with WebMock to track URLs
+    stub1 = stub_request(:get, "https://test.betterstack.com/collector/file/vector.yaml")
+      .with(query: hash_including("file" => "vector.yaml", "host" => "test-host-123"))
+      .to_return(status: 200, body: "vector content")
+
+    stub2 = stub_request(:get, "https://test.betterstack.com/collector/file/databases.json")
+      .with(query: hash_including("file" => "databases.json", "other" => "param", "host" => "test-host-123"))
+      .to_return(status: 200, body: "databases content")
+
+    # Sample response with multiple files
+    code = "200"
+    body = {
+      files: [
+        { path: "/collector/file/vector.yaml?file=vector.yaml", name: "vector.yaml" },
+        { path: "/collector/file/databases.json?file=databases.json&other=param", name: "databases.json" }
+      ]
+    }.to_json
+
+    @client.process_configuration(new_version, code, body)
+
+    # Verify that both requests were made with the hostname parameter
+    assert_requested(stub1, times: 1)
+    assert_requested(stub2, times: 1)
+
+    # Restore original method
+    @client.define_singleton_method(:hostname, original_hostname)
+  end
 end

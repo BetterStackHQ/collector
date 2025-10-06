@@ -66,8 +66,9 @@ class UtilsEdgeCasesTest < Minitest::Test
     url = 'https://example.com/file.txt'
     path = File.join(@working_dir, 'downloaded_file.txt')
 
-    # Mock redirect loop
+    # Mock redirect loop - include hostname parameter
     stub_request(:get, url)
+      .with(query: hash_including("host"))
       .to_return(status: 302, headers: { 'Location' => url })
 
     result = download_file(url, path)
@@ -81,8 +82,9 @@ class UtilsEdgeCasesTest < Minitest::Test
     url = 'https://example.com/huge.txt'
     path = File.join(@working_dir, 'huge.txt')
 
-    # Mock response with huge content-length
+    # Mock response with huge content-length - include hostname parameter
     stub_request(:get, url)
+      .with(query: hash_including("host"))
       .to_return(
         status: 200,
         headers: { 'Content-Length' => '10737418240' }, # 10GB
@@ -143,6 +145,7 @@ class UtilsEdgeCasesTest < Minitest::Test
     binary_content = (0..255).map(&:chr).join
 
     stub_request(:get, url)
+      .with(query: hash_including("host"))
       .to_return(status: 200, body: binary_content)
 
     result = download_file(url, path)

@@ -31,6 +31,7 @@ class BetterStackClientPingTest < Minitest::Test
       .to_return(status: 200, body: { files: [{ path: '/file', name: 'vector.yaml' }] }.to_json)
 
     stub_request(:get, "https://telemetry.betterstack.com/file")
+      .with(query: hash_including("host"))
       .to_return(status: 200, body: "sources:\n  kubernetes_discovery_test:\n    type: prometheus_scrape")
 
     # Mock kubernetes discovery to return true (changed)
@@ -89,6 +90,7 @@ class BetterStackClientPingTest < Minitest::Test
       .to_return(status: 200, body: { files: [{ path: '/file', name: 'vector.yaml' }] }.to_json)
 
     stub_request(:get, "https://telemetry.betterstack.com/file")
+      .with(query: hash_including("host"))
       .to_return(status: 200, body: "sources:\n  test:\n    type: file")
 
     # Mock kubernetes discovery to return false (no change)
@@ -147,6 +149,7 @@ class BetterStackClientPingTest < Minitest::Test
       .to_return(status: 200, body: { files: [{ path: '/file', name: 'vector.yaml' }] }.to_json)
 
     stub_request(:get, "https://telemetry.betterstack.com/file")
+      .with(query: hash_including("host"))
       .to_return(status: 200, body: "sources:\n  kubernetes_discovery_test:\n    type: prometheus_scrape")
 
     # Mock kubernetes discovery

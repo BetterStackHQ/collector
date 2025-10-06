@@ -173,6 +173,6 @@ class VectorConfigEdgeCasesTest < Minitest::Test
 
     # Should fail validation when no vector configs are present
     result = @vector_config.validate_upstream_files(upstream_dir)
-    assert_match(/No vector.yaml or manual.vector.yaml found/, result, "Should fail validation with no vector configs")
+    assert_match(/No vector.yaml, manual.vector.yaml, or process_discovery.vector.yaml found/, result, "Should fail validation with no vector configs")
   end
 end

@@ -34,6 +34,15 @@ class VectorConfigTest < Minitest::Test
     assert_equal 'vector.yaml must not contain command: directives', result
   end
 
+  def test_validate_upstream_files_rejects_command_directive_in_process_discovery_yaml
+    version_dir = File.join(@test_dir, 'versions', '2025-01-01T00:00:00')
+    FileUtils.mkdir_p(version_dir)
+    File.write(File.join(version_dir, 'process_discovery.vector.yaml'), "sources:\n  test:\n    type: exec\n    command: ['echo', 'test']")
+
+    result = @vector_config.validate_upstream_files(version_dir)
+    assert_equal 'process_discovery.vector.yaml must not contain command: directives', result
+  end
+
   def test_validate_upstream_files_returns_nil_on_success
     version_dir = File.join(@test_dir, 'versions', '2025-01-01T00:00:00')
     FileUtils.mkdir_p(version_dir)
@@ -49,6 +58,24 @@ class VectorConfigTest < Minitest::Test
 
     result = @vector_config.validate_upstream_files(version_dir)
     assert_nil result
+  end
+
+  def test_validate_upstream_files_accepts_process_discovery_only
+    version_dir = File.join(@test_dir, 'versions', '2025-01-01T00:00:00')
+    FileUtils.mkdir_p(version_dir)
+    # Only create process_discovery.vector.yaml, no vector.yaml or manual.vector.yaml
+    File.write(File.join(version_dir, 'process_discovery.vector.yaml'), "sources:\n  test:\n    type: file\n    include: ['/test']")
+
+    # Mock successful vector validation
+    original_backtick = @vector_config.method(:`)
+    @vector_config.define_singleton_method(:`) do |cmd|
+      # Run a command that succeeds to set $?.success? to true
+      original_backtick.call('true')
+      "Configuration validated successfully"
+    end
+
+    result = @vector_config.validate_upstream_files(version_dir)
+    assert_nil result, "Should accept process_discovery.vector.yaml alone"
   end
 
   def test_validate_upstream_files_returns_error_on_validation_failure
@@ -83,6 +110,26 @@ class VectorConfigTest < Minitest::Test
     assert File.exist?(File.join(upstream_dir, 'manual.vector.yaml'))
     assert_equal "sources:\n  test:\n    type: file", File.read(File.join(upstream_dir, 'vector.yaml'))
     assert_equal "sources:\n  manual:\n    type: file", File.read(File.join(upstream_dir, 'manual.vector.yaml'))
+  end
+
+  def test_promote_upstream_files_with_process_discovery
+    # Create a version directory with all three config files
+    version_dir = File.join(@test_dir, 'versions', '2025-01-01T00:00:00')
+    FileUtils.mkdir_p(version_dir)
+    File.write(File.join(version_dir, 'vector.yaml'), "sources:\n  test:\n    type: file")
+    File.write(File.join(version_dir, 'manual.vector.yaml'), "sources:\n  manual:\n    type: file")
+    File.write(File.join(version_dir, 'process_discovery.vector.yaml'), "sources:\n  process:\n    type: file")
+
+    @vector_config.promote_upstream_files(version_dir)
+
+    # Test the actual outcome - all files copied to latest-valid-upstream
+    upstream_dir = File.join(@test_dir, 'vector-config', 'latest-valid-upstream')
+    assert File.exist?(File.join(upstream_dir, 'vector.yaml'))
+    assert File.exist?(File.join(upstream_dir, 'manual.vector.yaml'))
+    assert File.exist?(File.join(upstream_dir, 'process_discovery.vector.yaml'))
+    assert_equal "sources:\n  test:\n    type: file", File.read(File.join(upstream_dir, 'vector.yaml'))
+    assert_equal "sources:\n  manual:\n    type: file", File.read(File.join(upstream_dir, 'manual.vector.yaml'))
+    assert_equal "sources:\n  process:\n    type: file", File.read(File.join(upstream_dir, 'process_discovery.vector.yaml'))
   end
 
   def test_prepare_dir_returns_nil_when_no_latest_valid_upstream
