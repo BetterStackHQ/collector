@@ -63,6 +63,12 @@ module Utils
 
   def download_file(url, path)
     uri = URI(url)
+
+    # Add hostname query parameter
+    params = URI.decode_www_form(uri.query || '')
+    params << ['host', hostname]
+    uri.query = URI.encode_www_form(params)
+
     Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
       request = Net::HTTP::Get.new(uri)
       response = http.request(request)

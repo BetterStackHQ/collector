@@ -114,7 +114,9 @@ class UtilsTest < Minitest::Test
     path = File.join(@working_dir, 'downloaded_file.txt')
     content = 'file content'
 
-    stub_request(:get, url).to_return(body: content, status: 200)
+    stub_request(:get, url)
+      .with(query: hash_including("host"))
+      .to_return(body: content, status: 200)
 
     assert download_file(url, path)
     assert File.exist?(path)
@@ -126,7 +128,9 @@ class UtilsTest < Minitest::Test
     url = 'https://example.com/file.txt'
     path = File.join(@working_dir, 'downloaded_file.txt')
 
-    stub_request(:get, url).to_return(status: 404)
+    stub_request(:get, url)
+      .with(query: hash_including("host"))
+      .to_return(status: 404)
 
     refute download_file(url, path)
     refute File.exist?(path)
@@ -137,7 +141,9 @@ class UtilsTest < Minitest::Test
     url = 'https://example.com/file.txt'
     path = File.join(@working_dir, 'downloaded_file.txt')
 
-    stub_request(:get, url).to_raise(SocketError.new("getaddrinfo: nodename nor servname provided, or not known"))
+    stub_request(:get, url)
+      .with(query: hash_including("host"))
+      .to_raise(SocketError.new("getaddrinfo: nodename nor servname provided, or not known"))
 
     refute download_file(url, path)
     refute File.exist?(path)
