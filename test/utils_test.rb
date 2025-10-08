@@ -175,6 +175,16 @@ class UtilsTest < Minitest::Test
     assert_equal '{}', latest_database_json
   end
 
+  def test_latest_kubernetes_discovery_returns_latest_full_path
+    discovery_dir = File.join(@working_dir, 'kubernetes-discovery')
+    %w[2024-01-01T00:00:00 2024-03-01T00:00:00 2024-02-15T12:30:00].each do |version|
+      FileUtils.mkdir_p(File.join(discovery_dir, version))
+    end
+
+    expected_path = File.join(discovery_dir, '2024-03-01T00:00:00')
+    assert_equal expected_path, latest_kubernetes_discovery
+  end
+
   def test_hostname
     # Pretend hostname is not available to test other fallback mechanisms
     original_hostname = ENV['HOSTNAME']
@@ -230,5 +240,4 @@ class UtilsTest < Minitest::Test
     # Restore original env var
     ENV['HOSTNAME'] = original_hostname
   end
-
 end
