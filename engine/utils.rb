@@ -100,7 +100,7 @@ module Utils
 
   # Always points to latest valid kubernetes discovery configs
   def latest_kubernetes_discovery
-    versions = Dir.glob("#{@working_dir}/kubernetes-discovery/*").select { |f| File.directory?(f) }
+    versions = Dir.glob(File.join(@working_dir, "kubernetes-discovery", "*").to_s).select { |f| File.directory?(f) }
     versions.sort.last
   end
 end
