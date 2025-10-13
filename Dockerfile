@@ -1,6 +1,9 @@
 # Use Vector as the base image
 FROM timberio/vector:0.47.0-debian AS vector
 
+# Get Cluster Agent from official image
+FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
+
 # Final stage
 FROM debian:12.11-slim
 
@@ -19,6 +22,9 @@ RUN apt-get update && apt-get install -y \
 # Copy Vector from vector image
 COPY --from=vector --chmod=755 /usr/bin/vector /usr/local/bin/vector
 COPY --from=vector /etc/vector /etc/vector
+
+# Copy Cluster Agent from cluster-agent image
+COPY --from=cluster-agent --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent
 
 # Copy mdprobe
 COPY mdprobe /mdprobe
@@ -64,6 +70,7 @@ COPY --chmod=755 vector.sh /vector.sh
 COPY --chmod=755 healthcheck.sh /healthcheck.sh
 COPY --chmod=755 certbot-runner.sh /certbot-runner.sh
 COPY --chmod=755 certbot-deploy-hook.sh /certbot-deploy-hook.sh
+COPY --chmod=755 cluster-agent/cluster-collector.sh /cluster-collector.sh
 COPY versions/0-default/vector.yaml /versions/0-default/vector.yaml
 COPY versions/0-default/databases.json /versions/0-default/databases.json
 COPY kubernetes-discovery/0-default/discovered_pods.yaml /kubernetes-discovery/0-default/discovered_pods.yaml

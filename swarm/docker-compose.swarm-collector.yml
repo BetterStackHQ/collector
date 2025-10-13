@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  collector:
+    image: betterstack/collector:latest
+    deploy:
+      mode: global
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+    healthcheck:
+      test: ["CMD", "/healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    environment:
+      - COLLECTOR_SECRET
+      - BASE_URL
+      - CLUSTER_COLLECTOR
+      - VECTOR_LOG_FORMAT=json
+      # Pass hostname of host machine to collector
+      - HOSTNAME
+      # Optional proxy port for upstream proxy mode
+      - PROXY_PORT
+    volumes:
+      # Mount host root filesystem to enable reading system metrics, logs (including logs outside /var/log), and container data
+      - /:/host:ro
+      # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this volume
+      # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
+      - docker-metadata:/enrichment:rw
+    networks:
+        better_stack_collector_overlay:
+          aliases:
+            - collector
+    ports:
+      # Bind to all interfaces so cluster agent can reach via overlay network
+      - "34320:34320" # Beyla metrics endpoint
+      - "33000:33000" # Vector proxy endpoint
+
+networks:
+  better_stack_collector_overlay:
+    external: true
+    name: better_stack_collector_overlay
+
+volumes:
+  docker-metadata:
+    external: true

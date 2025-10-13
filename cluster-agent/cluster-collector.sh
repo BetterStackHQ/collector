@@ -9,10 +9,8 @@
 # 4. Restarting the cycle to allow the agent to start again when conditions change
 #
 
-# Use node-specific collector hostname for same-node communication
-# This avoids load balancing across all collectors in the overlay network
-HOSTNAME=$(hostname)
-COLLECTOR_HOST="${COLLECTOR_HOST:-collector-$HOSTNAME}"
+# Use localhost since cluster-agent is now in the same container as collector
+COLLECTOR_HOST="${COLLECTOR_HOST:-localhost}"
 COLLECTOR_PORT="${COLLECTOR_PORT:-33000}"
 ENDPOINT_URL="http://${COLLECTOR_HOST}:${COLLECTOR_PORT}/v1/cluster-agent-enabled"
 
@@ -34,7 +32,7 @@ while true; do
     echo "Starting cluster agent (enabled via API endpoint)"
     echo "Connecting to collector at: $COLLECTOR_HOST:$COLLECTOR_PORT"
     /usr/local/bin/cluster-agent \
-      --coroot-url "http://${COLLECTOR_HOST}:${COLLECTOR_PORT}" \
+      --coroot-url "http://localhost:${COLLECTOR_PORT}" \
       --metrics-scrape-interval=15s \
       --config-update-interval=15s &
     AGENT_PID=$!
