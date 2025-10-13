@@ -1,0 +1,109 @@
+services:
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: betterstack/collector:latest
+    container_name: better-stack-collector
+    restart: always
+    healthcheck:
+      test: ["CMD", "/healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    environment:
+      - COLLECTOR_SECRET
+      - BASE_URL
+      - CLUSTER_COLLECTOR
+      - VECTOR_LOG_FORMAT=json
+      # Pass hostname of host machine to collector
+      - HOSTNAME
+      # Optional proxy port for upstream proxy mode
+      - PROXY_PORT
+    volumes:
+      # Mount host root filesystem to enable reading system metrics, logs (including logs outside /var/log), and container data
+      - /:/host:ro
+      # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this volume
+      # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
+      - docker-metadata:/enrichment:rw
+    networks:
+      default:
+      better_stack_collector_overlay:
+        aliases:
+          - collector
+    ports:
+      # Bind to localhost only for security - Beyla will connect via host network
+      - "127.0.0.1:34320:34320" # Beyla metrics endpoint
+      - "127.0.0.1:33000:33000" # Vector proxy endpoint
+
+  beyla:
+    build:
+      context: .
+      dockerfile: Dockerfile.beyla
+    image: betterstack/collector-beyla:latest
+    container_name: better-stack-beyla
+    restart: always
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 90s
+    privileged: true
+    pid: host
+    network_mode: host
+    mem_limit: 1536m
+    healthcheck:
+      test: |
+        BEYLA_PID=$$(pgrep -f '^/usr/local/bin/beyla' | head -1) && \
+        if [ -z "$$BEYLA_PID" ]; then \
+          echo "Beyla process not found"; \
+          exit 1; \
+        fi && \
+        MEM_USAGE=$$(cat /proc/$$BEYLA_PID/status | grep VmRSS | awk '{print int($$2/1024)}') && \
+        THRESHOLD=1450 && \
+        if [ "$$MEM_USAGE" -gt "$$THRESHOLD" ]; then \
+          echo "Beyla memory usage $${MEM_USAGE}MiB exceeds threshold $${THRESHOLD}MiB"; \
+          exit 1; \
+        fi
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 2
+    environment:
+      # Set Go memory limit to slightly less than container limit
+      - GOMEMLIMIT=1400MiB
+      # Pass hostname of host machine to Beyla; needs `export HOSTNAME` before running `docker compose up`
+      - HOSTNAME
+      # Override OTLP endpoint to point to collector container
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:34320
+      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      - BEYLA_BPF_CONTEXT_PROPAGATION=all
+      - BEYLA_BPF_TRACK_REQUEST_HEADERS=true
+      - BEYLA_METRICS_INTERVAL=15s
+      - BEYLA_CONFIG_PATH=/etc/beyla/beyla.yaml
+      # Enable dockerprobe
+      - ENABLE_DOCKERPROBE
+    volumes:
+      - /sys/kernel/tracing:/sys/kernel/tracing:rw
+      - /sys/kernel/debug:/sys/kernel/debug:rw
+      - /sys/kernel/security:/sys/kernel/security:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      # Docker socket for dockerprobe
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this volume
+      # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
+      - docker-metadata:/enrichment:rw
+      # Persist ACME certs and stable symlinks across restarts
+      - letsencrypt:/etc/letsencrypt
+      - ssl-certs:/etc/ssl
+    depends_on:
+      - collector
+
+networks:
+  better_stack_collector_overlay:
+    external: true
+    name: better_stack_collector_overlay
+
+volumes:
+  docker-metadata:
+  letsencrypt:
+  ssl-certs:

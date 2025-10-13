@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  cluster-agent:
+    image: betterstack/cluster-agent:latest
+    build:
+      context: ..
+      dockerfile: Dockerfile.cluster-agent
+    restart: always
+    environment:
+      - COLLECTOR_HOST=collector
+      - COLLECTOR_PORT=33000
+    networks:
+      - better_stack_collector_overlay
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager  # Cluster agent should run on manager nodes
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  better_stack_collector_overlay:
+    external: true
+    name: better_stack_collector_overlay
