@@ -147,13 +147,14 @@ echo
 print_green "✓ SSH connectivity confirmed for all nodes"
 echo
 
-# For install and force_upgrade actions, set up overlay network and cluster agent BEFORE deploying to nodes
+# For install and force_upgrade actions, set up overlay network BEFORE deploying to nodes
 # Skip this if we're retrying from a specific node
 if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FROM" -eq 0 ]]; then
-    print_blue "Setting up overlay network and collector swarm service..."
+    print_blue "Creating overlay network..."
     
-    # Pass SWARM_NETWORKS and IMAGE_TAG to the remote script
-    if $SSH_CMD "$MANAGER_NODE" "SWARM_NETWORKS='${SWARM_NETWORKS:-}' IMAGE_TAG='${IMAGE_TAG:-latest}' bash" <<'EOF'
+    if $SSH_CMD "$MANAGER_NODE" "bash" <<'EOF'
+        set -eu
+        
         set -eu
         
         # Create overlay network if it doesn't exist
@@ -164,9 +165,163 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FR
         else
             echo "Overlay network already exists: $NETWORK_NAME"
         fi
-        
-        # Note: docker-metadata volume will be created on each node when beyla starts
-        # Swarm services can't use local volumes, so we mark it as external in the compose file
+EOF
+    then
+        print_green "✓ Overlay network ready"
+    else
+        print_red "✗ Failed to create overlay network"
+        exit 1
+    fi
+    echo
+fi
+
+# Deploy beyla to each node first (this creates the enrichment directories)
+CURRENT=0
+for NODE in $NODES; do
+    ((CURRENT++))
+    
+    # Skip nodes before RETRY_FROM
+    if [[ $CURRENT -lt $RETRY_FROM ]]; then
+        print_blue "Skipping node: $NODE ($CURRENT/$NODE_COUNT) - already processed"
+        continue
+    fi
+    
+    # Extract user from MANAGER_NODE if present
+    if [[ "$MANAGER_NODE" == *"@"* ]]; then
+        SSH_USER="${MANAGER_NODE%%@*}"
+        NODE_TARGET="${SSH_USER}@${NODE}"
+    else
+        NODE_TARGET="$NODE"
+    fi
+    
+    case "$ACTION" in
+        "install")
+            print_blue "Installing on node: $NODE ($CURRENT/$NODE_COUNT)"
+            ;;
+        "uninstall")
+            print_blue "Uninstalling from node: $NODE ($CURRENT/$NODE_COUNT)"
+            ;;
+        "force_upgrade")
+            print_blue "Force upgrading on node: $NODE ($CURRENT/$NODE_COUNT)"
+            ;;
+    esac
+
+    case "$ACTION" in
+        "install")
+            if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
+                set -eu
+                echo "Setting up Better Stack Beyla..."
+                
+                # Create directory for enrichment data sharing
+                echo "Creating enrichment directory..."
+                mkdir -p /var/lib/better-stack/enrichment
+                chmod 755 /var/lib/better-stack/enrichment
+                
+                # Download beyla docker-compose configuration
+                echo "Downloading Beyla docker-compose configuration..."
+                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.beyla.yml \\
+                    -o /tmp/docker-compose.beyla.yml
+                
+                # Start beyla container
+                echo "Starting Beyla container..."
+                export HOSTNAME=\$(hostname)
+                cd /tmp
+                HOSTNAME="\$HOSTNAME" \\
+                docker compose -p better-stack-beyla -f docker-compose.beyla.yml pull
+                HOSTNAME="\$HOSTNAME" \\
+                docker compose -p better-stack-beyla -f docker-compose.beyla.yml up -d
+
+                echo "Checking deployment status..."
+                docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"
+EOF
+            then
+                print_green "✓ Better Stack Beyla installed on $NODE"
+            else
+                print_red "✗ Failed to install on $NODE"
+                echo
+                print_blue "You can retry from current node using RETRY_FROM=$CURRENT"
+                exit 1
+            fi
+            ;;
+            
+        "uninstall")
+            if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
+                set -e
+                echo "Stopping and removing Better Stack Beyla..."
+                # Use project name to stop containers
+                docker compose -p better-stack-beyla down 2>/dev/null || true
+                # Also try to stop named container if it exists
+                docker stop better-stack-beyla 2>/dev/null || true
+                docker rm better-stack-beyla 2>/dev/null || true
+                echo "Beyla container removed."
+EOF
+            then
+                print_green "✓ Better Stack Beyla uninstalled from $NODE"
+            else
+                print_red "✗ Failed to uninstall from $NODE"
+                echo
+                print_blue "You can retry from current node using RETRY_FROM=$CURRENT"
+                exit 1
+            fi
+            ;;
+            
+        "force_upgrade")
+            if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
+                set -e
+                echo "Stopping and removing Better Stack Beyla..."
+                # Use project name to stop containers
+                docker compose -p better-stack-beyla down 2>/dev/null || true
+                # Also try to stop named container if it exists
+                docker stop better-stack-beyla 2>/dev/null || true
+                docker rm better-stack-beyla 2>/dev/null || true
+                
+                echo "Container removed. Waiting 3 seconds..."
+                sleep 3
+                
+                echo "Setting up Better Stack Beyla..."
+                
+                # Create directory for enrichment data sharing
+                echo "Creating enrichment directory..."
+                mkdir -p /var/lib/better-stack/enrichment
+                chmod 755 /var/lib/better-stack/enrichment
+                
+                # Download beyla docker-compose configuration
+                echo "Downloading Beyla docker-compose configuration..."
+                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.beyla.yml \\
+                    -o /tmp/docker-compose.beyla.yml
+                
+                # Pull latest image and start container
+                echo "Pulling latest image and starting container..."
+                export HOSTNAME=\$(hostname)
+                cd /tmp
+                HOSTNAME="\$HOSTNAME" \\
+                docker compose -p better-stack-beyla -f docker-compose.beyla.yml pull
+                HOSTNAME="\$HOSTNAME" \\
+                docker compose -p better-stack-beyla -f docker-compose.beyla.yml up -d
+
+                echo "Checking deployment status..."
+                docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"
+EOF
+            then
+                print_green "✓ Better Stack Beyla force upgraded on $NODE"
+            else
+                print_red "✗ Failed to force upgrade on $NODE"
+                echo
+                print_blue "You can retry from current node using RETRY_FROM=$CURRENT"
+                exit 1
+            fi
+            ;;
+    esac
+    echo
+
+done
+
+# Now deploy collector swarm service after all nodes have beyla (and enrichment directories)
+if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FROM" -eq 0 ]]; then
+    print_blue "Deploying collector swarm service..."
+    
+    # Pass SWARM_NETWORKS and IMAGE_TAG to the remote script
+    if $SSH_CMD "$MANAGER_NODE" "SWARM_NETWORKS='${SWARM_NETWORKS:-}' IMAGE_TAG='${IMAGE_TAG:-latest}' bash" <<'EOF'
         
         # Determine which networks to attach collector to
         if [[ -n "$SWARM_NETWORKS" ]]; then
@@ -287,157 +442,16 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FR
         docker service ls | grep better-stack || echo "No collector service found"
 EOF
     then
-        print_green "✓ Overlay network and collector swarm service ready"
+        print_green "✓ Collector swarm service deployed"
     else
-        print_red "✗ Failed to set up overlay network or collector swarm service"
+        print_red "✗ Failed to deploy collector swarm service"
         exit 1
     fi
     echo
 elif [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FROM" -gt 0 ]]; then
-    print_blue "Skipping overlay network and collector swarm setup (RETRY_FROM=$RETRY_FROM)"
+    print_blue "Skipping collector swarm deployment (RETRY_FROM=$RETRY_FROM)"
     echo
 fi
-
-# Deploy to each node
-CURRENT=0
-for NODE in $NODES; do
-    ((CURRENT++))
-    
-    # Skip nodes before RETRY_FROM
-    if [[ $CURRENT -lt $RETRY_FROM ]]; then
-        print_blue "Skipping node: $NODE ($CURRENT/$NODE_COUNT) - already processed"
-        continue
-    fi
-    
-    case "$ACTION" in
-        "install")
-            print_blue "Installing on node: $NODE ($CURRENT/$NODE_COUNT)"
-            ;;
-        "uninstall")
-            print_blue "Uninstalling from node: $NODE ($CURRENT/$NODE_COUNT)"
-            ;;
-        "force_upgrade")
-            print_blue "Force upgrading on node: $NODE ($CURRENT/$NODE_COUNT)"
-            ;;
-    esac
-
-    # Extract user from MANAGER_NODE if present
-    if [[ "$MANAGER_NODE" == *"@"* ]]; then
-        SSH_USER="${MANAGER_NODE%%@*}"
-        NODE_TARGET="${SSH_USER}@${NODE}"
-    else
-        NODE_TARGET="$NODE"
-    fi
-
-    case "$ACTION" in
-        "install")
-            if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
-                set -eu
-                echo "Setting up Better Stack Beyla..."
-                
-                # Create directory for enrichment data sharing
-                echo "Creating enrichment directory..."
-                mkdir -p /var/lib/better-stack/enrichment
-                chmod 755 /var/lib/better-stack/enrichment
-                
-                # Download beyla docker-compose configuration
-                echo "Downloading Beyla docker-compose configuration..."
-                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.beyla.yml \\
-                    -o /tmp/docker-compose.beyla.yml
-                
-                # Start beyla container
-                echo "Starting Beyla container..."
-                export HOSTNAME=\$(hostname)
-                cd /tmp
-                HOSTNAME="\$HOSTNAME" \\
-                docker compose -p better-stack-beyla -f docker-compose.beyla.yml pull
-                HOSTNAME="\$HOSTNAME" \\
-                docker compose -p better-stack-beyla -f docker-compose.beyla.yml up -d
-
-                echo "Checking deployment status..."
-                docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"
-EOF
-            then
-                print_green "✓ Better Stack Beyla installed on $NODE"
-            else
-                print_red "✗ Failed to install on $NODE"
-                echo
-                print_blue "You can retry from current node using RETRY_FROM=$CURRENT"
-                exit 1
-            fi
-            ;;
-            
-        "uninstall")
-            if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
-                set -e
-                echo "Stopping and removing Better Stack Beyla..."
-                # Use project name to stop containers
-                docker compose -p better-stack-beyla down 2>/dev/null || true
-                # Also try to stop named container if it exists
-                docker stop better-stack-beyla 2>/dev/null || true
-                docker rm better-stack-beyla 2>/dev/null || true
-                echo "Beyla container removed."
-EOF
-            then
-                print_green "✓ Better Stack Beyla uninstalled from $NODE"
-            else
-                print_red "✗ Failed to uninstall from $NODE"
-                echo
-                print_blue "You can retry from current node using RETRY_FROM=$CURRENT"
-                exit 1
-            fi
-            ;;
-            
-        "force_upgrade")
-            if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
-                set -e
-                echo "Stopping and removing Better Stack Beyla..."
-                # Use project name to stop containers
-                docker compose -p better-stack-beyla down 2>/dev/null || true
-                # Also try to stop named container if it exists
-                docker stop better-stack-beyla 2>/dev/null || true
-                docker rm better-stack-beyla 2>/dev/null || true
-                
-                echo "Container removed. Waiting 3 seconds..."
-                sleep 3
-                
-                echo "Setting up Better Stack Beyla..."
-                
-                # Create directory for enrichment data sharing
-                echo "Creating enrichment directory..."
-                mkdir -p /var/lib/better-stack/enrichment
-                chmod 755 /var/lib/better-stack/enrichment
-                
-                # Download beyla docker-compose configuration
-                echo "Downloading Beyla docker-compose configuration..."
-                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.beyla.yml \\
-                    -o /tmp/docker-compose.beyla.yml
-                
-                # Pull latest image and start container
-                echo "Pulling latest image and starting container..."
-                export HOSTNAME=\$(hostname)
-                cd /tmp
-                HOSTNAME="\$HOSTNAME" \\
-                docker compose -p better-stack-beyla -f docker-compose.beyla.yml pull
-                HOSTNAME="\$HOSTNAME" \\
-                docker compose -p better-stack-beyla -f docker-compose.beyla.yml up -d
-
-                echo "Checking deployment status..."
-                docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"
-EOF
-            then
-                print_green "✓ Better Stack Beyla force upgraded on $NODE"
-            else
-                print_red "✗ Failed to force upgrade on $NODE"
-                echo
-                print_blue "You can retry from current node using RETRY_FROM=$CURRENT"
-                exit 1
-            fi
-            ;;
-    esac
-    echo
-
-done
 
 case "$ACTION" in
     "install")
