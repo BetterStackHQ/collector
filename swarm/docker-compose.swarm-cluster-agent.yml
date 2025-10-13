@@ -2,11 +2,7 @@ version: '3.8'
 
 services:
   cluster-agent:
-    image: betterstack/cluster-agent:latest
-    build:
-      context: ..
-      dockerfile: Dockerfile.cluster-agent
-    restart: always
+    image: betterstack/collector-cluster-agent:latest
     environment:
       - COLLECTOR_HOST=collector
       - COLLECTOR_PORT=33000

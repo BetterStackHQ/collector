@@ -62,6 +62,10 @@ if [[ "$SSH_CMD" != "ssh" ]]; then
     echo "Using SSH command: $SSH_CMD"
 fi
 
+# Clear any one-time SSH authentication prompts
+print_blue "Testing SSH connectivity to manager node..."
+${SSH_CMD} "$MANAGER_NODE" "echo 'SSH connection established'" </dev/null >/dev/null 2>&1
+
 # Get list of all swarm nodes
 print_blue "Getting list of swarm nodes..."
 echo "Running: $SSH_CMD $MANAGER_NODE 'docker node ls'"
@@ -96,13 +100,43 @@ print_green "✓ Found $NODE_COUNT nodes:"
 echo "$NODES"
 echo
 
-# For install action, set up overlay network and cluster agent first
-if [[ "$ACTION" == "install" ]]; then
+# Test SSH connectivity to all nodes before proceeding
+print_blue "Testing SSH connectivity to all nodes..."
+FAILED_NODES=""
+for NODE in $NODES; do
+    # Extract user from MANAGER_NODE if present
+    if [[ "$MANAGER_NODE" == *"@"* ]]; then
+        SSH_USER="${MANAGER_NODE%%@*}"
+        NODE_TARGET="${SSH_USER}@${NODE}"
+    else
+        NODE_TARGET="$NODE"
+    fi
+    
+    if ${SSH_CMD} "$NODE_TARGET" "echo 'SSH OK'" </dev/null >/dev/null 2>&1; then
+        echo "✓ $NODE"
+    else
+        echo "✗ $NODE - SSH connection failed"
+        FAILED_NODES="$FAILED_NODES $NODE"
+    fi
+done
+
+if [[ -n "$FAILED_NODES" ]]; then
+    print_red "✗ Failed to connect to some nodes:$FAILED_NODES"
+    echo
+    print_blue "Please ensure SSH access is configured for all swarm nodes."
+    exit 1
+fi
+
+print_green "✓ SSH connectivity confirmed for all nodes"
+echo
+
+# For install and force_upgrade actions, set up overlay network and cluster agent BEFORE deploying to nodes
+if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]]; then
     print_blue "Setting up overlay network and cluster agent service..."
     
-    # Pass SWARM_NETWORKS to the remote script
-    if $SSH_CMD "$MANAGER_NODE" SWARM_NETWORKS="${SWARM_NETWORKS:-}" /bin/bash <<'EOF'
-        set -e
+    # Pass SWARM_NETWORKS and IMAGE_TAG to the remote script
+    if $SSH_CMD "$MANAGER_NODE" "SWARM_NETWORKS='${SWARM_NETWORKS:-}' IMAGE_TAG='${IMAGE_TAG:-latest}' bash" <<'EOF'
+        set -eu
         
         # Create overlay network if it doesn't exist
         NETWORK_NAME="better_stack_collector_overlay"
@@ -123,9 +157,9 @@ if [[ "$ACTION" == "install" ]]; then
                 SELECTED_NETWORKS="$SWARM_NETWORKS"
             fi
         else
-            # Auto-detect overlay networks (excluding our own)
+            # Auto-detect overlay networks (excluding our own and ingress)
             echo "Auto-detecting swarm overlay networks..."
-            OVERLAY_NETWORKS=$(docker network ls --filter driver=overlay --filter scope=swarm --format "{{.Name}}" | grep -v "^better_stack_collector_overlay$" | sort)
+            OVERLAY_NETWORKS=$(docker network ls --filter driver=overlay --filter scope=swarm --format "{{.Name}}" | grep -v "^better_stack_collector_overlay$" | grep -v "^ingress$" | sort)
             
             if [[ -n "$OVERLAY_NETWORKS" ]]; then
                 # Count networks (not including better_stack_collector_overlay)
@@ -158,58 +192,51 @@ if [[ "$ACTION" == "install" ]]; then
         
         # Export for use in compose file generation
         export SELECTED_NETWORKS
+        echo "SELECTED_NETWORKS=$SELECTED_NETWORKS"
         
         # Download latest swarm compose file
         echo "Downloading swarm compose file for cluster agent..."
-        curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/swarm/docker-compose.swarm-cluster-agent.yml \
+        curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.swarm-cluster-agent.yml \
             -o /tmp/docker-compose.swarm-cluster-agent.yml
+        
+        # Update image tag
+        sed -i "s|image: betterstack/collector-cluster-agent:latest|image: betterstack/collector-cluster-agent:${IMAGE_TAG}|" /tmp/docker-compose.swarm-cluster-agent.yml
         
         # Modify the compose file to add selected networks
         echo "Configuring networks in compose file..."
         
-        # Create a temporary file with the network configuration
-        cat > /tmp/networks_service.txt <<EOF
-    networks:
-EOF
-        IFS=','
-        for net in $SELECTED_NETWORKS; do 
-            echo "      - $net" >> /tmp/networks_service.txt
-        done
+        # Replace the single network under services with our list
+        # First, remove the existing networks section under the service
+        sed -i '/^    networks:/,/^    [^ ]/{/^    networks:/d; /^      - /d;}' /tmp/docker-compose.swarm-cluster-agent.yml
         
-        # Create networks definitions
-        cat > /tmp/networks_definition.txt <<EOF
-
-networks:
-EOF
-        IFS=','
-        for net in $SELECTED_NETWORKS; do 
-            cat >> /tmp/networks_definition.txt <<EOF
-  $net:
-    external: true
-    name: $net
-EOF
-        done
-        
-        # Replace the networks section in the service (between 'networks:' and next section)
-        awk '
-        BEGIN { in_networks = 0 }
-        /^    networks:/ { in_networks = 1; next }
-        /^    [^ ]/ && in_networks { 
-            in_networks = 0
-            system("cat /tmp/networks_service.txt")
+        # Add our networks after the environment section
+        # Find the line with "environment:" and add networks after its block
+        awk -v networks="$SELECTED_NETWORKS" '
+        /^    environment:/ { in_env = 1 }
+        /^    [^ ]/ && in_env && !/^    environment:/ {
+            in_env = 0
+            print "    networks:"
+            split(networks, arr, ",")
+            for (i in arr) {
+                print "      - " arr[i]
+            }
         }
-        !in_networks { print }
+        { print }
         ' /tmp/docker-compose.swarm-cluster-agent.yml > /tmp/compose_temp.yml
+        mv /tmp/compose_temp.yml /tmp/docker-compose.swarm-cluster-agent.yml
         
-        # Replace the networks definition section at the end
-        awk '
-        /^networks:/ { found_networks = 1 }
-        !found_networks { print }
-        END { system("cat /tmp/networks_definition.txt") }
-        ' /tmp/compose_temp.yml > /tmp/docker-compose.swarm-cluster-agent.yml
+        # Replace the networks section at the bottom
+        # Remove everything after "networks:" line
+        sed -i '/^networks:/,$d' /tmp/docker-compose.swarm-cluster-agent.yml
         
-        # Clean up temp files
-        rm -f /tmp/networks_service.txt /tmp/networks_definition.txt /tmp/compose_temp.yml
+        # Add the new networks section
+        echo "networks:" >> /tmp/docker-compose.swarm-cluster-agent.yml
+        IFS=','
+        for net in $SELECTED_NETWORKS; do
+            echo "  $net:" >> /tmp/docker-compose.swarm-cluster-agent.yml
+            echo "    external: true" >> /tmp/docker-compose.swarm-cluster-agent.yml
+            echo "    name: $net" >> /tmp/docker-compose.swarm-cluster-agent.yml
+        done
         
         echo "Configured compose file with networks: $SELECTED_NETWORKS"
         
@@ -217,17 +244,36 @@ EOF
         if docker service ls | grep -q "better-stack_cluster-agent"; then
             echo "Updating existing cluster agent service..."
             docker stack deploy -c /tmp/docker-compose.swarm-cluster-agent.yml better-stack
-            echo "Waiting for service update to complete..."
-            sleep 10
         else
             echo "Deploying cluster agent to swarm..."
             docker stack deploy -c /tmp/docker-compose.swarm-cluster-agent.yml better-stack
-            echo "Waiting for cluster agent service to start..."
-            sleep 10
         fi
+        
+        # Wait briefly for cluster agent to start
+        echo "Waiting for cluster agent service to start..."
+        sleep 5
         
         echo "Cluster agent service status:"
         docker service ls | grep better-stack || echo "No cluster agent service found"
+        
+        # Check if the service is actually running
+        REPLICAS=$(docker service ls --format "{{.Replicas}}" --filter name=better-stack_cluster-agent)
+        if [[ "$REPLICAS" == "0/1" ]]; then
+            echo "ERROR: Cluster agent service is not running!"
+            echo "Checking service logs..."
+            docker service ps better-stack_cluster-agent --no-trunc
+            echo
+            echo "Recent events:"
+            docker service ps better-stack_cluster-agent --format "table {{.Name}}\t{{.Node}}\t{{.CurrentState}}\t{{.Error}}"
+            echo
+            echo "Service logs (if any):"
+            docker service logs better-stack_cluster-agent --tail 50 2>&1 || echo "No logs available yet"
+            echo
+            echo "WARNING: Proceeding anyway, but network may not be available on all nodes"
+        fi
+        
+        # Note: The overlay network will become visible on nodes when containers start using it
+        echo "Overlay network created and will be available when containers start"
 EOF
     then
         print_green "✓ Overlay network and cluster agent service ready"
@@ -236,11 +282,6 @@ EOF
         exit 1
     fi
     echo
-fi
-
-# For uninstall action, remove swarm stack and network after nodes are cleaned
-if [[ "$ACTION" == "uninstall" ]]; then
-    CLEANUP_SWARM=true
 fi
 
 # Deploy to each node
@@ -274,23 +315,25 @@ for NODE in $NODES; do
                 set -e
                 echo "Setting up Better Stack collector with split architecture..."
                 
+                # Check if the overlay network is available on this node
+                if ! docker network ls | grep -q "better_stack_collector_overlay"; then
+                    echo "Note: Overlay network not yet visible on this node"
+                    echo "It will become available when the container starts"
+                fi
+                
                 # Download docker-compose.collector-beyla.yml
                 echo "Downloading docker-compose configuration..."
-                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/swarm/docker-compose.collector-beyla.yml \\
+                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.collector-beyla.yml \\
                     -o /tmp/docker-compose.collector-beyla.yml
-                
-                # Create directory for compose file
-                mkdir -p /opt/better-stack
-                mv /tmp/docker-compose.collector-beyla.yml /opt/better-stack/
                 
                 # Start collector and beyla containers
                 echo "Starting collector and beyla containers..."
-                cd /opt/better-stack
                 export HOSTNAME=\$(hostname)
+                cd /tmp
                 COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="\$HOSTNAME" \\
-                docker compose -f docker-compose.collector-beyla.yml pull
+                docker compose -p better-stack-collector -f docker-compose.collector-beyla.yml pull
                 COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="\$HOSTNAME" \\
-                docker compose -f docker-compose.collector-beyla.yml up -d
+                docker compose -p better-stack-collector -f docker-compose.collector-beyla.yml up -d
 
                 echo "Checking deployment status..."
                 docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"
@@ -307,16 +350,11 @@ EOF
             if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
                 set -e
                 echo "Stopping and removing Better Stack containers..."
-                if [ -d /opt/better-stack ]; then
-                    cd /opt/better-stack
-                    docker compose -f docker-compose.collector-beyla.yml down 2>/dev/null || true
-                    cd /
-                    rm -rf /opt/better-stack
-                else
-                    # Fallback: try to stop containers directly
-                    docker stop better-stack-collector better-stack-beyla 2>/dev/null || true
-                    docker rm better-stack-collector better-stack-beyla 2>/dev/null || true
-                fi
+                # Use project name to stop containers
+                docker compose -p better-stack-collector down 2>/dev/null || true
+                # Also try to stop named containers if they exist
+                docker stop better-stack-collector better-stack-beyla 2>/dev/null || true
+                docker rm better-stack-collector better-stack-beyla 2>/dev/null || true
                 echo "Containers removed."
 EOF
             then
@@ -331,14 +369,11 @@ EOF
             if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
                 set -e
                 echo "Stopping and removing Better Stack containers..."
-                if [ -d /opt/better-stack ]; then
-                    cd /opt/better-stack
-                    docker compose -f docker-compose.collector-beyla.yml down 2>/dev/null || true
-                else
-                    # Fallback: try to stop containers directly
-                    docker stop better-stack-collector better-stack-beyla 2>/dev/null || true
-                    docker rm better-stack-collector better-stack-beyla 2>/dev/null || true
-                fi
+                # Use project name to stop containers
+                docker compose -p better-stack-collector down 2>/dev/null || true
+                # Also try to stop named containers if they exist
+                docker stop better-stack-collector better-stack-beyla 2>/dev/null || true
+                docker rm better-stack-collector better-stack-beyla 2>/dev/null || true
                 
                 echo "Containers removed. Waiting 3 seconds..."
                 sleep 3
@@ -347,21 +382,17 @@ EOF
                 
                 # Download docker-compose.collector-beyla.yml
                 echo "Downloading docker-compose configuration..."
-                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/swarm/docker-compose.collector-beyla.yml \\
+                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.collector-beyla.yml \\
                     -o /tmp/docker-compose.collector-beyla.yml
-                
-                # Create directory for compose file
-                mkdir -p /opt/better-stack
-                mv /tmp/docker-compose.collector-beyla.yml /opt/better-stack/
                 
                 # Pull latest images and start containers
                 echo "Pulling latest images and starting containers..."
-                cd /opt/better-stack
                 export HOSTNAME=\$(hostname)
+                cd /tmp
                 COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="\$HOSTNAME" \\
-                docker compose -f docker-compose.collector-beyla.yml pull
+                docker compose -p better-stack-collector -f docker-compose.collector-beyla.yml pull
                 COLLECTOR_SECRET="$COLLECTOR_SECRET" HOSTNAME="\$HOSTNAME" \\
-                docker compose -f docker-compose.collector-beyla.yml up -d
+                docker compose -p better-stack-collector -f docker-compose.collector-beyla.yml up -d
 
                 echo "Checking deployment status..."
                 docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"
@@ -393,6 +424,7 @@ case "$ACTION" in
             # Remove swarm stack
             echo "Removing swarm stack..."
             docker stack rm better-stack 2>/dev/null || true
+            
             
             # Wait for services to be removed
             echo "Waiting for services to be removed..."

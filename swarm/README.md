@@ -41,7 +41,7 @@ This will:
 
 ### Network Selection
 
-By default, the cluster agent automatically attaches to `better_stack_collector_overlay` and to all other overlay networks.
+By default, the cluster agent automatically attaches to `better_stack_collector_overlay` and to all other overlay networks (excluding `ingress`).
 If you have more than 2 overlay networks, you need to specify networks to attach to explicitly:
 
 ```bash
@@ -73,7 +73,7 @@ docker build -t betterstack/collector:latest -f Dockerfile .
 docker build -t betterstack/collector-beyla:latest -f Dockerfile.beyla .
 
 # Build cluster agent image
-docker build -t betterstack/cluster-agent:latest -f Dockerfile.cluster-agent .
+docker build -t betterstack/collector-cluster-agent:latest -f Dockerfile.cluster-agent .
 ```
 
 Note: When using `deploy-to-swarm.sh`, images are pulled from Docker Hub automatically.
@@ -196,10 +196,10 @@ docker network rm better_stack_collector_overlay
 
 ```bash
 # Update the image
-docker build -t betterstack/cluster-agent:latest -f Dockerfile.cluster-agent .
+docker build -t betterstack/collector-cluster-agent:latest -f Dockerfile.cluster-agent .
 
 # Update the service
-docker service update --image betterstack/cluster-agent:latest better-stack_cluster-agent
+docker service update --image betterstack/collector-cluster-agent:latest better-stack_cluster-agent
 ```
 
 ### Update Collector/Beyla

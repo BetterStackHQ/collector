@@ -145,7 +145,7 @@ jobs:
         id: repo
         run: |
           # All builds go to public repo
-          echo "repository=betterstack/cluster-agent" >> $GITHUB_OUTPUT
+          echo "repository=betterstack/collector-cluster-agent" >> $GITHUB_OUTPUT
           echo "push=true" >> $GITHUB_OUTPUT
 
       - name: Set up Docker metadata
