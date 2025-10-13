@@ -214,6 +214,7 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FR
         
         # Download latest swarm compose file
         echo "Downloading swarm compose file for cluster agent..."
+        # TODO: Update this URL to main branch once merged
         curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.swarm-cluster-agent.yml \
             -o /tmp/docker-compose.swarm-cluster-agent.yml
         

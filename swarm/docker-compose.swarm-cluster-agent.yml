@@ -10,9 +10,6 @@ services:
       - better_stack_collector_overlay
     deploy:
       mode: global
-      placement:
-        constraints:
-          - node.role == manager  # Cluster agent should run on manager nodes
       restart_policy:
         condition: any
         delay: 5s
