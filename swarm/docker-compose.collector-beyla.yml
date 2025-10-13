@@ -28,14 +28,14 @@ services:
       # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
       - docker-metadata:/enrichment:rw
     networks:
-      better_stack_collector_overlay:
-        aliases:
-          - collector
+        better_stack_collector_overlay:
+          aliases:
+            - collector
+            - collector-${HOSTNAME}
     ports:
       # Bind to all interfaces so cluster agent can reach via overlay network
       - "34320:34320" # Beyla metrics endpoint
       - "33000:33000" # Vector proxy endpoint
-
   beyla:
     build:
       context: .

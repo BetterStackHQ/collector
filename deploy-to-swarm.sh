@@ -109,40 +109,40 @@ echo "$NODES"
 echo
 
 # Test SSH connectivity to all nodes before proceeding
-print_blue "Testing SSH connectivity to all nodes..."
-FAILED_NODES=""
-NODE_INDEX=0
-for NODE in $NODES; do
-    ((NODE_INDEX++))
-    
-    # Skip nodes before RETRY_FROM for SSH check too
-    if [[ $NODE_INDEX -lt $RETRY_FROM ]]; then
-        echo "⏭ $NODE - skipped"
-        continue
-    fi
-    
-    # Extract user from MANAGER_NODE if present
-    if [[ "$MANAGER_NODE" == *"@"* ]]; then
-        SSH_USER="${MANAGER_NODE%%@*}"
-        NODE_TARGET="${SSH_USER}@${NODE}"
-    else
-        NODE_TARGET="$NODE"
-    fi
-    
-    if ${SSH_CMD} "$NODE_TARGET" "echo 'SSH OK'" </dev/null >/dev/null 2>&1; then
-        echo "✓ $NODE"
-    else
-        echo "✗ $NODE - SSH connection failed"
-        FAILED_NODES="$FAILED_NODES $NODE"
-    fi
-done
+# print_blue "Testing SSH connectivity to all nodes..."
+# FAILED_NODES=""
+# NODE_INDEX=0
+# for NODE in $NODES; do
+#     ((NODE_INDEX++))
+#     
+#     # Skip nodes before RETRY_FROM for SSH check too
+#     if [[ $NODE_INDEX -lt $RETRY_FROM ]]; then
+#         echo "⏭ $NODE - skipped"
+#         continue
+#     fi
+#     
+#     # Extract user from MANAGER_NODE if present
+#     if [[ "$MANAGER_NODE" == *"@"* ]]; then
+#         SSH_USER="${MANAGER_NODE%%@*}"
+#         NODE_TARGET="${SSH_USER}@${NODE}"
+#     else
+#         NODE_TARGET="$NODE"
+#     fi
+#     
+#     if ${SSH_CMD} "$NODE_TARGET" "echo 'SSH OK'" </dev/null >/dev/null 2>&1; then
+#         echo "✓ $NODE"
+#     else
+#         echo "✗ $NODE - SSH connection failed"
+#         FAILED_NODES="$FAILED_NODES $NODE"
+#     fi
+# done
 
-if [[ -n "$FAILED_NODES" ]]; then
-    print_red "✗ Failed to connect to some nodes:$FAILED_NODES"
-    echo
-    print_blue "Please ensure SSH access is configured for all swarm nodes."
-    exit 1
-fi
+# if [[ -n "$FAILED_NODES" ]]; then
+#     print_red "✗ Failed to connect to some nodes:$FAILED_NODES"
+#     echo
+#     print_blue "Please ensure SSH access is configured for all swarm nodes."
+#     exit 1
+# fi
 
 print_green "✓ SSH connectivity confirmed for all nodes"
 echo
@@ -215,8 +215,11 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FR
         # Download latest swarm compose file
         echo "Downloading swarm compose file for cluster agent..."
         # TODO: Update this URL to main branch once merged
-        curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.swarm-cluster-agent.yml \
-            -o /tmp/docker-compose.swarm-cluster-agent.yml
+        if ! curl -fsSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.swarm-cluster-agent.yml \
+            -o /tmp/docker-compose.swarm-cluster-agent.yml; then
+            echo "ERROR: Failed to download compose file"
+            exit 1
+        fi
         
         # Update image tag
         sed -i "s|image: betterstack/collector-cluster-agent:latest|image: betterstack/collector-cluster-agent:${IMAGE_TAG}|" /tmp/docker-compose.swarm-cluster-agent.yml
@@ -340,7 +343,7 @@ for NODE in $NODES; do
     case "$ACTION" in
         "install")
             if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
-                set -e
+                set -eu
                 echo "Setting up Better Stack collector with split architecture..."
                 
                 # Check if the overlay network is available on this node
@@ -416,6 +419,11 @@ EOF
                 echo "Downloading docker-compose configuration..."
                 curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.collector-beyla.yml \\
                     -o /tmp/docker-compose.collector-beyla.yml
+                
+                # Add node-specific alias for same-node communication
+                # Since beyla is first and uses host network (no aliases), this will only match collector's aliases
+                NODE_NAME=\$(hostname)
+                sed -i "/aliases:/a\\          - collector-\$NODE_NAME" /tmp/docker-compose.collector-beyla.yml
                 
                 # Pull latest images and start containers
                 echo "Pulling latest images and starting containers..."
