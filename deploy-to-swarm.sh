@@ -165,11 +165,8 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FR
             echo "Overlay network already exists: $NETWORK_NAME"
         fi
         
-        # Create docker-metadata volume for sharing between collector and beyla
-        if ! docker volume ls | grep -q "docker-metadata"; then
-            echo "Creating docker-metadata volume..."
-            docker volume create docker-metadata
-        fi
+        # Note: docker-metadata volume will be created on each node when beyla starts
+        # Swarm services can't use local volumes, so we mark it as external in the compose file
         
         # Determine which networks to attach collector to
         if [[ -n "$SWARM_NETWORKS" ]]; then
@@ -235,14 +232,13 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FR
         
         # Replace the single network under services with our list
         # First, remove the existing networks section under the service
-        sed -i '/^    networks:/,/^    [^ ]/{/^    networks:/d; /^        - /d;}' /tmp/docker-compose.swarm-collector.yml
+        sed -i '/^    networks:/,/^    ports:/{/^    networks:/d; /^        better_stack_collector_overlay:/,/^            - collector/d}' /tmp/docker-compose.swarm-collector.yml
         
         # Add our networks after the volumes section
-        # Find the line with "volumes:" and add networks after its block
+        # Find the line with the last volume entry and add networks after it
         awk -v networks="$SELECTED_NETWORKS" '
-        /^    volumes:/ { in_vol = 1 }
-        /^    [^ ]/ && in_vol && !/^    volumes:/ {
-            in_vol = 0
+        /^      - docker-metadata:\/enrichment:rw$/ { 
+            print
             print "    networks:"
             split(networks, arr, ",")
             for (i in arr) {
@@ -252,6 +248,7 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FR
                     print "            - collector"
                 }
             }
+            next
         }
         { print }
         ' /tmp/docker-compose.swarm-collector.yml > /tmp/compose_temp.yml
@@ -271,6 +268,12 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FR
         done
         
         echo "Configured compose file with networks: $SELECTED_NETWORKS"
+        
+        # Debug: Show the generated compose file
+        echo "Generated compose file:"
+        echo "===================="
+        cat /tmp/docker-compose.swarm-collector.yml
+        echo "===================="
         
         # Deploy collector to swarm
         echo "Deploying collector to swarm..."
@@ -332,11 +335,10 @@ for NODE in $NODES; do
                 set -eu
                 echo "Setting up Better Stack Beyla..."
                 
-                # Check if the docker-metadata volume is available
-                if ! docker volume ls | grep -q "docker-metadata"; then
-                    echo "Creating docker-metadata volume..."
-                    docker volume create docker-metadata
-                fi
+                # Create directory for enrichment data sharing
+                echo "Creating enrichment directory..."
+                mkdir -p /var/lib/better-stack/enrichment
+                chmod 755 /var/lib/better-stack/enrichment
                 
                 # Download beyla docker-compose configuration
                 echo "Downloading Beyla docker-compose configuration..."
@@ -401,11 +403,10 @@ EOF
                 
                 echo "Setting up Better Stack Beyla..."
                 
-                # Check if the docker-metadata volume is available
-                if ! docker volume ls | grep -q "docker-metadata"; then
-                    echo "Creating docker-metadata volume..."
-                    docker volume create docker-metadata
-                fi
+                # Create directory for enrichment data sharing
+                echo "Creating enrichment directory..."
+                mkdir -p /var/lib/better-stack/enrichment
+                chmod 755 /var/lib/better-stack/enrichment
                 
                 # Download beyla docker-compose configuration
                 echo "Downloading Beyla docker-compose configuration..."

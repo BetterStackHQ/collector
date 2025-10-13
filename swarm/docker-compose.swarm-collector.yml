@@ -28,9 +28,9 @@ services:
     volumes:
       # Mount host root filesystem to enable reading system metrics, logs (including logs outside /var/log), and container data
       - /:/host:ro
-      # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this volume
+      # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this directory
       # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
-      - docker-metadata:/enrichment:rw
+      - /var/lib/better-stack/enrichment:/enrichment:rw
     networks:
         better_stack_collector_overlay:
           aliases:
@@ -44,7 +44,3 @@ networks:
   better_stack_collector_overlay:
     external: true
     name: better_stack_collector_overlay
-
-volumes:
-  docker-metadata:
-    external: true

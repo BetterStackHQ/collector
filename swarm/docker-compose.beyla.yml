@@ -48,15 +48,13 @@ services:
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
       # Docker socket for dockerprobe
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this volume
+      # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this directory
       # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
-      - docker-metadata:/enrichment:rw
+      - /var/lib/better-stack/enrichment:/enrichment:rw
       # Persist ACME certs and stable symlinks across restarts
       - letsencrypt:/etc/letsencrypt
       - ssl-certs:/etc/ssl
 
 volumes:
-  docker-metadata:
-    external: true
   letsencrypt:
   ssl-certs:
