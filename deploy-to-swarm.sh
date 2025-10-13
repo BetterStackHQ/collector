@@ -31,6 +31,7 @@ print_blue() {
 
 # Default action is install
 ACTION="${ACTION:-install}"
+RETRY_FROM="${RETRY_FROM:-0}"
 
 # Validate ACTION parameter
 if [[ "$ACTION" != "install" && "$ACTION" != "uninstall" && "$ACTION" != "force_upgrade" ]]; then
@@ -39,16 +40,22 @@ if [[ "$ACTION" != "install" && "$ACTION" != "uninstall" && "$ACTION" != "force_
     exit 1
 fi
 
+# Validate RETRY_FROM parameter
+if ! [[ "$RETRY_FROM" =~ ^[0-9]+$ ]]; then
+    print_red "Error: RETRY_FROM must be a number"
+    exit 1
+fi
+
 # Check required environment variables
 if [[ -z "${MANAGER_NODE:-}" ]]; then
     print_red "Error: MANAGER_NODE environment variable is required"
-    echo "Usage: MANAGER_NODE=user@manager-node COLLECTOR_SECRET=secret [ACTION=install|uninstall|force_upgrade] [SSH_CMD='tsh ssh'] $0"
+    echo "Usage: MANAGER_NODE=user@manager-node COLLECTOR_SECRET=secret [ACTION=install|uninstall|force_upgrade] [RETRY_FROM=N] [SSH_CMD='tsh ssh'] $0"
     exit 1
 fi
 
 if [[ -z "${COLLECTOR_SECRET:-}" ]]; then
     print_red "Error: COLLECTOR_SECRET environment variable is required"
-    echo "Usage: MANAGER_NODE=user@manager-node COLLECTOR_SECRET=secret [ACTION=install|uninstall|force_upgrade] [SSH_CMD='tsh ssh'] $0"
+    echo "Usage: MANAGER_NODE=user@manager-node COLLECTOR_SECRET=secret [ACTION=install|uninstall|force_upgrade] [RETRY_FROM=N] [SSH_CMD='tsh ssh'] $0"
     exit 1
 fi
 
@@ -58,6 +65,7 @@ IMAGE_TAG="${IMAGE_TAG:-latest}"
 
 print_blue "Connecting to swarm manager: $MANAGER_NODE"
 [[ "$ACTION" != "install" ]] && print_blue "Action: $ACTION"
+[[ "$RETRY_FROM" -gt 0 ]] && print_blue "Retrying from node: $RETRY_FROM"
 if [[ "$SSH_CMD" != "ssh" ]]; then
     echo "Using SSH command: $SSH_CMD"
 fi
@@ -103,7 +111,16 @@ echo
 # Test SSH connectivity to all nodes before proceeding
 print_blue "Testing SSH connectivity to all nodes..."
 FAILED_NODES=""
+NODE_INDEX=0
 for NODE in $NODES; do
+    ((NODE_INDEX++))
+    
+    # Skip nodes before RETRY_FROM for SSH check too
+    if [[ $NODE_INDEX -lt $RETRY_FROM ]]; then
+        echo "⏭ $NODE - skipped"
+        continue
+    fi
+    
     # Extract user from MANAGER_NODE if present
     if [[ "$MANAGER_NODE" == *"@"* ]]; then
         SSH_USER="${MANAGER_NODE%%@*}"
@@ -131,7 +148,8 @@ print_green "✓ SSH connectivity confirmed for all nodes"
 echo
 
 # For install and force_upgrade actions, set up overlay network and cluster agent BEFORE deploying to nodes
-if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]]; then
+# Skip this if we're retrying from a specific node
+if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FROM" -eq 0 ]]; then
     print_blue "Setting up overlay network and cluster agent service..."
     
     # Pass SWARM_NETWORKS and IMAGE_TAG to the remote script
@@ -257,7 +275,7 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]]; then
         docker service ls | grep better-stack || echo "No cluster agent service found"
         
         # Check if the service is actually running
-        REPLICAS=$(docker service ls --format "{{.Replicas}}" --filter name=better-stack_cluster-agent)
+        REPLICAS=$(docker service ls --format "{{.Replicas}}" --filter name=better-stack_cluster-agent | head -1)
         if [[ "$REPLICAS" == "0/1" ]]; then
             echo "ERROR: Cluster agent service is not running!"
             echo "Checking service logs..."
@@ -282,12 +300,21 @@ EOF
         exit 1
     fi
     echo
+elif [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FROM" -gt 0 ]]; then
+    print_blue "Skipping overlay network and cluster agent setup (RETRY_FROM=$RETRY_FROM)"
+    echo
 fi
 
 # Deploy to each node
 CURRENT=0
 for NODE in $NODES; do
     ((CURRENT++))
+    
+    # Skip nodes before RETRY_FROM
+    if [[ $CURRENT -lt $RETRY_FROM ]]; then
+        print_blue "Skipping node: $NODE ($CURRENT/$NODE_COUNT) - already processed"
+        continue
+    fi
     
     case "$ACTION" in
         "install")
@@ -342,6 +369,8 @@ EOF
                 print_green "✓ Better Stack collector installed on $NODE"
             else
                 print_red "✗ Failed to install on $NODE"
+                echo
+                print_blue "You can retry from current node using RETRY_FROM=$CURRENT"
                 exit 1
             fi
             ;;
@@ -361,6 +390,8 @@ EOF
                 print_green "✓ Better Stack collector uninstalled from $NODE"
             else
                 print_red "✗ Failed to uninstall from $NODE"
+                echo
+                print_blue "You can retry from current node using RETRY_FROM=$CURRENT"
                 exit 1
             fi
             ;;
@@ -401,6 +432,8 @@ EOF
                 print_green "✓ Better Stack collector force upgraded on $NODE"
             else
                 print_red "✗ Failed to force upgrade on $NODE"
+                echo
+                print_blue "You can retry from current node using RETRY_FROM=$CURRENT"
                 exit 1
             fi
             ;;

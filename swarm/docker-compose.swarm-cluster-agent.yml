@@ -9,8 +9,7 @@ services:
     networks:
       - better_stack_collector_overlay
     deploy:
-      mode: replicated
-      replicas: 1
+      mode: global
       placement:
         constraints:
           - node.role == manager  # Cluster agent should run on manager nodes
