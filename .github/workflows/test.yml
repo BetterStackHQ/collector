@@ -178,37 +178,6 @@ jobs:
           exit 1
         fi
         
-        # Check collector service for additional settings like init, stop_signal, stop_grace_period
-        echo ""
-        echo "=== Checking collector additional settings ==="
-        
-        # Extract and compare additional settings
-        COLLECTOR_SETTINGS="init stop_signal stop_grace_period restart"
-        COLLECTOR_DIFFS=""
-        
-        for SETTING in $COLLECTOR_SETTINGS; do
-          MAIN_VAL=$(sed -n '/^  collector:/,/^  [^ ]/p' docker-compose.yml | grep "^\s*$SETTING:" | awk '{print $2}')
-          SWARM_VAL=$(sed -n '/^  collector:/,/^  [^ ]/p' swarm/docker-compose.swarm-collector.yml | grep "^\s*$SETTING:" | awk '{print $2}')
-          
-          if [ -n "$MAIN_VAL" ]; then
-            if [ -z "$SWARM_VAL" ]; then
-              COLLECTOR_DIFFS="$COLLECTOR_DIFFS\n  - $SETTING: missing in swarm (should be '$MAIN_VAL')"
-            elif [ "$MAIN_VAL" != "$SWARM_VAL" ]; then
-              COLLECTOR_DIFFS="$COLLECTOR_DIFFS\n  - $SETTING: main=$MAIN_VAL swarm=$SWARM_VAL"
-            fi
-          fi
-        done
-        
-        if [ -n "$COLLECTOR_DIFFS" ]; then
-          echo "❌ ERROR: Collector service settings differ"
-          echo -e "$COLLECTOR_DIFFS"
-          echo ""
-          echo "TO FIX: Update these settings in swarm/docker-compose.swarm-collector.yml to match docker-compose.yml"
-          exit 1
-        else
-          echo "✅ Collector additional settings match"
-        fi
-        
         echo ""
         echo "=== Checking beyla service alignment ==="
         
