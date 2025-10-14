@@ -121,8 +121,9 @@ jobs:
         # Compare environment variables
         echo ""
         echo "Checking environment variables..."
-        grep -A30 "environment:" /tmp/main-collector.yml | grep "^\s*-" | grep -v "HOSTNAME" | sed 's/^[[:space:]]*//' | sort > /tmp/main-collector-env
-        grep -A30 "environment:" swarm/docker-compose.swarm-collector.yml | grep "^\s*-" | grep -v "HOSTNAME" | sed 's/^[[:space:]]*//' | sort > /tmp/swarm-collector-env
+        # Extract environment section more precisely - stop at next section
+        awk '/environment:/{f=1; next} f && /^[[:space:]]*[^[:space:]-]/{f=0} f && /^[[:space:]]*-/' /tmp/main-collector.yml | grep -v "HOSTNAME" | sed 's/^[[:space:]]*//' | sort > /tmp/main-collector-env
+        awk '/environment:/{f=1; next} f && /^[[:space:]]*[^[:space:]-]/{f=0} f && /^[[:space:]]*-/' swarm/docker-compose.swarm-collector.yml | grep -v "HOSTNAME" | sed 's/^[[:space:]]*//' | sort > /tmp/swarm-collector-env
         
         if diff -q /tmp/main-collector-env /tmp/swarm-collector-env > /dev/null 2>&1; then
           echo "✓ Environment variables match (excluding HOSTNAME)"
@@ -134,15 +135,61 @@ jobs:
           comm -13 /tmp/main-collector-env /tmp/swarm-collector-env | sed 's/^/  /'
         fi
         
+        # Check ports (expect differences in format)
+        echo ""
+        echo "Checking port configurations..."
+        # Extract ports from main
+        awk '/ports:/{f=1; next} f && /^[[:space:]]*[^[:space:]-]/{f=0} f' /tmp/main-collector.yml > /tmp/main-collector-ports
+        # Extract ports from swarm
+        awk '/ports:/{f=1; next} f && /^[[:space:]]*[^[:space:]-]/{f=0} f' swarm/docker-compose.swarm-collector.yml > /tmp/swarm-collector-ports
+        
+        # Check that both expose 33000 and 34320
+        if grep -q "33000" /tmp/main-collector-ports && grep -q "34320" /tmp/main-collector-ports; then
+          echo "✓ Main exposes ports 33000 and 34320"
+        else
+          echo "✗ Main missing required ports"
+          ERRORS=$((ERRORS + 1))
+        fi
+        
+        if grep -q "33000" /tmp/swarm-collector-ports && grep -q "34320" /tmp/swarm-collector-ports; then
+          echo "✓ Swarm exposes ports 33000 and 34320"
+        else
+          echo "✗ Swarm missing required ports"
+          ERRORS=$((ERRORS + 1))
+        fi
+        
         # Check volume mounts (expect differences)
         echo ""
         echo "Checking volume mounts..."
-        grep -A10 "volumes:" /tmp/main-collector.yml | grep "^\s*-" | sed 's/^[[:space:]]*//' > /tmp/main-collector-vol
-        grep -A10 "volumes:" swarm/docker-compose.swarm-collector.yml | grep "^\s*-" | sed 's/^[[:space:]]*//' > /tmp/swarm-collector-vol
+        # Extract volumes section more precisely
+        awk '/volumes:/{f=1; next} f && /^[[:space:]]*[^[:space:]-]/{f=0} f && /^[[:space:]]*-/' /tmp/main-collector.yml | sed 's/^[[:space:]]*//' > /tmp/main-collector-vol
+        awk '/volumes:/{f=1; next} f && /^[[:space:]]*[^[:space:]-]/{f=0} f && /^[[:space:]]*-/' swarm/docker-compose.swarm-collector.yml | sed 's/^[[:space:]]*//' > /tmp/swarm-collector-vol
         
         echo "INFO: Volume mounts (expected to differ):"
         echo "Main: $(cat /tmp/main-collector-vol | wc -l) mounts"
         echo "Swarm: $(cat /tmp/swarm-collector-vol | wc -l) mounts"
+        
+        # Check both have host filesystem and enrichment mounts
+        if grep -q "/host:ro" /tmp/main-collector-vol && grep -q "enrichment" /tmp/main-collector-vol; then
+          echo "✓ Main has required mounts (host filesystem + enrichment)"
+        else
+          echo "✗ Main missing required mounts"
+          ERRORS=$((ERRORS + 1))
+        fi
+        
+        if grep -q "/host:ro" /tmp/swarm-collector-vol && grep -q "enrichment" /tmp/swarm-collector-vol; then
+          echo "✓ Swarm has required mounts (host filesystem + enrichment)"
+        else
+          echo "✗ Swarm missing required mounts"
+          ERRORS=$((ERRORS + 1))
+        fi
+        
+        # Check if we had any errors in collector comparison
+        if [ $ERRORS -gt 0 ]; then
+          echo ""
+          echo "ERROR: Found $ERRORS critical differences in collector service"
+          exit 1
+        fi
         
         echo ""
         echo "=== Comparing beyla services ==="
@@ -184,8 +231,9 @@ jobs:
         # Check beyla environment variables
         echo ""
         echo "Checking beyla environment variables..."
-        grep -A50 "environment:" /tmp/main-beyla.yml | grep "^\s*- " | sed 's/^[[:space:]]*//' | sort > /tmp/main-beyla-env
-        grep -A50 "environment:" swarm/docker-compose.beyla.yml | grep "^\s*- " | sed 's/^[[:space:]]*//' | sort > /tmp/swarm-beyla-env
+        # Extract environment section more precisely - stop at next section
+        awk '/environment:/{f=1; next} f && /^[[:space:]]*[^[:space:]-]/{f=0} f && /^[[:space:]]*-/' /tmp/main-beyla.yml | sed 's/^[[:space:]]*//' | sort > /tmp/main-beyla-env
+        awk '/environment:/{f=1; next} f && /^[[:space:]]*[^[:space:]-]/{f=0} f && /^[[:space:]]*-/' swarm/docker-compose.beyla.yml | sed 's/^[[:space:]]*//' | sort > /tmp/swarm-beyla-env
         
         # Key environment variables that must be present in both
         for var in "GOMEMLIMIT" "HOSTNAME" "OTEL_EXPORTER_OTLP_ENDPOINT" "BEYLA_BPF_CONTEXT_PROPAGATION" "ENABLE_DOCKERPROBE"; do
