@@ -33,7 +33,7 @@ services:
       # Pass hostname of host machine to Beyla; needs `export HOSTNAME` before running `docker compose up`
       - HOSTNAME
       # Override OTLP endpoint to point to collector container
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:34320
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:34320
       - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
       - BEYLA_BPF_CONTEXT_PROPAGATION=all
       - BEYLA_BPF_TRACK_REQUEST_HEADERS=true
