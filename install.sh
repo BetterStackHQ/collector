@@ -105,12 +105,14 @@ cd "$TEMP_DIR"
 trap "rm -rf $TEMP_DIR" EXIT
 
 # Download appropriate compose file based on COMPOSE_URL or Docker version
+# Used in deploy-to-swarm.sh to deploy Beyla. Useful for testing and deploying collector from branch.
 if [ -n "$COMPOSE_URL" ]; then
     # Use custom compose URL if provided
     echo "Using custom compose file from: $COMPOSE_URL"
     curl -sSL "$COMPOSE_URL" -o docker-compose.yml
 
     # If using seccomp and custom URL, try to download seccomp profile from same location
+    # Not used in deploy-to-swarm.sh
     if [ "$USE_SECCOMP" = true ]; then
         SECCOMP_URL="${COMPOSE_URL%/*}/collector-seccomp.json"
         echo "Attempting to download seccomp profile from: $SECCOMP_URL"

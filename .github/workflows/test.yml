@@ -52,203 +52,179 @@ jobs:
         echo "✓ Diff is exactly 3 lines as expected"
 
   # Check that swarm docker-compose files don't diverge too much from the main ones
-  # Best effort, completely Claude generated check. The files will drift if we don't have it. But feel free to redo/replace as needed.
   swarm-compose-check:
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v3
 
-    - name: Split main docker-compose.yml and compare with swarm files
+    - name: Check swarm compose files alignment
       run: |
-        echo "=== Splitting main docker-compose.yml into collector and beyla services ==="
+        echo "=== Checking collector service alignment ==="
         
-        # Extract collector service from main compose
-        awk '
-          /^services:/ { in_services = 1 }
-          in_services && /^  collector:/ { in_collector = 1 }
-          in_collector && /^  [^ ]/ && !/^  collector:/ { in_collector = 0 }
-          in_collector { print }
-        ' docker-compose.yml > /tmp/main-collector.yml
+        # Compare collector images
+        MAIN_IMAGE=$(grep -A1 "^  collector:" docker-compose.yml | grep "image:" | awk '{print $2}')
+        SWARM_IMAGE=$(grep -A1 "^  collector:" swarm/docker-compose.swarm-collector.yml | grep "image:" | awk '{print $2}')
         
-        # Extract beyla service from main compose
-        awk '
-          /^services:/ { in_services = 1 }
-          in_services && /^  beyla:/ { in_beyla = 1 }
-          in_beyla && /^  [^ ]/ && !/^  beyla:/ { in_beyla = 0 }
-          in_beyla { print }
-          /^volumes:/ { in_beyla = 0; in_volumes = 1 }
-          in_volumes { print }
-        ' docker-compose.yml > /tmp/main-beyla.yml
-        
-        echo "=== Comparing collector services ==="
-        
-        # Compare images
-        MAIN_COLLECTOR_IMAGE=$(grep "image:" /tmp/main-collector.yml | awk '{print $2}')
-        SWARM_COLLECTOR_IMAGE=$(grep "image:" swarm/docker-compose.swarm-collector.yml | head -1 | awk '{print $2}')
-        
-        if [ "$MAIN_COLLECTOR_IMAGE" != "$SWARM_COLLECTOR_IMAGE" ]; then
-          echo "ERROR: Collector image mismatch"
-          echo "  Main:  $MAIN_COLLECTOR_IMAGE"
-          echo "  Swarm: $SWARM_COLLECTOR_IMAGE"
-          exit 1
-        else
-          echo "✓ Both use collector image: $MAIN_COLLECTOR_IMAGE"
-        fi
-        
-        # Compare healthchecks
-        echo ""
-        echo "Checking healthcheck configuration..."
-        grep -A5 "healthcheck:" /tmp/main-collector.yml > /tmp/main-collector-health || true
-        grep -A5 "healthcheck:" swarm/docker-compose.swarm-collector.yml > /tmp/swarm-collector-health || true
-        
-        if [ ! -s /tmp/main-collector-health ]; then
-          echo "ERROR: No healthcheck in main collector"
+        if [ "$MAIN_IMAGE" != "$SWARM_IMAGE" ]; then
+          echo "❌ ERROR: Collector image mismatch"
+          echo "  Main:  $MAIN_IMAGE"
+          echo "  Swarm: $SWARM_IMAGE"
           exit 1
         fi
+        echo "✅ Both use collector image: $MAIN_IMAGE"
         
-        if [ ! -s /tmp/swarm-collector-health ]; then
-          echo "ERROR: No healthcheck in swarm collector"
-          exit 1
-        fi
-        
-        if diff -q /tmp/main-collector-health /tmp/swarm-collector-health > /dev/null 2>&1; then
-          echo "✓ Healthcheck configurations match"
-        else
-          echo "WARNING: Healthcheck configurations differ slightly"
-          diff -u /tmp/main-collector-health /tmp/swarm-collector-health || true
-        fi
-        
-        # Compare environment variables
+        # Compare healthchecks (should be identical)
         echo ""
-        echo "Checking environment variables..."
-        # Extract environment section more precisely - stop at next section
-        awk '/environment:/{f=1; next} f && /^[[:space:]]*[^[:space:]-]/{f=0} f && /^[[:space:]]*-/' /tmp/main-collector.yml | grep -v "HOSTNAME" | sed 's/^[[:space:]]*//' | sort > /tmp/main-collector-env
-        awk '/environment:/{f=1; next} f && /^[[:space:]]*[^[:space:]-]/{f=0} f && /^[[:space:]]*-/' swarm/docker-compose.swarm-collector.yml | grep -v "HOSTNAME" | sed 's/^[[:space:]]*//' | sort > /tmp/swarm-collector-env
+        echo "=== Checking healthcheck configuration ==="
+        sed -n '/^  collector:/,/^  [^ ]/p' docker-compose.yml | sed -n '/healthcheck:/,/^    [^ ]/p' | grep -v "^  [^ ]" > /tmp/main-health
+        sed -n '/^  collector:/,/^  [^ ]/p' swarm/docker-compose.swarm-collector.yml | sed -n '/healthcheck:/,/^    [^ ]/p' | grep -v "^  [^ ]" > /tmp/swarm-health
         
-        if diff -q /tmp/main-collector-env /tmp/swarm-collector-env > /dev/null 2>&1; then
-          echo "✓ Environment variables match (excluding HOSTNAME)"
+        if diff -q /tmp/main-health /tmp/swarm-health > /dev/null 2>&1; then
+          echo "✅ Healthcheck configurations are identical"
         else
-          echo "INFO: Environment variables differ:"
-          echo "Main only:"
-          comm -23 /tmp/main-collector-env /tmp/swarm-collector-env | sed 's/^/  /'
-          echo "Swarm only:"
-          comm -13 /tmp/main-collector-env /tmp/swarm-collector-env | sed 's/^/  /'
-        fi
-        
-        # Check ports (expect differences in format)
-        echo ""
-        echo "Checking port configurations..."
-        # Extract ports from main
-        awk '/ports:/{f=1; next} f && /^[[:space:]]*[^[:space:]-]/{f=0} f' /tmp/main-collector.yml > /tmp/main-collector-ports
-        # Extract ports from swarm
-        awk '/ports:/{f=1; next} f && /^[[:space:]]*[^[:space:]-]/{f=0} f' swarm/docker-compose.swarm-collector.yml > /tmp/swarm-collector-ports
-        
-        # Check that both expose 33000 and 34320
-        if grep -q "33000" /tmp/main-collector-ports && grep -q "34320" /tmp/main-collector-ports; then
-          echo "✓ Main exposes ports 33000 and 34320"
-        else
-          echo "✗ Main missing required ports"
-          ERRORS=$((ERRORS + 1))
-        fi
-        
-        if grep -q "33000" /tmp/swarm-collector-ports && grep -q "34320" /tmp/swarm-collector-ports; then
-          echo "✓ Swarm exposes ports 33000 and 34320"
-        else
-          echo "✗ Swarm missing required ports"
-          ERRORS=$((ERRORS + 1))
-        fi
-        
-        # Check volume mounts (expect differences)
-        echo ""
-        echo "Checking volume mounts..."
-        # Extract volumes section more precisely
-        awk '/volumes:/{f=1; next} f && /^[[:space:]]*[^[:space:]-]/{f=0} f && /^[[:space:]]*-/' /tmp/main-collector.yml | sed 's/^[[:space:]]*//' > /tmp/main-collector-vol
-        awk '/volumes:/{f=1; next} f && /^[[:space:]]*[^[:space:]-]/{f=0} f && /^[[:space:]]*-/' swarm/docker-compose.swarm-collector.yml | sed 's/^[[:space:]]*//' > /tmp/swarm-collector-vol
-        
-        echo "INFO: Volume mounts (expected to differ):"
-        echo "Main: $(cat /tmp/main-collector-vol | wc -l) mounts"
-        echo "Swarm: $(cat /tmp/swarm-collector-vol | wc -l) mounts"
-        
-        # Check both have host filesystem and enrichment mounts
-        if grep -q "/host:ro" /tmp/main-collector-vol && grep -q "enrichment" /tmp/main-collector-vol; then
-          echo "✓ Main has required mounts (host filesystem + enrichment)"
-        else
-          echo "✗ Main missing required mounts"
-          ERRORS=$((ERRORS + 1))
-        fi
-        
-        if grep -q "/host:ro" /tmp/swarm-collector-vol && grep -q "enrichment" /tmp/swarm-collector-vol; then
-          echo "✓ Swarm has required mounts (host filesystem + enrichment)"
-        else
-          echo "✗ Swarm missing required mounts"
-          ERRORS=$((ERRORS + 1))
-        fi
-        
-        # Check if we had any errors in collector comparison
-        if [ $ERRORS -gt 0 ]; then
+          echo "❌ ERROR: Healthcheck configurations must be identical between files"
           echo ""
-          echo "ERROR: Found $ERRORS critical differences in collector service"
+          echo "In docker-compose.yml, the collector healthcheck is:"
+          cat /tmp/main-health | sed 's/^/  /'
+          echo ""
+          echo "In swarm/docker-compose.swarm-collector.yml, the collector healthcheck is:"
+          cat /tmp/swarm-health | sed 's/^/  /'
+          echo ""
+          echo "TO FIX: Copy the healthcheck section from docker-compose.yml to swarm/docker-compose.swarm-collector.yml"
+          exit 1
+        fi
+        
+        # Compare environment variables (excluding HOSTNAME which is handled differently)
+        echo ""
+        echo "=== Checking environment variables ==="
+        sed -n '/^  collector:/,/^  [^ ]/p' docker-compose.yml | sed -n '/environment:/,/^    [^ ]/p' | grep "    - " | grep -v HOSTNAME | sort > /tmp/main-env
+        sed -n '/^  collector:/,/^  [^ ]/p' swarm/docker-compose.swarm-collector.yml | sed -n '/environment:/,/^    [^ ]/p' | grep "    - " | sort > /tmp/swarm-env
+        
+        if diff -q /tmp/main-env /tmp/swarm-env > /dev/null 2>&1; then
+          echo "✅ Environment variables match (excluding HOSTNAME)"
+        else
+          echo "❌ ERROR: Environment variables must match between files (except HOSTNAME)"
+          echo ""
+          echo "Environment variables that should be in swarm/docker-compose.swarm-collector.yml but are missing:"
+          comm -23 /tmp/main-env /tmp/swarm-env | sed 's/^/  + /'
+          echo ""
+          echo "Environment variables in swarm/docker-compose.swarm-collector.yml that shouldn't be there:"
+          comm -13 /tmp/main-env /tmp/swarm-env | sed 's/^/  - /'
+          echo ""
+          echo "TO FIX: Update the environment section in swarm/docker-compose.swarm-collector.yml to match docker-compose.yml (keep HOSTNAME as-is)"
+          exit 1
+        fi
+        
+        # Check ports (both should expose 33000 and 34320)
+        echo ""
+        echo "=== Checking port exposure ==="
+        MAIN_33000=$(sed -n '/^  collector:/,/^  [^ ]/p' docker-compose.yml | grep -c "33000")
+        MAIN_34320=$(sed -n '/^  collector:/,/^  [^ ]/p' docker-compose.yml | grep -c "34320")
+        SWARM_33000=$(sed -n '/^  collector:/,/^  [^ ]/p' swarm/docker-compose.swarm-collector.yml | grep -c "33000")
+        SWARM_34320=$(sed -n '/^  collector:/,/^  [^ ]/p' swarm/docker-compose.swarm-collector.yml | grep -c "34320")
+        
+        ERRORS=""
+        if [ "$SWARM_33000" -eq 0 ]; then
+          ERRORS="$ERRORS\n  - Port 33000 (Vector proxy endpoint) is missing"
+        fi
+        if [ "$SWARM_34320" -eq 0 ]; then
+          ERRORS="$ERRORS\n  - Port 34320 (Beyla metrics endpoint) is missing"
+        fi
+        
+        if [ -z "$ERRORS" ]; then
+          echo "✅ Both files expose required ports (33000, 34320)"
+        else
+          echo "❌ ERROR: Required ports are missing in swarm/docker-compose.swarm-collector.yml"
+          echo -e "$ERRORS"
+          echo ""
+          echo "TO FIX: Add the following to the ports section in swarm/docker-compose.swarm-collector.yml:"
+          echo "    ports:"
+          echo "      - target: 34320"
+          echo "        published: 34320"
+          echo "        protocol: tcp"
+          echo "        mode: host"
+          echo "      - target: 33000"
+          echo "        published: 33000"
+          echo "        protocol: tcp"
+          echo "        mode: host"
+          exit 1
+        fi
+        
+        # Check volumes (both should mount host and enrichment)
+        echo ""
+        echo "=== Checking volume mounts ==="
+        SWARM_HOST_MOUNT=$(sed -n '/^  collector:/,/^  [^ ]/p' swarm/docker-compose.swarm-collector.yml | grep -c "/host:ro")
+        SWARM_ENRICHMENT=$(sed -n '/^  collector:/,/^  [^ ]/p' swarm/docker-compose.swarm-collector.yml | grep -c "enrichment")
+        
+        ERRORS=""
+        if [ "$SWARM_HOST_MOUNT" -eq 0 ]; then
+          ERRORS="$ERRORS\n  - Host filesystem mount (/:/host:ro) is missing"
+        fi
+        if [ "$SWARM_ENRICHMENT" -eq 0 ]; then
+          ERRORS="$ERRORS\n  - Enrichment directory mount is missing"
+        fi
+        
+        if [ -z "$ERRORS" ]; then
+          echo "✅ Both required volume mounts are present"
+        else
+          echo "❌ ERROR: Required volume mounts are missing in swarm/docker-compose.swarm-collector.yml"
+          echo -e "$ERRORS"
+          echo ""
+          echo "TO FIX: Add the following to the volumes section in swarm/docker-compose.swarm-collector.yml:"
+          echo "    volumes:"
+          echo "      - /:/host:ro"
+          echo "      - /var/lib/better-stack/enrichment:/enrichment:rw"
           exit 1
         fi
         
         echo ""
-        echo "=== Comparing beyla services ==="
+        echo "=== Checking beyla service alignment ==="
         
         # Compare beyla images
-        MAIN_BEYLA_IMAGE=$(grep "image:" /tmp/main-beyla.yml | head -1 | awk '{print $2}')
-        SWARM_BEYLA_IMAGE=$(grep "image:" swarm/docker-compose.beyla.yml | head -1 | awk '{print $2}')
+        MAIN_BEYLA_IMAGE=$(grep -A1 "^  beyla:" docker-compose.yml | grep "image:" | awk '{print $2}')
+        SWARM_BEYLA_IMAGE=$(grep -A1 "^  beyla:" swarm/docker-compose.beyla.yml | grep "image:" | awk '{print $2}')
         
         if [ "$MAIN_BEYLA_IMAGE" != "$SWARM_BEYLA_IMAGE" ]; then
-          echo "ERROR: Beyla image mismatch"
+          echo "❌ ERROR: Beyla image mismatch"
           echo "  Main:  $MAIN_BEYLA_IMAGE"
           echo "  Swarm: $SWARM_BEYLA_IMAGE"
           exit 1
-        else
-          echo "✓ Both use beyla image: $MAIN_BEYLA_IMAGE"
+        fi
+        echo "✅ Both use beyla image: $MAIN_BEYLA_IMAGE"
+        
+        # Compare critical beyla configurations
+        echo ""
+        echo "=== Checking beyla critical settings ==="
+        
+        # Extract beyla configs for comparison
+        sed -n '/^  beyla:/,/^[^ ]/p' docker-compose.yml | grep -E "(privileged:|pid:|network_mode:|mem_limit:|GOMEMLIMIT)" > /tmp/main-beyla-critical
+        sed -n '/^  beyla:/,/^[^ ]/p' swarm/docker-compose.beyla.yml | grep -E "(privileged:|pid:|network_mode:|mem_limit:|GOMEMLIMIT)" > /tmp/swarm-beyla-critical
+        
+        # Check each critical setting
+        MISSING_SETTINGS=""
+        for setting in "privileged: true" "pid: host" "network_mode: host"; do
+          if ! grep -q "$setting" /tmp/swarm-beyla-critical; then
+            MISSING_SETTINGS="$MISSING_SETTINGS\n  - $setting"
+          fi
+        done
+        
+        # Check memory settings
+        if ! grep -q "mem_limit:" /tmp/swarm-beyla-critical; then
+          MISSING_SETTINGS="$MISSING_SETTINGS\n  - mem_limit: 1536m"
+        fi
+        if ! grep -q "GOMEMLIMIT" /tmp/swarm-beyla-critical; then
+          MISSING_SETTINGS="$MISSING_SETTINGS\n  - GOMEMLIMIT=1400MiB (in environment section)"
         fi
         
-        # Check critical beyla settings
-        echo ""
-        echo "Checking critical beyla settings..."
-        ERRORS=0
-        
-        for setting in "privileged: true" "pid: host" "network_mode: host" "mem_limit:" "GOMEMLIMIT"; do
-          if grep -q "$setting" /tmp/main-beyla.yml; then
-            echo -n "✓ Main has $setting"
-          else
-            echo -n "✗ Main missing $setting"
-            ERRORS=$((ERRORS + 1))
-          fi
-          
-          if grep -q "$setting" swarm/docker-compose.beyla.yml; then
-            echo " | ✓ Swarm has $setting"
-          else
-            echo " | ✗ Swarm missing $setting"
-            ERRORS=$((ERRORS + 1))
-          fi
-        done
-        
-        # Check beyla environment variables
-        echo ""
-        echo "Checking beyla environment variables..."
-        # Extract environment section more precisely - stop at next section
-        awk '/environment:/{f=1; next} f && /^[[:space:]]*[^[:space:]-]/{f=0} f && /^[[:space:]]*-/' /tmp/main-beyla.yml | sed 's/^[[:space:]]*//' | sort > /tmp/main-beyla-env
-        awk '/environment:/{f=1; next} f && /^[[:space:]]*[^[:space:]-]/{f=0} f && /^[[:space:]]*-/' swarm/docker-compose.beyla.yml | sed 's/^[[:space:]]*//' | sort > /tmp/swarm-beyla-env
-        
-        # Key environment variables that must be present in both
-        for var in "GOMEMLIMIT" "HOSTNAME" "OTEL_EXPORTER_OTLP_ENDPOINT" "BEYLA_BPF_CONTEXT_PROPAGATION" "ENABLE_DOCKERPROBE"; do
-          if grep -q "$var" /tmp/main-beyla-env && grep -q "$var" /tmp/swarm-beyla-env; then
-            echo "✓ Both have $var"
-          else
-            echo "✗ Missing $var in one of the configs"
-            ERRORS=$((ERRORS + 1))
-          fi
-        done
-        
-        if [ $ERRORS -gt 0 ]; then
+        if [ -z "$MISSING_SETTINGS" ]; then
+          echo "✅ All critical beyla settings are present"
+        else
+          echo "❌ ERROR: Critical beyla settings are missing in swarm/docker-compose.beyla.yml"
+          echo -e "$MISSING_SETTINGS"
           echo ""
-          echo "ERROR: Found $ERRORS critical differences"
+          echo "TO FIX: Add these settings to the beyla service in swarm/docker-compose.beyla.yml"
+          echo "Look at the beyla service in docker-compose.yml for the correct configuration"
           exit 1
         fi
         
