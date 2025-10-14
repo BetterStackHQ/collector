@@ -6,6 +6,7 @@ services:
     image: betterstack/collector:latest
     container_name: better-stack-collector
     restart: always
+    network_mode: host
     security_opt:
       - seccomp=collector-seccomp.json
     healthcheck:
