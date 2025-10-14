@@ -63,6 +63,7 @@ fi
 SSH_CMD="${SSH_CMD:-ssh}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 MOUNT_HOST_PATHS="${MOUNT_HOST_PATHS:-}"
+ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
 
 print_blue "Connecting to swarm manager: $MANAGER_NODE"
 [[ "$ACTION" != "install" ]] && print_blue "Action: $ACTION"
@@ -216,25 +217,15 @@ for NODE in $NODES; do
                 mkdir -p /var/lib/better-stack/enrichment
                 chmod 755 /var/lib/better-stack/enrichment
 
-                # Download beyla docker-compose configuration
-                echo "Downloading Beyla docker-compose configuration..."
-                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.beyla.yml \\
-                    -o /tmp/docker-compose.beyla.yml
-
-                # Update image tag if specified
-                if [[ -n "\${IMAGE_TAG:-}" ]]; then
-                    echo "Updating Beyla image tag to: \${IMAGE_TAG}"
-                    sed -i "s|image: betterstack/collector-beyla:latest|image: betterstack/collector-beyla:\${IMAGE_TAG}|" /tmp/docker-compose.beyla.yml
-                fi
-
-                # Start beyla container
-                echo "Starting Beyla container..."
+                # Use install.sh with COMPOSE_URL for beyla installation
+                echo "Installing Beyla using install.sh..."
+                export COMPOSE_URL="https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.beyla.yml"
                 export HOSTNAME=\$(hostname)
-                cd /tmp
-                HOSTNAME="\$HOSTNAME" \\
-                docker compose -p better-stack-beyla -f docker-compose.beyla.yml pull --policy always
-                HOSTNAME="\$HOSTNAME" \\
-                docker compose -p better-stack-beyla -f docker-compose.beyla.yml up -d --force-recreate
+                export IMAGE_TAG="${IMAGE_TAG:-latest}"
+                export ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
+                
+                # Download and run install.sh
+                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/install.sh | bash
 
                 echo "Checking deployment status..."
                 docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"
@@ -253,8 +244,8 @@ EOF
             if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
                 set -e
                 echo "Stopping and removing Better Stack Beyla..."
-                # Use project name to stop containers
-                docker compose -p better-stack-beyla down 2>/dev/null || true
+                # Use project name to stop containers - install.sh uses better-stack-collector
+                docker compose -p better-stack-collector down 2>/dev/null || true
                 # Also try to stop named container if it exists
                 docker stop better-stack-beyla 2>/dev/null || true
                 docker rm better-stack-beyla 2>/dev/null || true
@@ -275,7 +266,7 @@ EOF
                 set -e
                 echo "Stopping and removing Better Stack Beyla..."
                 # Use project name to stop containers
-                docker compose -p better-stack-beyla down 2>/dev/null || true
+                docker compose -p better-stack-collector down 2>/dev/null || true
                 # Also try to stop named container if it exists
                 docker stop better-stack-beyla 2>/dev/null || true
                 docker rm better-stack-beyla 2>/dev/null || true
@@ -290,25 +281,16 @@ EOF
                 mkdir -p /var/lib/better-stack/enrichment
                 chmod 755 /var/lib/better-stack/enrichment
 
-                # Download beyla docker-compose configuration
-                echo "Downloading Beyla docker-compose configuration..."
-                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.beyla.yml \\
-                    -o /tmp/docker-compose.beyla.yml
-
-                # Update image tag if specified
-                if [[ -n "\${IMAGE_TAG:-}" ]]; then
-                    echo "Updating Beyla image tag to: \${IMAGE_TAG}"
-                    sed -i "s|image: betterstack/collector-beyla:latest|image: betterstack/collector-beyla:\${IMAGE_TAG}|" /tmp/docker-compose.beyla.yml
-                fi
-
-                # Pull latest image and start container
-                echo "Pulling latest image and starting container..."
+                # Use install.sh with COMPOSE_URL for beyla installation
+                echo "Installing Beyla using install.sh..."
+                export COMPOSE_URL="https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.beyla.yml"
+                export COLLECTOR_SECRET="placeholder_for_beyla"
                 export HOSTNAME=\$(hostname)
-                cd /tmp
-                HOSTNAME="\$HOSTNAME" \\
-                docker compose -p better-stack-beyla -f docker-compose.beyla.yml pull --policy always
-                HOSTNAME="\$HOSTNAME" \\
-                docker compose -p better-stack-beyla -f docker-compose.beyla.yml up -d --force-recreate
+                export IMAGE_TAG="${IMAGE_TAG:-latest}"
+                export ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
+                
+                # Download and run install.sh
+                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/install.sh | bash
 
                 echo "Checking deployment status..."
                 docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"

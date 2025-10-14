@@ -104,8 +104,20 @@ cd "$TEMP_DIR"
 # Clean up on exit
 trap "rm -rf $TEMP_DIR" EXIT
 
-# Download appropriate compose file based on Docker version
-if [ "$USE_SECCOMP" = true ]; then
+# Download appropriate compose file based on COMPOSE_URL or Docker version
+if [ -n "$COMPOSE_URL" ]; then
+    # Use custom compose URL if provided
+    echo "Using custom compose file from: $COMPOSE_URL"
+    curl -sSL "$COMPOSE_URL" -o docker-compose.yml
+    
+    # If using seccomp and custom URL, try to download seccomp profile from same location
+    if [ "$USE_SECCOMP" = true ]; then
+        SECCOMP_URL="${COMPOSE_URL%/*}/collector-seccomp.json"
+        echo "Attempting to download seccomp profile from: $SECCOMP_URL"
+        curl -sSL "$SECCOMP_URL" -o collector-seccomp.json 2>/dev/null || \
+            echo "Warning: Could not download seccomp profile from custom location"
+    fi
+elif [ "$USE_SECCOMP" = true ]; then
     # For older Docker versions, use the seccomp-enabled compose file
     curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/docker-compose.seccomp.yml \
         -o docker-compose.yml
