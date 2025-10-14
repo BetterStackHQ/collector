@@ -17,6 +17,7 @@ services:
       start_period: 60s
       retries: 3
     environment:
+      - HOSTNAME: "{{.Node.Hostname}}"
       - COLLECTOR_SECRET
       - BASE_URL
       - CLUSTER_COLLECTOR

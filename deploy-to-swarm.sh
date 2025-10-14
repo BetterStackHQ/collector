@@ -420,7 +420,6 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]]; then
         export COLLECTOR_SECRET="$COLLECTOR_SECRET"
         export BASE_URL="${BASE_URL:-https://telemetry.betterstack.com}"
         export CLUSTER_COLLECTOR="${CLUSTER_COLLECTOR:-}"
-        export HOSTNAME="${HOSTNAME:-}"
         export PROXY_PORT="${PROXY_PORT:-}"
         
         # Deploy with environment variables
