@@ -180,6 +180,12 @@ HOSTNAME="$HOSTNAME" \
 PROXY_PORT="$PROXY_PORT" \
     $COMPOSE_CMD -p better-stack-collector pull
 
+if [ "$COMPOSE_CMD" = "docker-compose" ]; then
+    # On docker-compose v1, try to stop and remove the container first with a 90s grace period
+    # This is a workaround for a bug in docker-compose v1 where the container stop grace period is not respected
+    $COMPOSE_CMD -p better-stack-collector stop -t 90 || true
+fi
+
 # Run containers
 COLLECTOR_SECRET="$COLLECTOR_SECRET" \
 BASE_URL="$BASE_URL" \
