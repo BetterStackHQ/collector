@@ -43,7 +43,7 @@ services:
     restart: always
     init: true
     stop_signal: SIGTERM
-    stop_grace_period: 190s
+    stop_grace_period: 90s
     privileged: true
     pid: host
     network_mode: host
