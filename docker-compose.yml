@@ -12,7 +12,7 @@ services:
       interval: 30s
       timeout: 10s
       start_period: 60s
-      retries: 5
+      retries: 3
     environment:
       - COLLECTOR_SECRET
       - BASE_URL
