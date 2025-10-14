@@ -32,7 +32,13 @@ services:
       - /var/lib/better-stack/enrichment:/enrichment:rw
     # Networks will be added dynamically by deploy-to-swarm.sh
     ports:
-      - "34320:34320" # Beyla metrics endpoint
-      - "33000:33000" # Vector proxy endpoint
+      - target: 34320
+        published: 34320
+        protocol: tcp
+        mode: host  # Only publish on the node where task is running
+      - target: 33000
+        published: 33000
+        protocol: tcp
+        mode: host  # Only publish on the node where task is running
 
 # Networks will be added dynamically by deploy-to-swarm.sh
