@@ -49,7 +49,7 @@ jobs:
             type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             # For main branch, tag as canary (public repo)
             type=raw,value=canary,enable=${{ github.ref == 'refs/heads/main' }}
-            # For pull requests, tag as pr-number (private repo)
+            # For pull requests, tag as pr-number (public repo)
             type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ github.event_name == 'pull_request' }}
 
       - name: Log in to Docker Hub
@@ -105,7 +105,7 @@ jobs:
             type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             # For main branch, tag as canary (public repo)
             type=raw,value=canary,enable=${{ github.ref == 'refs/heads/main' }}
-            # For pull requests, tag as pr-number (private repo)
+            # For pull requests, tag as pr-number (public repo)
             type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ github.event_name == 'pull_request' }}
 
       - name: Log in to Docker Hub

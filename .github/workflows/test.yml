@@ -52,6 +52,7 @@ jobs:
         echo "✓ Diff is exactly 3 lines as expected"
 
   # Check that swarm docker-compose files don't diverge too much from the main ones
+  # Best effort, completely Claude generated check. The files will drift if we don't have it. But feel free to redo/replace as needed.
   swarm-compose-check:
     runs-on: ubuntu-latest
 

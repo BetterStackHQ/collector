@@ -1,8 +1,6 @@
 # Add Node Agent to the image
 FROM ghcr.io/coroot/coroot-node-agent:1.25.0 AS node-agent
 
-# Cluster agent removed - now runs in a separate container
-
 # Get Beyla files from official image
 FROM grafana/beyla:2.7.3 AS beyla-source
 

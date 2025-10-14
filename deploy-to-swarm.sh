@@ -1,5 +1,15 @@
 #!/bin/bash
 
+# This script deploys Better Stack Collector across a Docker Swarm cluster by installing Beyla containers
+# on each node via docker-compose and deploying the collector as a global swarm service.
+#
+# What it does:
+# • Connects to swarm manager node via SSH
+# • Installs Beyla on each node for eBPF-based tracing and metrics collection
+# • Deploys collector as a global swarm service (one instance per node)
+# • Automatically detects and attaches to overlay networks for service discovery
+# • Handles install, uninstall, and force upgrade operations
+
 set -uo pipefail
 
 # Color support functions
@@ -109,47 +119,6 @@ NODE_COUNT=$(echo "$NODES" | grep -c .)
 print_green "✓ Found $NODE_COUNT nodes:"
 echo "$NODES"
 echo
-
-# Test SSH connectivity to all nodes before proceeding
-# print_blue "Testing SSH connectivity to all nodes..."
-# FAILED_NODES=""
-# NODE_INDEX=0
-# for NODE in $NODES; do
-#     ((NODE_INDEX++))
-#
-#     # Skip nodes before RETRY_FROM for SSH check too
-#     if [[ $NODE_INDEX -lt $RETRY_FROM ]]; then
-#         echo "⏭ $NODE - skipped"
-#         continue
-#     fi
-#
-#     # Extract user from MANAGER_NODE if present
-#     if [[ "$MANAGER_NODE" == *"@"* ]]; then
-#         SSH_USER="${MANAGER_NODE%%@*}"
-#         NODE_TARGET="${SSH_USER}@${NODE}"
-#     else
-#         NODE_TARGET="$NODE"
-#     fi
-#
-#     if ${SSH_CMD} "$NODE_TARGET" "echo 'SSH OK'" </dev/null >/dev/null 2>&1; then
-#         echo "✓ $NODE"
-#     else
-#         echo "✗ $NODE - SSH connection failed"
-#         FAILED_NODES="$FAILED_NODES $NODE"
-#     fi
-# done
-
-# if [[ -n "$FAILED_NODES" ]]; then
-#     print_red "✗ Failed to connect to some nodes:$FAILED_NODES"
-#     echo
-#     print_blue "Please ensure SSH access is configured for all swarm nodes."
-#     exit 1
-# fi
-
-print_green "✓ SSH connectivity confirmed for all nodes"
-echo
-
-# Removed overlay network creation - collector will attach to existing networks
 
 # Deploy beyla to each node first (this creates the enrichment directories)
 CURRENT=0
@@ -481,3 +450,15 @@ EOF
         # The collector will be redeployed with proper network configuration
         ;;
 esac
+
+echo
+print_blue "ℹ️  Note: Collector is deployed as a Docker Swarm service, while Beyla runs as a docker-compose service on each node."
+echo
+echo "Quick status checks:"
+echo "  • Check collector status from any manager node:"
+echo "    ${BOLD}docker service ls | grep better-stack${RESET}"
+echo "    ${BOLD}docker service ps better-stack_collector${RESET}"
+echo
+echo "  • Check beyla status on a specific node:"
+echo "    ${BOLD}ssh user@node 'docker ps --filter \"name=better-stack-beyla\" --format \"table {{.Names}}\\t{{.Status}}\"'${RESET}"
+echo
