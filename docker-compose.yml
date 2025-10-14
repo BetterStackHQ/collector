@@ -12,7 +12,7 @@ services:
       interval: 30s
       timeout: 10s
       start_period: 60s
-      retries: 3
+      retries: 5
     environment:
       - COLLECTOR_SECRET
       - BASE_URL
@@ -22,6 +22,7 @@ services:
       - HOSTNAME
       # Optional proxy port for upstream proxy mode
       - PROXY_PORT
+      - MY_NEW_ENV=lol
     volumes:
       # Mount host root filesystem to enable reading system metrics, logs (including logs outside /var/log), and container data
       # Can be customized via MOUNT_HOST_PATHS environment variable in install.sh to restrict access to specific paths
@@ -43,7 +44,7 @@ services:
     restart: always
     init: true
     stop_signal: SIGTERM
-    stop_grace_period: 90s
+    stop_grace_period: 190s
     privileged: true
     pid: host
     network_mode: host
