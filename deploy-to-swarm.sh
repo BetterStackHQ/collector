@@ -223,6 +223,7 @@ for NODE in $NODES; do
                 export HOSTNAME=\$(hostname)
                 export IMAGE_TAG="${IMAGE_TAG:-latest}"
                 export ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
+                export MOUNT_HOST_PATHS="${MOUNT_HOST_PATHS:-}"
                 
                 # Download and run install.sh
                 curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/install.sh | bash
@@ -288,9 +289,10 @@ EOF
                 export HOSTNAME=\$(hostname)
                 export IMAGE_TAG="${IMAGE_TAG:-latest}"
                 export ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
+                export MOUNT_HOST_PATHS="${MOUNT_HOST_PATHS:-}"
                 
                 # Download and run install.sh
-                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/install.sh | bash
+                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/install.sh | bash
 
                 echo "Checking deployment status..."
                 docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"
