@@ -227,7 +227,7 @@ for NODE in $NODES; do
                 HOSTNAME="\$HOSTNAME" \\
                 docker compose -p better-stack-beyla -f docker-compose.beyla.yml pull
                 HOSTNAME="\$HOSTNAME" \\
-                docker compose -p better-stack-beyla -f docker-compose.beyla.yml up -d
+                docker compose -p better-stack-beyla -f docker-compose.beyla.yml up -d --force-recreate
 
                 echo "Checking deployment status..."
                 docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"
@@ -295,7 +295,7 @@ EOF
                 HOSTNAME="\$HOSTNAME" \\
                 docker compose -p better-stack-beyla -f docker-compose.beyla.yml pull
                 HOSTNAME="\$HOSTNAME" \\
-                docker compose -p better-stack-beyla -f docker-compose.beyla.yml up -d
+                docker compose -p better-stack-beyla -f docker-compose.beyla.yml up -d --force-recreate
 
                 echo "Checking deployment status..."
                 docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"
