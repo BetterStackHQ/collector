@@ -18,7 +18,6 @@ services:
       start_period: 60s
       retries: 3
     environment:
-      - INSTALLED_AS=swarm
       - COLLECTOR_SECRET
       - BASE_URL
       - CLUSTER_COLLECTOR

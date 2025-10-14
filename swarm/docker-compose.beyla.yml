@@ -28,7 +28,6 @@ services:
       start_period: 60s
       retries: 2
     environment:
-      - INSTALLED_AS=swarm
       # Set Go memory limit to slightly less than container limit
       - GOMEMLIMIT=1400MiB
       # Pass hostname of host machine to Beyla; needs `export HOSTNAME` before running `docker compose up`

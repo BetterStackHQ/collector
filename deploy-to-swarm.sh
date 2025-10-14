@@ -201,7 +201,7 @@ for NODE in $NODES; do
                 export IMAGE_TAG="${IMAGE_TAG:-latest}"
                 export ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
                 export MOUNT_HOST_PATHS="${MOUNT_HOST_PATHS:-}"
-                
+
                 # Download and run install.sh
                 curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/install.sh | bash
 
@@ -267,7 +267,7 @@ EOF
                 export IMAGE_TAG="${IMAGE_TAG:-latest}"
                 export ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
                 export MOUNT_HOST_PATHS="${MOUNT_HOST_PATHS:-}"
-                
+
                 # Download and run install.sh
                 curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/install.sh | bash
 
@@ -397,7 +397,7 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]]; then
 
         # Deploy collector to swarm
         echo "Deploying collector to swarm..."
-        
+
         # For force_upgrade, we need to remove the existing stack first to ensure network changes are applied
         if [[ "$ACTION" == "force_upgrade" ]]; then
             echo "Force upgrade mode: Removing existing stack to ensure clean deployment..."
@@ -415,13 +415,13 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]]; then
             done
             echo "Stack removed. Proceeding with deployment..."
         fi
-        
+
         # Export environment variables for the stack
         export COLLECTOR_SECRET="$COLLECTOR_SECRET"
         export BASE_URL="${BASE_URL:-https://telemetry.betterstack.com}"
         export CLUSTER_COLLECTOR="${CLUSTER_COLLECTOR:-}"
         export PROXY_PORT="${PROXY_PORT:-}"
-        
+
         # Deploy with environment variables
         COLLECTOR_SECRET="$COLLECTOR_SECRET" \
         BASE_URL="${BASE_URL:-https://telemetry.betterstack.com}" \
