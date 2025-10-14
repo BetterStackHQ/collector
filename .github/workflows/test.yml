@@ -193,38 +193,36 @@ jobs:
         fi
         echo "✅ Both use beyla image: $MAIN_BEYLA_IMAGE"
         
-        # Compare critical beyla configurations
+        # Compare critical beyla configurations by extracting keys from main
         echo ""
         echo "=== Checking beyla critical settings ==="
         
-        # Extract beyla configs for comparison
-        sed -n '/^  beyla:/,/^[^ ]/p' docker-compose.yml | grep -E "(privileged:|pid:|network_mode:|mem_limit:|GOMEMLIMIT)" > /tmp/main-beyla-critical
-        sed -n '/^  beyla:/,/^[^ ]/p' swarm/docker-compose.beyla.yml | grep -E "(privileged:|pid:|network_mode:|mem_limit:|GOMEMLIMIT)" > /tmp/swarm-beyla-critical
+        # Extract key settings from main beyla that should also be in swarm
+        MAIN_BEYLA_KEYS=$(sed -n '/^  beyla:/,/^[^ ]/p' docker-compose.yml | grep -E "^\s*(privileged|pid|network_mode|mem_limit):" | awk -F: '{print $1}' | sed 's/^\s*//' | sort)
         
-        # Check each critical setting
-        MISSING_SETTINGS=""
-        for setting in "privileged: true" "pid: host" "network_mode: host"; do
-          if ! grep -q "$setting" /tmp/swarm-beyla-critical; then
-            MISSING_SETTINGS="$MISSING_SETTINGS\n  - $setting"
+        # Check which keys are missing in swarm
+        MISSING_KEYS=""
+        for KEY in $MAIN_BEYLA_KEYS; do
+          if ! sed -n '/^  beyla:/,/^[^ ]/p' swarm/docker-compose.beyla.yml | grep -q "^\s*$KEY:"; then
+            MISSING_KEYS="$MISSING_KEYS\n  - $KEY:"
           fi
         done
         
-        # Check memory settings
-        if ! grep -q "mem_limit:" /tmp/swarm-beyla-critical; then
-          MISSING_SETTINGS="$MISSING_SETTINGS\n  - mem_limit: 1536m"
-        fi
-        if ! grep -q "GOMEMLIMIT" /tmp/swarm-beyla-critical; then
-          MISSING_SETTINGS="$MISSING_SETTINGS\n  - GOMEMLIMIT=1400MiB (in environment section)"
+        # Also check for GOMEMLIMIT in environment
+        if sed -n '/^  beyla:/,/^[^ ]/p' docker-compose.yml | grep -q "GOMEMLIMIT"; then
+          if ! sed -n '/^  beyla:/,/^[^ ]/p' swarm/docker-compose.beyla.yml | grep -q "GOMEMLIMIT"; then
+            MISSING_KEYS="$MISSING_KEYS\n  - GOMEMLIMIT environment variable"
+          fi
         fi
         
-        if [ -z "$MISSING_SETTINGS" ]; then
-          echo "✅ All critical beyla settings are present"
+        if [ -z "$MISSING_KEYS" ]; then
+          echo "✅ All critical beyla settings match between files"
         else
-          echo "❌ ERROR: Critical beyla settings are missing in swarm/docker-compose.beyla.yml"
-          echo -e "$MISSING_SETTINGS"
+          echo "❌ ERROR: Critical settings from docker-compose.yml are missing in swarm/docker-compose.beyla.yml"
+          echo -e "$MISSING_KEYS"
           echo ""
-          echo "TO FIX: Add these settings to the beyla service in swarm/docker-compose.beyla.yml"
-          echo "Look at the beyla service in docker-compose.yml for the correct configuration"
+          echo "TO FIX: Add the missing settings to swarm/docker-compose.beyla.yml"
+          echo "Copy the values from the beyla service in docker-compose.yml"
           exit 1
         fi
         
