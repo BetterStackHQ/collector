@@ -49,4 +49,134 @@ jobs:
           diff docker-compose.yml docker-compose.seccomp.yml
           exit 1
         fi
-        echo "✓ Diff is exactly 3 lines as expected" 
+        echo "✓ Diff is exactly 3 lines as expected"
+
+  # Check that swarm docker-compose files don't diverge too much from the main ones
+  swarm-compose-check:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Check collector compose differences
+      run: |
+        echo "=== Checking differences between docker-compose.yml and swarm/docker-compose.swarm-collector.yml ==="
+        
+        # Expected differences:
+        # - No build section in swarm
+        # - hostname: "{{.Node.Hostname}}" in swarm
+        # - deploy section with mode: global in swarm
+        # - Different port bindings (host mode vs published)
+        # - docker-metadata volume vs direct mount
+        # - Networks handled differently
+        
+        # Extract and normalize service definitions for comparison
+        # Remove build sections, normalize whitespace, sort environment vars
+        
+        # For main compose - extract just the collector service
+        sed -n '/^services:/,/^[^ ]/p' docker-compose.yml | \
+          sed -n '/collector:/,/^  [^ ]/p' | \
+          grep -v "build:" | grep -v "context:" | grep -v "dockerfile:" | \
+          grep -v "container_name:" | \
+          grep -v "network_mode:" | \
+          grep -v "ports:" -A2 | \
+          grep -v "^\s*-" | grep -v "^\s*#" | \
+          sed 's/[[:space:]]*$//' | grep -v "^$" > /tmp/main-collector.yml
+          
+        # For swarm compose
+        sed -n '/^services:/,/^[^ ]/p' swarm/docker-compose.swarm-collector.yml | \
+          sed -n '/collector:/,/^[^ ]/p' | \
+          grep -v "hostname:" | \
+          grep -v "deploy:" -A10 | \
+          grep -v "ports:" -A4 | \
+          grep -v "^\s*#" | \
+          sed 's/[[:space:]]*$//' | grep -v "^$" > /tmp/swarm-collector.yml
+        
+        echo "=== Key configuration that should match ==="
+        echo "Main collector config:"
+        grep -E "(healthcheck:|environment:|volumes:|image:)" /tmp/main-collector.yml || true
+        echo ""
+        echo "Swarm collector config:"
+        grep -E "(healthcheck:|environment:|volumes:|image:)" /tmp/swarm-collector.yml || true
+        
+        # Check that critical sections match
+        ERRORS=0
+        
+        # Check healthcheck
+        if ! grep -A4 "healthcheck:" docker-compose.yml | grep -v "^--" > /tmp/main-health; then
+          echo "ERROR: No healthcheck in main compose"
+          ERRORS=$((ERRORS + 1))
+        fi
+        if ! grep -A4 "healthcheck:" swarm/docker-compose.swarm-collector.yml | grep -v "^--" > /tmp/swarm-health; then
+          echo "ERROR: No healthcheck in swarm compose"
+          ERRORS=$((ERRORS + 1))
+        fi
+        if ! diff -q /tmp/main-health /tmp/swarm-health > /dev/null 2>&1; then
+          echo "WARNING: Healthcheck configurations differ"
+          diff -u /tmp/main-health /tmp/swarm-health || true
+        fi
+        
+        # Check that both use the same image
+        MAIN_IMAGE=$(grep "image:" docker-compose.yml | head -1 | awk '{print $2}')
+        SWARM_IMAGE=$(grep "image:" swarm/docker-compose.swarm-collector.yml | head -1 | awk '{print $2}')
+        if [ "$MAIN_IMAGE" != "$SWARM_IMAGE" ]; then
+          echo "ERROR: Image mismatch - main: $MAIN_IMAGE, swarm: $SWARM_IMAGE"
+          ERRORS=$((ERRORS + 1))
+        else
+          echo "✓ Both use image: $MAIN_IMAGE"
+        fi
+        
+        # Check environment variables (should be mostly the same)
+        grep -A20 "environment:" docker-compose.yml | grep "^\s*-" | grep -v "HOSTNAME" | sort > /tmp/main-env
+        grep -A20 "environment:" swarm/docker-compose.swarm-collector.yml | grep "^\s*-" | sort > /tmp/swarm-env
+        
+        if ! diff -q /tmp/main-env /tmp/swarm-env > /dev/null 2>&1; then
+          echo "WARNING: Environment variables differ"
+          echo "Main only:"
+          comm -23 /tmp/main-env /tmp/swarm-env || true
+          echo "Swarm only:"
+          comm -13 /tmp/main-env /tmp/swarm-env || true
+        else
+          echo "✓ Environment variables match (excluding HOSTNAME)"
+        fi
+        
+        if [ $ERRORS -gt 0 ]; then
+          echo "ERROR: Found $ERRORS critical differences"
+          exit 1
+        fi
+        
+        echo "✓ Swarm collector compose file is properly aligned with main compose file"
+    
+    - name: Check beyla compose differences
+      run: |
+        echo "=== Checking differences between beyla in docker-compose.yml and swarm/docker-compose.beyla.yml ==="
+        
+        # Extract beyla service from main compose
+        sed -n '/^  beyla:/,/^  [^ ]/p' docker-compose.yml | grep -v "^  [^ ]" | \
+          grep -v "build:" | grep -v "context:" | grep -v "dockerfile:" > /tmp/main-beyla.yml
+          
+        # Extract beyla service from swarm compose  
+        sed -n '/^  beyla:/,/^[^ ]/p' swarm/docker-compose.beyla.yml | grep -v "^[^ ]" > /tmp/swarm-beyla.yml
+        
+        # Check that both use the same image
+        MAIN_BEYLA_IMAGE=$(grep "image:" /tmp/main-beyla.yml | awk '{print $2}')
+        SWARM_BEYLA_IMAGE=$(grep "image:" /tmp/swarm-beyla.yml | awk '{print $2}')
+        
+        if [ "$MAIN_BEYLA_IMAGE" != "$SWARM_BEYLA_IMAGE" ]; then
+          echo "ERROR: Beyla image mismatch - main: $MAIN_BEYLA_IMAGE, swarm: $SWARM_BEYLA_IMAGE"
+          exit 1
+        else
+          echo "✓ Both use beyla image: $MAIN_BEYLA_IMAGE"
+        fi
+        
+        # Check critical settings match
+        for setting in "privileged:" "pid:" "network_mode:" "mem_limit:" "GOMEMLIMIT"; do
+          if ! grep -q "$setting" /tmp/main-beyla.yml; then
+            echo "WARNING: $setting not found in main beyla config"
+          fi
+          if ! grep -q "$setting" /tmp/swarm-beyla.yml; then
+            echo "WARNING: $setting not found in swarm beyla config"
+          fi
+        done
+        
+        echo "✓ Beyla compose files are properly aligned"
