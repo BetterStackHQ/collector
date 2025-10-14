@@ -208,6 +208,53 @@ adjust_compose_volumes() {
   fi
 }
 
+docker_v1_compatibility() {
+  local file="$1"
+  local tmpfile cleaned
+  tmpfile="$(mktemp)"
+  cleaned="$(mktemp)"
+
+  awk '
+    BEGIN { in_build = 0; build_indent = 0 }
+    /^[[:space:]]*#/ { next }
+    {
+      if ($0 ~ /^[[:space:]]*build:[[:space:]]*$/) {
+        match($0, /^[[:space:]]*/)
+        build_indent = RLENGTH
+        in_build = 1
+        next
+      }
+
+      if (in_build) {
+        match($0, /^[[:space:]]*/)
+        current_indent = RLENGTH
+
+        if (current_indent > build_indent) {
+          next
+        } else {
+          in_build = 0
+        }
+      }
+
+      sub(/ #[[:space:]].*$/, "")
+      sub(/[[:space:]]+$/, "")
+      print
+    }
+  ' "$file" > "$cleaned"
+
+  if [ "$(sed -n '1p' "$cleaned")" != 'version: "2.4"' ]; then
+    {
+      echo 'version: "2.4"'
+      cat "$cleaned"
+    } > "$tmpfile"
+  else
+    cat "$cleaned" > "$tmpfile"
+  fi
+
+  mv "$tmpfile" "$file"
+  rm -f "$cleaned"
+}
+
 adjust_compose_ports docker-compose.yml
 adjust_compose_volumes docker-compose.yml
 
@@ -215,6 +262,10 @@ adjust_compose_volumes docker-compose.yml
 if [ -n "$IMAGE_TAG" ]; then
     echo "Replacing :latest with :$IMAGE_TAG in compose file"
     adjust_image_tag docker-compose.yml "$IMAGE_TAG"
+fi
+
+if [ "$COMPOSE_CMD" = "docker-compose" ]; then
+    docker_v1_compatibility docker-compose.yml
 fi
 
 # Pull images first
@@ -239,4 +290,4 @@ CLUSTER_COLLECTOR="$CLUSTER_COLLECTOR" \
 ENABLE_DOCKERPROBE="$ENABLE_DOCKERPROBE" \
 HOSTNAME="$HOSTNAME" \
 PROXY_PORT="$PROXY_PORT" \
-    $COMPOSE_CMD -p better-stack-collector up -d
+    $COMPOSE_CMD -p better-stack-collector up -d --no-build
