@@ -68,6 +68,9 @@ fi
 PROXY_PORT="${PROXY_PORT:-}"
 USE_TLS="${USE_TLS:-}"
 
+# Optional custom host mount paths (comma-separated)
+MOUNT_HOST_PATHS="${MOUNT_HOST_PATHS:-}"
+
 # Validate PROXY_PORT if set
 if [ -n "$PROXY_PORT" ]; then
     if ! [[ "$PROXY_PORT" =~ ^[0-9]+$ ]]; then
@@ -163,7 +166,50 @@ adjust_image_tag() {
   mv "$tmpfile" "$file"
 }
 
+# Adjust volume mounts based on MOUNT_HOST_PATHS environment variable
+# If MOUNT_HOST_PATHS is set, replace the default /:/host:ro mount with specific paths
+adjust_compose_volumes() {
+  local file="$1"
+  local tmpfile
+  tmpfile="$(mktemp)"
+  local mount_tmpfile
+  mount_tmpfile="$(mktemp)"
+
+  if [ -n "$MOUNT_HOST_PATHS" ]; then
+    # Parse comma-separated paths and write to temporary file
+    IFS=',' read -ra PATHS <<< "$MOUNT_HOST_PATHS"
+    for path in "${PATHS[@]}"; do
+      # Trim whitespace
+      path=$(echo "$path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      # Skip empty paths
+      if [ -n "$path" ]; then
+        # Remove trailing slash if present
+        path="${path%/}"
+        echo "      - ${path}:/host${path}:ro" >> "$mount_tmpfile"
+      fi
+    done
+
+    # Replace the /:/host:ro line with custom mount lines from file
+    awk -v mounts_file="$mount_tmpfile" '
+      {
+        # Replace the /:/host:ro mount with custom paths
+        if ($0 ~ /^[[:space:]]*- \/:\/host:ro[[:space:]]*$/) {
+          while ((getline line < mounts_file) > 0) {
+            print line
+          }
+          close(mounts_file)
+        } else {
+          print $0
+        }
+      }
+    ' "$file" > "$tmpfile"
+    mv "$tmpfile" "$file"
+    rm -f "$mount_tmpfile"
+  fi
+}
+
 adjust_compose_ports docker-compose.yml
+adjust_compose_volumes docker-compose.yml
 
 # Replace :latest tag if IMAGE_TAG is set
 if [ -n "$IMAGE_TAG" ]; then
@@ -179,6 +225,12 @@ ENABLE_DOCKERPROBE="$ENABLE_DOCKERPROBE" \
 HOSTNAME="$HOSTNAME" \
 PROXY_PORT="$PROXY_PORT" \
     $COMPOSE_CMD -p better-stack-collector pull
+
+if [ "$COMPOSE_CMD" = "docker-compose" ]; then
+    # On docker-compose v1, try to stop and remove the container first with a 90s grace period
+    # This is a workaround for a bug in docker-compose v1 where the container stop grace period is not respected
+    $COMPOSE_CMD -p better-stack-collector stop -t 90 || true
+fi
 
 # Run containers
 COLLECTOR_SECRET="$COLLECTOR_SECRET" \

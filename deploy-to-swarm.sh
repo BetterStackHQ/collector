@@ -62,6 +62,7 @@ fi
 # Use SSH_CMD from environment or default to ssh
 SSH_CMD="${SSH_CMD:-ssh}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
+MOUNT_HOST_PATHS="${MOUNT_HOST_PATHS:-}"
 
 print_blue "Connecting to swarm manager: $MANAGER_NODE"
 [[ "$ACTION" != "install" ]] && print_blue "Action: $ACTION"

@@ -108,6 +108,9 @@ Logs available in `/var/log/supervisor/*` in each container
 - `INGESTING_HOST`, `SOURCE_TOKEN` - Required for test server
 - `PROXY_PORT` (optional) - Host port for upstream proxy (cannot be 80 when USE_TLS is set, cannot be 33000, 34320, or 39090)
 - `USE_TLS` (optional) - Indicates TLS should be used; when set, port 80 will be exposed for ACME validation. Only used by install.sh.
+- `MOUNT_HOST_PATHS` (optional) - Comma-separated list of host paths to mount instead of the default `/:/host:ro`. Each path will be mounted at `/host<path>:ro` inside the container. Useful for restricting filesystem access in security-sensitive or compliance-required environments.
+  - Example: `MOUNT_HOST_PATHS="/var/log,/etc"` creates mounts: `/var/log:/host/var/log:ro` and `/etc:/host/etc:ro`
+  - If not set, the default mount `/:/host:ro` is used (entire host filesystem)
 
 ### TLS Certificate Management (Certbot)
 
