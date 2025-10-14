@@ -198,7 +198,7 @@ jobs:
         echo "=== Checking beyla critical settings ==="
         
         # Extract key settings from main beyla that should also be in swarm
-        MAIN_BEYLA_KEYS=$(sed -n '/^  beyla:/,/^[^ ]/p' docker-compose.yml | grep -E "^\s*(privileged|pid|network_mode|mem_limit|init|stop_signal|stop_grace_period):" | awk -F: '{print $1}' | sed 's/^\s*//' | sort)
+        MAIN_BEYLA_KEYS=$(sed -n '/^  beyla:/,/^[^ ]/p' docker-compose.yml | grep -E "^\s*(privileged|pid|network_mode|mem_limit|init|stop_signal|stop_grace_period|restart):" | awk -F: '{print $1}' | sed 's/^\s*//' | sort)
         
         # Check which keys are missing in swarm
         MISSING_KEYS=""
@@ -207,6 +207,27 @@ jobs:
             MISSING_KEYS="$MISSING_KEYS\n  - $KEY:"
           fi
         done
+        
+        # Check beyla healthcheck configuration
+        echo ""
+        echo "Checking beyla healthcheck configuration..."
+        sed -n '/^  beyla:/,/^[^ ]/p' docker-compose.yml | sed -n '/healthcheck:/,/^    [^ ]/p' | grep -v "^  [^ ]" > /tmp/main-beyla-health
+        sed -n '/^  beyla:/,/^[^ ]/p' swarm/docker-compose.beyla.yml | sed -n '/healthcheck:/,/^    [^ ]/p' | grep -v "^  [^ ]" > /tmp/swarm-beyla-health
+        
+        if [ ! -s /tmp/main-beyla-health ]; then
+          echo "WARNING: No healthcheck in main beyla service"
+        elif [ ! -s /tmp/swarm-beyla-health ]; then
+          echo "❌ ERROR: Healthcheck missing in swarm/docker-compose.beyla.yml"
+          echo "TO FIX: Copy the healthcheck section from docker-compose.yml beyla service"
+          exit 1
+        elif ! diff -q /tmp/main-beyla-health /tmp/swarm-beyla-health > /dev/null 2>&1; then
+          echo "❌ ERROR: Beyla healthcheck configurations differ"
+          echo "Differences:"
+          diff -u /tmp/main-beyla-health /tmp/swarm-beyla-health
+          echo ""
+          echo "TO FIX: Copy the healthcheck section from docker-compose.yml to swarm/docker-compose.beyla.yml"
+          exit 1
+        fi
         
         # Check for matching values on critical settings
         echo ""
