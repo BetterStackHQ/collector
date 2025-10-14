@@ -114,13 +114,13 @@ echo
 # NODE_INDEX=0
 # for NODE in $NODES; do
 #     ((NODE_INDEX++))
-#     
+#
 #     # Skip nodes before RETRY_FROM for SSH check too
 #     if [[ $NODE_INDEX -lt $RETRY_FROM ]]; then
 #         echo "⏭ $NODE - skipped"
 #         continue
 #     fi
-#     
+#
 #     # Extract user from MANAGER_NODE if present
 #     if [[ "$MANAGER_NODE" == *"@"* ]]; then
 #         SSH_USER="${MANAGER_NODE%%@*}"
@@ -128,7 +128,7 @@ echo
 #     else
 #         NODE_TARGET="$NODE"
 #     fi
-#     
+#
 #     if ${SSH_CMD} "$NODE_TARGET" "echo 'SSH OK'" </dev/null >/dev/null 2>&1; then
 #         echo "✓ $NODE"
 #     else
@@ -151,12 +151,10 @@ echo
 # Skip this if we're retrying from a specific node
 if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FROM" -eq 0 ]]; then
     print_blue "Creating overlay network..."
-    
+
     if $SSH_CMD "$MANAGER_NODE" "bash" <<'EOF'
         set -eu
-        
-        set -eu
-        
+
         # Create overlay network if it doesn't exist
         NETWORK_NAME="better_stack_collector_overlay"
         if ! docker network ls | grep -q "$NETWORK_NAME"; then
@@ -179,13 +177,13 @@ fi
 CURRENT=0
 for NODE in $NODES; do
     ((CURRENT++))
-    
+
     # Skip nodes before RETRY_FROM
     if [[ $CURRENT -lt $RETRY_FROM ]]; then
         print_blue "Skipping node: $NODE ($CURRENT/$NODE_COUNT) - already processed"
         continue
     fi
-    
+
     # Extract user from MANAGER_NODE if present
     if [[ "$MANAGER_NODE" == *"@"* ]]; then
         SSH_USER="${MANAGER_NODE%%@*}"
@@ -193,7 +191,7 @@ for NODE in $NODES; do
     else
         NODE_TARGET="$NODE"
     fi
-    
+
     case "$ACTION" in
         "install")
             print_blue "Installing on node: $NODE ($CURRENT/$NODE_COUNT)"
@@ -211,17 +209,17 @@ for NODE in $NODES; do
             if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
                 set -eu
                 echo "Setting up Better Stack Beyla..."
-                
+
                 # Create directory for enrichment data sharing
                 echo "Creating enrichment directory..."
                 mkdir -p /var/lib/better-stack/enrichment
                 chmod 755 /var/lib/better-stack/enrichment
-                
+
                 # Download beyla docker-compose configuration
                 echo "Downloading Beyla docker-compose configuration..."
                 curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.beyla.yml \\
                     -o /tmp/docker-compose.beyla.yml
-                
+
                 # Start beyla container
                 echo "Starting Beyla container..."
                 export HOSTNAME=\$(hostname)
@@ -243,7 +241,7 @@ EOF
                 exit 1
             fi
             ;;
-            
+
         "uninstall")
             if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
                 set -e
@@ -264,7 +262,7 @@ EOF
                 exit 1
             fi
             ;;
-            
+
         "force_upgrade")
             if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
                 set -e
@@ -274,22 +272,22 @@ EOF
                 # Also try to stop named container if it exists
                 docker stop better-stack-beyla 2>/dev/null || true
                 docker rm better-stack-beyla 2>/dev/null || true
-                
+
                 echo "Container removed. Waiting 3 seconds..."
                 sleep 3
-                
+
                 echo "Setting up Better Stack Beyla..."
-                
+
                 # Create directory for enrichment data sharing
                 echo "Creating enrichment directory..."
                 mkdir -p /var/lib/better-stack/enrichment
                 chmod 755 /var/lib/better-stack/enrichment
-                
+
                 # Download beyla docker-compose configuration
                 echo "Downloading Beyla docker-compose configuration..."
                 curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.beyla.yml \\
                     -o /tmp/docker-compose.beyla.yml
-                
+
                 # Pull latest image and start container
                 echo "Pulling latest image and starting container..."
                 export HOSTNAME=\$(hostname)
@@ -317,12 +315,12 @@ EOF
 done
 
 # Now deploy collector swarm service after all nodes have beyla (and enrichment directories)
-if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FROM" -eq 0 ]]; then
+if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]]; then
     print_blue "Deploying collector swarm service..."
-    
-    # Pass SWARM_NETWORKS and IMAGE_TAG to the remote script
-    if $SSH_CMD "$MANAGER_NODE" "SWARM_NETWORKS='${SWARM_NETWORKS:-}' IMAGE_TAG='${IMAGE_TAG:-latest}' bash" <<'EOF'
-        
+
+    # Pass SWARM_NETWORKS, IMAGE_TAG, and other environment variables to the remote script
+    if $SSH_CMD "$MANAGER_NODE" "ACTION='${ACTION}' SWARM_NETWORKS='${SWARM_NETWORKS:-}' IMAGE_TAG='${IMAGE_TAG:-latest}' COLLECTOR_SECRET='${COLLECTOR_SECRET}' BASE_URL='${BASE_URL:-}' CLUSTER_COLLECTOR='${CLUSTER_COLLECTOR:-}' PROXY_PORT='${PROXY_PORT:-}' bash" <<'EOF'
+
         # Determine which networks to attach collector to
         if [[ -n "$SWARM_NETWORKS" ]]; then
             # User specified networks - ensure better_stack_collector_overlay is included
@@ -333,18 +331,18 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FR
                 SELECTED_NETWORKS="$SWARM_NETWORKS"
             fi
         else
-            # Auto-detect overlay networks (excluding our own and ingress)
+            # Auto-detect overlay networks (excluding our own, ingress, and stack-created networks)
             echo "Auto-detecting swarm overlay networks..."
-            OVERLAY_NETWORKS=$(docker network ls --filter driver=overlay --filter scope=swarm --format "{{.Name}}" | grep -v "^better_stack_collector_overlay$" | grep -v "^ingress$" | sort)
-            
+            OVERLAY_NETWORKS=$(docker network ls --filter driver=overlay --filter scope=swarm --format "{{.Name}}" | grep -v "^better_stack_collector_overlay$" | grep -v "^ingress$" | grep -v "^better-stack_default$" | sort)
+
             if [[ -n "$OVERLAY_NETWORKS" ]]; then
                 # Count networks (not including better_stack_collector_overlay)
                 NETWORK_COUNT=$(echo "$OVERLAY_NETWORKS" | grep -c .)
-                
+
                 echo "Found $NETWORK_COUNT additional swarm overlay networks (excluding better_stack_collector_overlay):"
                 echo "$OVERLAY_NETWORKS" | sed 's/^/  - /'
                 echo
-                
+
                 if [[ $NETWORK_COUNT -gt 2 ]]; then
                     echo "ERROR: More than 2 additional swarm overlay networks found!"
                     echo "Please specify which networks to attach to using:"
@@ -354,7 +352,7 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FR
                     echo "  SWARM_NETWORKS=my_app_network,frontend_network $0"
                     exit 1
                 fi
-                
+
                 # Use all networks plus our own
                 ADDITIONAL_NETS=$(echo "$OVERLAY_NETWORKS" | paste -sd, -)
                 SELECTED_NETWORKS="better_stack_collector_overlay,$ADDITIONAL_NETS"
@@ -362,14 +360,14 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FR
                 # Only our network exists
                 SELECTED_NETWORKS="better_stack_collector_overlay"
             fi
-            
+
             echo "Will attach collector to networks: $SELECTED_NETWORKS"
         fi
-        
+
         # Export for use in compose file generation
         export SELECTED_NETWORKS
         echo "SELECTED_NETWORKS=$SELECTED_NETWORKS"
-        
+
         # Download and deploy collector to swarm
         echo "Downloading swarm compose file for collector..."
         # TODO: Update this URL to main branch once merged
@@ -378,21 +376,21 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FR
             echo "ERROR: Failed to download compose file"
             exit 1
         fi
-        
+
         # Update image tag
         sed -i "s|image: betterstack/collector:latest|image: betterstack/collector:${IMAGE_TAG}|" /tmp/docker-compose.swarm-collector.yml
-        
+
         # Modify the compose file to add selected networks
         echo "Configuring networks in compose file..."
-        
+
         # Replace the single network under services with our list
         # First, remove the existing networks section under the service
         sed -i '/^    networks:/,/^    ports:/{/^    networks:/d; /^        better_stack_collector_overlay:/,/^            - collector/d}' /tmp/docker-compose.swarm-collector.yml
-        
+
         # Add our networks after the volumes section
         # Find the line with the last volume entry and add networks after it
         awk -v networks="$SELECTED_NETWORKS" '
-        /^      - docker-metadata:\/enrichment:rw$/ { 
+        /^      - \/var\/lib\/better-stack\/enrichment:\/enrichment:rw$/ {
             print
             print "    networks:"
             split(networks, arr, ",")
@@ -408,11 +406,11 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FR
         { print }
         ' /tmp/docker-compose.swarm-collector.yml > /tmp/compose_temp.yml
         mv /tmp/compose_temp.yml /tmp/docker-compose.swarm-collector.yml
-        
+
         # Replace the networks section at the bottom
         # Remove everything after "networks:" line
         sed -i '/^networks:/,$d' /tmp/docker-compose.swarm-collector.yml
-        
+
         # Add the new networks section
         echo "networks:" >> /tmp/docker-compose.swarm-collector.yml
         IFS=','
@@ -421,23 +419,49 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FR
             echo "    external: true" >> /tmp/docker-compose.swarm-collector.yml
             echo "    name: $net" >> /tmp/docker-compose.swarm-collector.yml
         done
-        
+
         echo "Configured compose file with networks: $SELECTED_NETWORKS"
-        
-        # Debug: Show the generated compose file
-        echo "Generated compose file:"
-        echo "===================="
-        cat /tmp/docker-compose.swarm-collector.yml
-        echo "===================="
-        
+
         # Deploy collector to swarm
         echo "Deploying collector to swarm..."
-        docker stack deploy -c /tmp/docker-compose.swarm-collector.yml better-stack
         
+        # For force_upgrade, we need to remove the existing stack first to ensure network changes are applied
+        if [[ "$ACTION" == "force_upgrade" ]]; then
+            echo "Force upgrade mode: Removing existing stack to ensure clean deployment..."
+            docker stack rm better-stack 2>/dev/null || true
+            echo "Waiting for stack removal..."
+            # Wait for the stack to be fully removed
+            count=0
+            while docker service ls | grep -q "better-stack_"; do
+                if [ $count -gt 30 ]; then
+                    echo "Warning: Stack removal taking longer than expected"
+                    break
+                fi
+                sleep 1
+                ((count++))
+            done
+            echo "Stack removed. Proceeding with deployment..."
+        fi
+        
+        # Export environment variables for the stack
+        export COLLECTOR_SECRET="$COLLECTOR_SECRET"
+        export BASE_URL="${BASE_URL:-https://telemetry.betterstack.com}"
+        export CLUSTER_COLLECTOR="${CLUSTER_COLLECTOR:-}"
+        export HOSTNAME="${HOSTNAME:-}"
+        export PROXY_PORT="${PROXY_PORT:-}"
+        
+        # Deploy with environment variables
+        COLLECTOR_SECRET="$COLLECTOR_SECRET" \
+        BASE_URL="${BASE_URL:-https://telemetry.betterstack.com}" \
+        CLUSTER_COLLECTOR="${CLUSTER_COLLECTOR:-}" \
+        HOSTNAME="${HOSTNAME:-}" \
+        PROXY_PORT="${PROXY_PORT:-}" \
+        docker stack deploy -c /tmp/docker-compose.swarm-collector.yml better-stack
+
         # Wait briefly for collector service to start
         echo "Waiting for collector service to start..."
         sleep 5
-        
+
         echo "Collector service status:"
         docker service ls | grep better-stack || echo "No collector service found"
 EOF
@@ -448,9 +472,6 @@ EOF
         exit 1
     fi
     echo
-elif [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FROM" -gt 0 ]]; then
-    print_blue "Skipping collector swarm deployment (RETRY_FROM=$RETRY_FROM)"
-    echo
 fi
 
 case "$ACTION" in
@@ -459,21 +480,21 @@ case "$ACTION" in
         ;;
     "uninstall")
         print_green "✓ Better Stack Beyla successfully uninstalled from all nodes!"
-        
+
         # Remove swarm stack and network
         print_blue "Removing collector service and network..."
         if $SSH_CMD "$MANAGER_NODE" /bin/bash <<'EOF'
             set -e
-            
+
             # Remove swarm stack
             echo "Removing swarm stack..."
             docker stack rm better-stack 2>/dev/null || true
-            
-            
+
+
             # Wait for services to be removed
             echo "Waiting for services to be removed..."
             sleep 10
-            
+
             # Remove overlay network
             NETWORK_NAME="better_stack_collector_overlay"
             if docker network ls | grep -q "$NETWORK_NAME"; then
@@ -482,7 +503,7 @@ case "$ACTION" in
                     echo "Warning: Could not remove network. It may still be in use."
                 }
             fi
-            
+
             echo "Cleanup complete."
 EOF
         then
@@ -493,24 +514,6 @@ EOF
         ;;
     "force_upgrade")
         print_green "✓ Better Stack Collector and Beyla successfully force upgraded!"
-        
-        # Also update collector service
-        print_blue "Force updating collector service in swarm..."
-        if $SSH_CMD "$MANAGER_NODE" /bin/bash <<'EOF'
-            set -e
-            
-            # Update collector service
-            if docker service ls | grep -q "better-stack_collector"; then
-                echo "Force updating collector service..."
-                docker service update --force better-stack_collector
-            else
-                echo "No collector service found to update"
-            fi
-EOF
-        then
-            print_green "✓ Collector service updated"
-        else
-            print_red "✗ Warning: Could not update collector service"
-        fi
+        # The collector will be redeployed with proper network configuration
         ;;
 esac
