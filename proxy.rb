@@ -33,7 +33,7 @@ class WebServer
   end
 
   def start
-    server = WEBrick::HTTPServer.new(Port: 33000)
+    server = WEBrick::HTTPServer.new(Port: 33000, BindAddress: '127.0.0.1')
 
     server.mount_proc '/v1/config' do |req, res|
       res.content_type = 'application/json'
