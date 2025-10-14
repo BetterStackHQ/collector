@@ -25,6 +25,7 @@ services:
       - PROXY_PORT
     volumes:
       # Mount host root filesystem to enable reading system metrics, logs (including logs outside /var/log), and container data
+      # Can be customized via MOUNT_HOST_PATHS environment variable in install.sh to restrict access to specific paths
       - /:/host:ro
       # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this volume
       # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
