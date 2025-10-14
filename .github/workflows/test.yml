@@ -63,8 +63,8 @@ jobs:
         echo "=== Checking collector service alignment ==="
         
         # Compare collector images
-        MAIN_IMAGE=$(grep -A1 "^  collector:" docker-compose.yml | grep "image:" | awk '{print $2}')
-        SWARM_IMAGE=$(grep -A1 "^  collector:" swarm/docker-compose.swarm-collector.yml | grep "image:" | awk '{print $2}')
+        MAIN_IMAGE=$(sed -n '/^  collector:/,/^  [^ ]/p' docker-compose.yml | grep "image:" | head -1 | awk '{print $2}')
+        SWARM_IMAGE=$(sed -n '/^  collector:/,/^  [^ ]/p' swarm/docker-compose.swarm-collector.yml | grep "image:" | head -1 | awk '{print $2}')
         
         if [ "$MAIN_IMAGE" != "$SWARM_IMAGE" ]; then
           echo "❌ ERROR: Collector image mismatch"
@@ -116,65 +116,65 @@ jobs:
           exit 1
         fi
         
-        # Check ports (both should expose 33000 and 34320)
+        # Check ports - extract port numbers from main compose
         echo ""
         echo "=== Checking port exposure ==="
-        MAIN_33000=$(sed -n '/^  collector:/,/^  [^ ]/p' docker-compose.yml | grep -c "33000")
-        MAIN_34320=$(sed -n '/^  collector:/,/^  [^ ]/p' docker-compose.yml | grep -c "34320")
-        SWARM_33000=$(sed -n '/^  collector:/,/^  [^ ]/p' swarm/docker-compose.swarm-collector.yml | grep -c "33000")
-        SWARM_34320=$(sed -n '/^  collector:/,/^  [^ ]/p' swarm/docker-compose.swarm-collector.yml | grep -c "34320")
+        # Extract all port numbers from main collector service
+        MAIN_PORTS=$(sed -n '/^  collector:/,/^  [^ ]/p' docker-compose.yml | grep -oE '[0-9]{4,5}:' | sed 's/:$//' | sort -u)
         
         ERRORS=""
-        if [ "$SWARM_33000" -eq 0 ]; then
-          ERRORS="$ERRORS\n  - Port 33000 (Vector proxy endpoint) is missing"
-        fi
-        if [ "$SWARM_34320" -eq 0 ]; then
-          ERRORS="$ERRORS\n  - Port 34320 (Beyla metrics endpoint) is missing"
-        fi
+        for PORT in $MAIN_PORTS; do
+          if ! sed -n '/^  collector:/,/^  [^ ]/p' swarm/docker-compose.swarm-collector.yml | grep -q "$PORT"; then
+            ERRORS="$ERRORS\n  - Port $PORT is missing"
+          fi
+        done
         
         if [ -z "$ERRORS" ]; then
-          echo "✅ Both files expose required ports (33000, 34320)"
+          PORTS_LIST=$(echo $MAIN_PORTS | tr '\n' ', ' | sed 's/, $//')
+          echo "✅ Both files expose required ports ($PORTS_LIST)"
         else
           echo "❌ ERROR: Required ports are missing in swarm/docker-compose.swarm-collector.yml"
           echo -e "$ERRORS"
           echo ""
-          echo "TO FIX: Add the following to the ports section in swarm/docker-compose.swarm-collector.yml:"
+          echo "TO FIX: Add the missing ports to swarm/docker-compose.swarm-collector.yml"
+          echo "Use this format for swarm:"
           echo "    ports:"
-          echo "      - target: 34320"
-          echo "        published: 34320"
-          echo "        protocol: tcp"
-          echo "        mode: host"
-          echo "      - target: 33000"
-          echo "        published: 33000"
-          echo "        protocol: tcp"
-          echo "        mode: host"
+          for PORT in $MAIN_PORTS; do
+            echo "      - target: $PORT"
+            echo "        published: $PORT"
+            echo "        protocol: tcp"
+            echo "        mode: host"
+          done
           exit 1
         fi
         
-        # Check volumes (both should mount host and enrichment)
+        # Check volumes - extract key mount patterns from main compose
         echo ""
         echo "=== Checking volume mounts ==="
-        SWARM_HOST_MOUNT=$(sed -n '/^  collector:/,/^  [^ ]/p' swarm/docker-compose.swarm-collector.yml | grep -c "/host:ro")
-        SWARM_ENRICHMENT=$(sed -n '/^  collector:/,/^  [^ ]/p' swarm/docker-compose.swarm-collector.yml | grep -c "enrichment")
+        # Extract volumes from main collector, looking for key patterns
+        MAIN_VOLUMES=$(sed -n '/^  collector:/,/^  [^ ]/p' docker-compose.yml | sed -n '/volumes:/,/^    [^ ]/p' | grep "^\s*-" | sed 's/^\s*- //')
         
         ERRORS=""
-        if [ "$SWARM_HOST_MOUNT" -eq 0 ]; then
-          ERRORS="$ERRORS\n  - Host filesystem mount (/:/host:ro) is missing"
+        # Check for host mount (any path mounting to /host:ro)
+        if ! sed -n '/^  collector:/,/^  [^ ]/p' swarm/docker-compose.swarm-collector.yml | grep -q "/host:ro"; then
+          ERRORS="$ERRORS\n  - Host filesystem mount (should be /:/host:ro)"
         fi
-        if [ "$SWARM_ENRICHMENT" -eq 0 ]; then
-          ERRORS="$ERRORS\n  - Enrichment directory mount is missing"
+        
+        # Check for enrichment mount
+        if ! sed -n '/^  collector:/,/^  [^ ]/p' swarm/docker-compose.swarm-collector.yml | grep -q "enrichment"; then
+          ERRORS="$ERRORS\n  - Enrichment directory mount"
         fi
         
         if [ -z "$ERRORS" ]; then
-          echo "✅ Both required volume mounts are present"
+          echo "✅ Required volume mount patterns are present (host filesystem + enrichment)"
         else
           echo "❌ ERROR: Required volume mounts are missing in swarm/docker-compose.swarm-collector.yml"
           echo -e "$ERRORS"
           echo ""
-          echo "TO FIX: Add the following to the volumes section in swarm/docker-compose.swarm-collector.yml:"
+          echo "TO FIX: Ensure these volume patterns exist in swarm/docker-compose.swarm-collector.yml:"
           echo "    volumes:"
-          echo "      - /:/host:ro"
-          echo "      - /var/lib/better-stack/enrichment:/enrichment:rw"
+          echo "      - /:/host:ro  # Host filesystem access"
+          echo "      - /var/lib/better-stack/enrichment:/enrichment:rw  # Shared enrichment data"
           exit 1
         fi
         
@@ -182,8 +182,8 @@ jobs:
         echo "=== Checking beyla service alignment ==="
         
         # Compare beyla images
-        MAIN_BEYLA_IMAGE=$(grep -A1 "^  beyla:" docker-compose.yml | grep "image:" | awk '{print $2}')
-        SWARM_BEYLA_IMAGE=$(grep -A1 "^  beyla:" swarm/docker-compose.beyla.yml | grep "image:" | awk '{print $2}')
+        MAIN_BEYLA_IMAGE=$(sed -n '/^  beyla:/,/^[^ ]/p' docker-compose.yml | grep "image:" | head -1 | awk '{print $2}')
+        SWARM_BEYLA_IMAGE=$(sed -n '/^  beyla:/,/^[^ ]/p' swarm/docker-compose.beyla.yml | grep "image:" | head -1 | awk '{print $2}')
         
         if [ "$MAIN_BEYLA_IMAGE" != "$SWARM_BEYLA_IMAGE" ]; then
           echo "❌ ERROR: Beyla image mismatch"
