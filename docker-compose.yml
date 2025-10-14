@@ -14,6 +14,7 @@ services:
       start_period: 60s
       retries: 3
     environment:
+      - INSTALLED_AS=docker
       - COLLECTOR_SECRET
       - BASE_URL
       - CLUSTER_COLLECTOR
@@ -66,6 +67,7 @@ services:
       start_period: 60s
       retries: 2
     environment:
+      - INSTALLED_AS=docker
       # Set Go memory limit to slightly less than container limit
       - GOMEMLIMIT=1400MiB
       # Pass hostname of host machine to Beyla; needs `export HOSTNAME` before running `docker compose up`
