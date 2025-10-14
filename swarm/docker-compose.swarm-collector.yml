@@ -21,8 +21,6 @@ services:
       - BASE_URL
       - CLUSTER_COLLECTOR
       - VECTOR_LOG_FORMAT=json
-      # Pass hostname of host machine to collector
-      - HOSTNAME
       # Optional proxy port for upstream proxy mode
       - PROXY_PORT
     volumes:
@@ -31,16 +29,10 @@ services:
       # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this directory
       # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
       - /var/lib/better-stack/enrichment:/enrichment:rw
-    networks:
-        better_stack_collector_overlay:
-          aliases:
-            - collector
+    # Networks will be added dynamically by deploy-to-swarm.sh
     ports:
       # Bind to all interfaces so cluster agent can reach via overlay network
       - "34320:34320" # Beyla metrics endpoint
       - "33000:33000" # Vector proxy endpoint
 
-networks:
-  better_stack_collector_overlay:
-    external: true
-    name: better_stack_collector_overlay
+# Networks will be added dynamically by deploy-to-swarm.sh

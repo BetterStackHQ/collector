@@ -149,31 +149,7 @@ echo
 print_green "✓ SSH connectivity confirmed for all nodes"
 echo
 
-# For install and force_upgrade actions, set up overlay network BEFORE deploying to nodes
-# Skip this if we're retrying from a specific node
-if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]] && [[ "$RETRY_FROM" -eq 0 ]]; then
-    print_blue "Creating overlay network..."
-
-    if $SSH_CMD "$MANAGER_NODE" "bash" <<'EOF'
-        set -eu
-
-        # Create overlay network if it doesn't exist
-        NETWORK_NAME="better_stack_collector_overlay"
-        if ! docker network ls | grep -q "$NETWORK_NAME"; then
-            echo "Creating overlay network: $NETWORK_NAME"
-            docker network create -d overlay --attachable "$NETWORK_NAME"
-        else
-            echo "Overlay network already exists: $NETWORK_NAME"
-        fi
-EOF
-    then
-        print_green "✓ Overlay network ready"
-    else
-        print_red "✗ Failed to create overlay network"
-        exit 1
-    fi
-    echo
-fi
+# Removed overlay network creation - collector will attach to existing networks
 
 # Deploy beyla to each node first (this creates the enrichment directories)
 CURRENT=0
@@ -221,6 +197,7 @@ for NODE in $NODES; do
                 echo "Installing Beyla using install.sh..."
                 export COMPOSE_URL="https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.beyla.yml"
                 export HOSTNAME=\$(hostname)
+                export COLLECTOR_SECRET="not_needed_for_beyla_only_compose_file"
                 export IMAGE_TAG="${IMAGE_TAG:-latest}"
                 export ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
                 export MOUNT_HOST_PATHS="${MOUNT_HOST_PATHS:-}"
@@ -285,7 +262,7 @@ EOF
                 # Use install.sh with COMPOSE_URL for beyla installation
                 echo "Installing Beyla using install.sh..."
                 export COMPOSE_URL="https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.beyla.yml"
-                export COLLECTOR_SECRET="placeholder_for_beyla"
+                export COLLECTOR_SECRET="not_needed_for_beyla_only_compose_file"
                 export HOSTNAME=\$(hostname)
                 export IMAGE_TAG="${IMAGE_TAG:-latest}"
                 export ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
@@ -320,42 +297,40 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]]; then
 
         # Determine which networks to attach collector to
         if [[ -n "$SWARM_NETWORKS" ]]; then
-            # User specified networks - ensure better_stack_collector_overlay is included
+            # User specified networks
             echo "Using user-specified networks: $SWARM_NETWORKS"
-            if [[ "$SWARM_NETWORKS" != *"better_stack_collector_overlay"* ]]; then
-                SELECTED_NETWORKS="better_stack_collector_overlay,$SWARM_NETWORKS"
-            else
-                SELECTED_NETWORKS="$SWARM_NETWORKS"
-            fi
+            SELECTED_NETWORKS="$SWARM_NETWORKS"
         else
-            # Auto-detect overlay networks (excluding our own, ingress, and stack-created networks)
+            # Auto-detect overlay networks (excluding ingress and stack-created networks)
             echo "Auto-detecting swarm overlay networks..."
-            OVERLAY_NETWORKS=$(docker network ls --filter driver=overlay --filter scope=swarm --format "{{.Name}}" | grep -v "^better_stack_collector_overlay$" | grep -v "^ingress$" | grep -v "^better-stack_default$" | sort)
+            OVERLAY_NETWORKS=$(docker network ls --filter driver=overlay --filter scope=swarm --format "{{.Name}}" | grep -v "^ingress$" | grep -v "^better-stack_default$" | sort)
 
             if [[ -n "$OVERLAY_NETWORKS" ]]; then
-                # Count networks (not including better_stack_collector_overlay)
+                # Count networks
                 NETWORK_COUNT=$(echo "$OVERLAY_NETWORKS" | grep -c .)
 
-                echo "Found $NETWORK_COUNT additional swarm overlay networks (excluding better_stack_collector_overlay):"
+                echo "Found $NETWORK_COUNT swarm overlay networks:"
                 echo "$OVERLAY_NETWORKS" | sed 's/^/  - /'
                 echo
 
-                if [[ $NETWORK_COUNT -gt 2 ]]; then
-                    echo "ERROR: More than 2 additional swarm overlay networks found!"
+                if [[ $NETWORK_COUNT -gt 3 ]]; then
+                    echo "ERROR: More than 3 swarm overlay networks found!"
                     echo "Please specify which networks to attach to using:"
-                    echo "  SWARM_NETWORKS=network1,network2 $0"
+                    echo "  SWARM_NETWORKS=network1,network2,network3 $0"
                     echo
                     echo "Example:"
                     echo "  SWARM_NETWORKS=my_app_network,frontend_network $0"
                     exit 1
                 fi
 
-                # Use all networks plus our own
-                ADDITIONAL_NETS=$(echo "$OVERLAY_NETWORKS" | paste -sd, -)
-                SELECTED_NETWORKS="better_stack_collector_overlay,$ADDITIONAL_NETS"
+                # Use all detected networks
+                SELECTED_NETWORKS=$(echo "$OVERLAY_NETWORKS" | paste -sd, -)
             else
-                # Only our network exists
-                SELECTED_NETWORKS="better_stack_collector_overlay"
+                # No overlay networks exist
+                echo "WARNING: No overlay networks found!"
+                echo "The collector needs at least one overlay network to be accessible."
+                echo "Please create a network or specify one using SWARM_NETWORKS."
+                exit 1
             fi
 
             echo "Will attach collector to networks: $SELECTED_NETWORKS"
@@ -393,7 +368,8 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]]; then
             split(networks, arr, ",")
             for (i in arr) {
                 print "        " arr[i] ":"
-                if (arr[i] == "better_stack_collector_overlay") {
+                # Add collector alias to first network
+                if (i == 1) {
                     print "          aliases:"
                     print "            - collector"
                 }
@@ -451,7 +427,6 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]]; then
         COLLECTOR_SECRET="$COLLECTOR_SECRET" \
         BASE_URL="${BASE_URL:-https://telemetry.betterstack.com}" \
         CLUSTER_COLLECTOR="${CLUSTER_COLLECTOR:-}" \
-        HOSTNAME="${HOSTNAME:-}" \
         PROXY_PORT="${PROXY_PORT:-}" \
         docker stack deploy -c /tmp/docker-compose.swarm-collector.yml better-stack
 
@@ -492,14 +467,7 @@ case "$ACTION" in
             echo "Waiting for services to be removed..."
             sleep 10
 
-            # Remove overlay network
-            NETWORK_NAME="better_stack_collector_overlay"
-            if docker network ls | grep -q "$NETWORK_NAME"; then
-                echo "Removing overlay network: $NETWORK_NAME"
-                docker network rm "$NETWORK_NAME" 2>/dev/null || {
-                    echo "Warning: Could not remove network. It may still be in use."
-                }
-            fi
+            # Network cleanup removed - using existing networks only
 
             echo "Cleanup complete."
 EOF
