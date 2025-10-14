@@ -220,12 +220,18 @@ for NODE in $NODES; do
                 curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.beyla.yml \\
                     -o /tmp/docker-compose.beyla.yml
 
+                # Update image tag if specified
+                if [[ -n "\${IMAGE_TAG:-}" ]]; then
+                    echo "Updating Beyla image tag to: \${IMAGE_TAG}"
+                    sed -i "s|image: betterstack/collector-beyla:latest|image: betterstack/collector-beyla:\${IMAGE_TAG}|" /tmp/docker-compose.beyla.yml
+                fi
+
                 # Start beyla container
                 echo "Starting Beyla container..."
                 export HOSTNAME=\$(hostname)
                 cd /tmp
                 HOSTNAME="\$HOSTNAME" \\
-                docker compose -p better-stack-beyla -f docker-compose.beyla.yml pull
+                docker compose -p better-stack-beyla -f docker-compose.beyla.yml pull --policy always
                 HOSTNAME="\$HOSTNAME" \\
                 docker compose -p better-stack-beyla -f docker-compose.beyla.yml up -d --force-recreate
 
@@ -288,12 +294,18 @@ EOF
                 curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.beyla.yml \\
                     -o /tmp/docker-compose.beyla.yml
 
+                # Update image tag if specified
+                if [[ -n "\${IMAGE_TAG:-}" ]]; then
+                    echo "Updating Beyla image tag to: \${IMAGE_TAG}"
+                    sed -i "s|image: betterstack/collector-beyla:latest|image: betterstack/collector-beyla:\${IMAGE_TAG}|" /tmp/docker-compose.beyla.yml
+                fi
+
                 # Pull latest image and start container
                 echo "Pulling latest image and starting container..."
                 export HOSTNAME=\$(hostname)
                 cd /tmp
                 HOSTNAME="\$HOSTNAME" \\
-                docker compose -p better-stack-beyla -f docker-compose.beyla.yml pull
+                docker compose -p better-stack-beyla -f docker-compose.beyla.yml pull --policy always
                 HOSTNAME="\$HOSTNAME" \\
                 docker compose -p better-stack-beyla -f docker-compose.beyla.yml up -d --force-recreate
 
