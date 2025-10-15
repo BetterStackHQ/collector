@@ -12,7 +12,7 @@
 #
 # The cluster agent running in the beyla container connects to this proxy via host network
 # to fetch configuration and check if it should be running.
-# 
+#
 # The node agent also runs in the beyla container and connects to the /v1/metrics endpoint
 # via host network.
 
@@ -35,18 +35,39 @@ class WebServer
   def start
     server = WEBrick::HTTPServer.new(Port: 33000, BindAddress: '127.0.0.1')
 
+    # Helper method to check authentication
+    check_auth = lambda do |req, res|
+      # Check for authentication - support both X-Api-Key (cluster-agent) and Authorization Bearer
+      api_key = req['X-Api-Key']
+      auth_header = req['Authorization']
+      collector_secret = ENV['COLLECTOR_SECRET']
+      # Accept either X-Api-Key matching the secret OR Bearer token matching the secret
+      valid_auth = (api_key == collector_secret) ||
+                   (auth_header == "Bearer #{collector_secret}")
+      unless valid_auth
+        res.status = 401
+        res.body = 'Unauthorized'
+        res['WWW-Authenticate'] = 'Bearer realm="Better Stack Collector"'
+        return false
+      end
+      true
+    end
+
     server.mount_proc '/v1/config' do |req, res|
+      next unless check_auth.call(req, res)
       res.content_type = 'application/json'
       res.body = latest_database_json
     end
 
     server.mount_proc '/v1/cluster-agent-enabled' do |req, res|
+      next unless check_auth.call(req, res)
       res.content_type = 'text/plain'
       res.body = @client.cluster_collector? ? "yes" : "no"
     end
 
     # to preserve compatibility and prevent errors
     server.mount_proc '/v1/metrics' do |req, res|
+      next unless check_auth.call(req, res)
       begin
         uri = URI('http://localhost:39090/')
 

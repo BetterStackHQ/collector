@@ -166,7 +166,7 @@ for NODE in $NODES; do
                 echo "Installing Beyla using install.sh..."
                 export COMPOSE_URL="https://raw.githubusercontent.com/BetterStackHQ/collector/refs/heads/sl/swarm_separate_cluster_collector_image/swarm/docker-compose.beyla.yml"
                 export HOSTNAME=\$(hostname)
-                export COLLECTOR_SECRET="not_needed_for_beyla_only_compose_file"
+                export COLLECTOR_SECRET="${COLLECTOR_SECRET}"
                 export IMAGE_TAG="${IMAGE_TAG:-latest}"
                 export ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
                 export MOUNT_HOST_PATHS="${MOUNT_HOST_PATHS:-}"
