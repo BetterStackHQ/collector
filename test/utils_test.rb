@@ -132,7 +132,10 @@ class UtilsTest < Minitest::Test
       .with(query: hash_including("host"))
       .to_return(status: 404)
 
-    refute download_file(url, path)
+    error = assert_raises(Utils::DownloadError) do
+      download_file(url, path)
+    end
+    assert_equal "Failed to download downloaded_file.txt from https://example.com/file.txt after 2 retries. Response code: 404", error.message
     refute File.exist?(path)
   end
 
@@ -145,7 +148,10 @@ class UtilsTest < Minitest::Test
       .with(query: hash_including("host"))
       .to_raise(SocketError.new("getaddrinfo: nodename nor servname provided, or not known"))
 
-    refute download_file(url, path)
+    error = assert_raises(Utils::DownloadError) do
+      download_file(url, path)
+    end
+    assert_equal "Network error downloading downloaded_file.txt from https://example.com/file.txt: getaddrinfo: nodename nor servname provided, or not known after 2 retries.", error.message
     refute File.exist?(path)
   end
 

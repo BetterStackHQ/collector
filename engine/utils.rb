@@ -4,6 +4,9 @@ require 'json'
 require 'socket'
 
 module Utils
+  class DownloadError < StandardError; end
+
+  MAX_DOWNLOAD_RETRIES = 2
   ENRICHMENT_TABLE_PATH = "/enrichment/docker-mappings.csv"
   ENRICHMENT_TABLE_INCOMING_PATH = "/enrichment/docker-mappings.incoming.csv"
   DATABASES_TABLE_PATH = "/enrichment/databases.csv"
@@ -61,7 +64,7 @@ module Utils
     end
   end
 
-  def download_file(url, path)
+  def download_file(url, path, retries = 0)
     uri = URI(url)
 
     # Add hostname query parameter
@@ -79,12 +82,22 @@ module Utils
         true
       else
         puts "Failed to download #{File.basename(path)} from #{url}. Response code: #{response.code}"
-        false
+        if retries < MAX_DOWNLOAD_RETRIES
+          puts "Retrying #{retries + 1} of #{MAX_DOWNLOAD_RETRIES}..."
+          download_file(url, path, retries + 1)
+        else
+          raise DownloadError, "Failed to download #{File.basename(path)} from #{url} after #{MAX_DOWNLOAD_RETRIES} retries. Response code: #{response.code}"
+        end
       end
     end
   rescue SocketError => e
-    puts "Error downloading #{File.basename(path)} from #{url}: #{e.message}"
-    false
+    if retries < MAX_DOWNLOAD_RETRIES
+      puts "Retrying #{retries + 1} of #{MAX_DOWNLOAD_RETRIES}..."
+      download_file(url, path, retries + 1)
+    else
+      puts "Network error downloading #{File.basename(path)} from #{url}: #{e.message} after #{MAX_DOWNLOAD_RETRIES} retries."
+      raise DownloadError, "Network error downloading #{File.basename(path)} from #{url}: #{e.message} after #{MAX_DOWNLOAD_RETRIES} retries."
+    end
   end
 
   def hostname
