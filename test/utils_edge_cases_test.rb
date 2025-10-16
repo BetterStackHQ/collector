@@ -71,11 +71,10 @@ class UtilsEdgeCasesTest < Minitest::Test
       .with(query: hash_including("host"))
       .to_return(status: 302, headers: { 'Location' => url })
 
-    result = download_file(url, path)
-
-    # The download_file method returns true even for redirects
-    # because WebMock doesn't actually follow redirects by default
-    assert result || !result  # Accept either true or false
+    error = assert_raises(Utils::DownloadError) do
+      download_file(url, path)
+    end
+    assert_equal "Failed to download downloaded_file.txt from https://example.com/file.txt after 2 retries. Response code: 302", error.message
   end
 
   def test_download_file_with_huge_response
@@ -155,6 +154,42 @@ class UtilsEdgeCasesTest < Minitest::Test
     downloaded = File.binread(path)
     assert_equal binary_content.force_encoding('ASCII-8BIT'),
                  downloaded.force_encoding('ASCII-8BIT')
+  end
+
+  def test_download_file_fails_twice_then_succeeds
+    url = 'https://example.com/retry-test.txt'
+    path = File.join(@working_dir, 'retry-test.txt')
+    expected_content = 'Success after retries!'
+
+    # First request fails with 500
+    # Second request fails with 503
+    # Third request succeeds with 200
+    call_count = 0
+    stub_request(:get, url)
+      .with(query: hash_including("host"))
+      .to_return do |request|
+        call_count += 1
+        case call_count
+        when 1
+          { status: 500, body: 'Internal Server Error' }
+        when 2
+          { status: 503, body: 'Service Unavailable' }
+        when 3
+          { status: 200, body: expected_content }
+        else
+          raise "Unexpected number of calls: #{call_count}"
+        end
+      end
+
+    # Should return true after retrying twice
+    result = download_file(url, path)
+    assert_equal true, result
+
+    # Should have written the successful response content
+    assert_equal expected_content, File.read(path)
+
+    # Should have made exactly 3 requests
+    assert_equal 3, call_count
   end
 
 end

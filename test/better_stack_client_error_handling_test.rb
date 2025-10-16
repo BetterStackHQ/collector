@@ -49,7 +49,7 @@ class BetterStackClientErrorHandlingTest < Minitest::Test
 
       if download_count == 2
         # Fail on second file
-        false
+        raise Utils::DownloadError, "Failed to download databases.json from https://example.com/databases.json after 2 retries. Response code: 404"
       else
         File.write(path, "test content #{download_count}")
         true

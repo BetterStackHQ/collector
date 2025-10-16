@@ -246,8 +246,10 @@ class BetterStackClient
         path = "#{@working_dir}/versions/#{new_version}/#{filename}".gsub(%r{/+}, '/')
         puts "Downloading #{filename} to #{path}"
 
-        unless download_file(file_url, path)
-          write_error("Failed to download #{filename} for version #{new_version}")
+        begin
+          download_file(file_url, path)
+        rescue Utils::DownloadError => e
+          write_error("Failed to download #{filename} for version #{new_version}: #{e.message}")
           all_files_downloaded = false
           break # Stop trying to download other files
         end
