@@ -16,11 +16,11 @@ version_lt() {
     # Handles versions like 20.10.9, 19.03.13, etc.
     local v1=$1
     local v2=$2
-    
+
     # Convert to comparable format (e.g., 20.10.9 -> 200109)
     local v1_comparable=$(echo "$v1" | awk -F. '{printf "%d%02d%02d", $1, $2, $3}')
     local v2_comparable=$(echo "$v2" | awk -F. '{printf "%d%02d%02d", $1, $2, $3}')
-    
+
     if [ "$v1_comparable" -lt "$v2_comparable" ]; then
         return 0
     else
@@ -104,12 +104,26 @@ cd "$TEMP_DIR"
 # Clean up on exit
 trap "rm -rf $TEMP_DIR" EXIT
 
-# Download appropriate compose file based on Docker version
-if [ "$USE_SECCOMP" = true ]; then
+# Download appropriate compose file based on COMPOSE_URL or Docker version
+# Used in deploy-to-swarm.sh to deploy Beyla. Useful for testing and deploying collector from branch.
+if [ -n "$COMPOSE_URL" ]; then
+    # Use custom compose URL if provided
+    echo "Using custom compose file from: $COMPOSE_URL"
+    curl -sSL "$COMPOSE_URL" -o docker-compose.yml
+
+    # If using seccomp and custom URL, try to download seccomp profile from same location
+    # Not used in deploy-to-swarm.sh
+    if [ "$USE_SECCOMP" = true ]; then
+        SECCOMP_URL="${COMPOSE_URL%/*}/collector-seccomp.json"
+        echo "Attempting to download seccomp profile from: $SECCOMP_URL"
+        curl -sSL "$SECCOMP_URL" -o collector-seccomp.json 2>/dev/null || \
+            echo "Warning: Could not download seccomp profile from custom location"
+    fi
+elif [ "$USE_SECCOMP" = true ]; then
     # For older Docker versions, use the seccomp-enabled compose file
     curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/docker-compose.seccomp.yml \
         -o docker-compose.yml
-    
+
     # Also download the seccomp profile
     curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/collector-seccomp.json \
         -o collector-seccomp.json
