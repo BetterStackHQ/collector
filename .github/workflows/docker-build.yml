@@ -34,19 +34,9 @@ jobs:
       - name: Determine repository and tags
         id: repo
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            # Tagged versions go to public repo
-            echo "repository=betterstack/collector" >> $GITHUB_OUTPUT
-            echo "push=true" >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_REF}" == refs/heads/main ]]; then
-            # Main branch goes to public repo as `canary` version
-            echo "repository=betterstack/collector" >> $GITHUB_OUTPUT
-            echo "push=true" >> $GITHUB_OUTPUT
-          else
-            # Everything else goes to private repo
-            echo "repository=betterstack/collector-private" >> $GITHUB_OUTPUT
-            echo "push=true" >> $GITHUB_OUTPUT
-          fi
+          # All builds go to public repo
+          echo "repository=betterstack/collector" >> $GITHUB_OUTPUT
+          echo "push=true" >> $GITHUB_OUTPUT
 
       - name: Set up Docker metadata
         id: meta
@@ -59,8 +49,8 @@ jobs:
             type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             # For main branch, tag as canary (public repo)
             type=raw,value=canary,enable=${{ github.ref == 'refs/heads/main' }}
-            # For pull requests, tag as pr-number-sha (private repo)
-            type=raw,value=pr-${{ github.event.pull_request.number }}-sha-{{sha}},enable=${{ github.event_name == 'pull_request' }}
+            # For pull requests, tag as pr-number (public repo)
+            type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ github.event_name == 'pull_request' }}
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -100,19 +90,9 @@ jobs:
       - name: Determine repository and tags
         id: repo
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            # Tagged versions go to public repo
-            echo "repository=betterstack/collector-beyla" >> $GITHUB_OUTPUT
-            echo "push=true" >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_REF}" == refs/heads/main ]]; then
-            # Main branch goes to public repo as `canary` version
-            echo "repository=betterstack/collector-beyla" >> $GITHUB_OUTPUT
-            echo "push=true" >> $GITHUB_OUTPUT
-          else
-            # Everything else goes to private repo
-            echo "repository=betterstack/collector-beyla-private" >> $GITHUB_OUTPUT
-            echo "push=true" >> $GITHUB_OUTPUT
-          fi
+          # All builds go to public repo
+          echo "repository=betterstack/collector-beyla" >> $GITHUB_OUTPUT
+          echo "push=true" >> $GITHUB_OUTPUT
 
       - name: Set up Docker metadata
         id: meta
@@ -125,8 +105,8 @@ jobs:
             type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             # For main branch, tag as canary (public repo)
             type=raw,value=canary,enable=${{ github.ref == 'refs/heads/main' }}
-            # For pull requests, tag as pr-number-sha (private repo)
-            type=raw,value=pr-${{ github.event.pull_request.number }}-sha-{{sha}},enable=${{ github.event_name == 'pull_request' }}
+            # For pull requests, tag as pr-number (public repo)
+            type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ github.event_name == 'pull_request' }}
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -148,3 +128,4 @@ jobs:
           push: ${{ steps.repo.outputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+

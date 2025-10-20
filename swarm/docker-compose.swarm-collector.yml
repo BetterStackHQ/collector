@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  collector:
+    image: betterstack/collector:latest
+    hostname: "{{.Node.Hostname}}"
+    deploy:
+      mode: global
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+    healthcheck:
+      test: ["CMD", "/healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    environment:
+      - COLLECTOR_SECRET
+      - BASE_URL
+      - CLUSTER_COLLECTOR
+      - VECTOR_LOG_FORMAT=json
+      # Optional proxy port for upstream proxy mode
+      - PROXY_PORT
+    volumes:
+      # Mount host root filesystem to enable reading system metrics, logs (including logs outside /var/log), and container data
+      - /:/host:ro
+      # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this directory
+      # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
+      - /var/lib/better-stack/enrichment:/enrichment:rw
+    # Networks will be added dynamically by deploy-to-swarm.sh
+    ports:
+      - target: 34320
+        published: 34320
+        protocol: tcp
+        mode: host  # Only publish on the node where task is running
+      - target: 33000
+        published: 33000
+        protocol: tcp
+        mode: host  # Only publish on the node where task is running
+
+# Networks will be added dynamically by deploy-to-swarm.sh
