@@ -8,12 +8,14 @@ discovery:
   exclude_otel_instrumented_services: false
 
 otel_metrics_export:
-  features:
-    - application
-    - application_process
-  # Required to enable SQL database metrics collection
-  instrumentations:
-    - "*"
+  features: []             # disables groups like application, network
+  instrumentations: []     # disables http, grpc, sql, etc
+
+prometheus_export:
+  port: 0
+
+network:
+  enable: false
 
 otel_traces_export:
   # Required to create trace spans for database operations
@@ -36,18 +38,6 @@ ebpf:
 
 attributes:
   select:
-    http_server_request_duration:
-      include: ["service.name", "server.address", "http.response.status_code"]
-    rpc_server_duration:
-      include: ["service.name", "server.address", "rpc.grpc.status_code"]
-    http_client_request_duration:
-      include: ["service.name", "server.address", "http.response.status_code"]
-    rpc_client_duration:
-      include: ["service.name", "server.address", "rpc.grpc.status_code"]
-    sql_client_duration:
-      include: ["*"]
-    # CRITICAL: Without this, traces show only "SELECT" not the actual query
-    # Beyla hides db.query.text by default for security reasons
     traces:
       include:
         - "db.query.text"
