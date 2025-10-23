@@ -6,7 +6,8 @@ FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
 
 # Get Beyla files from BetterStack fork with memory leak fixes
 # Note: Update this tag after the BetterStack Beyla image is published
-FROM betterstack/beyla:pr-1 AS beyla-source
+FROM grafana/beyla:2.7.3 AS beyla-source
+# FROM betterstack/beyla:pr-1 AS beyla-source
 
 # Final stage - Using Debian 12.11-slim for glibc compatibility with node-agent
 FROM debian:12.11-slim
