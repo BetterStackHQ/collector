@@ -69,7 +69,3 @@ attributes:
       include:
         # Get full database query 
         - "db.query.text"
-
-  kubernetes:
-    metadata_enable: true
-    meta_restrict_local_node: true
