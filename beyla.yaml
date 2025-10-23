@@ -5,14 +5,6 @@ discovery:
 
   include_instrument:
     - open_ports: "1-65535"
-    # - k8s_pod_name: "my-app-*"
-    # - k8s_deployment_name: "nginx"
-    # - k8s_replicaset_name: "frontend-*"
-    # - k8s_statefulset_name: "postgres"
-    # - k8s_job_name: "backup-*"
-    # - k8s_cronjob_name: "cleanup"
-    # - k8s_owner_name: "my-deployment"  # Matches any owner type
-    # - k8s_container_name: "sidecar"
 
   exclude_instrument:
     - k8s_namespace: "kube-*"        # Matches kube-system, kube-public, etc.
@@ -21,7 +13,7 @@ discovery:
     - k8s_namespace: "istio-system"
     - k8s_namespace: "flux"
     - k8s_namespace: "gitops"
-    - k8s_daemonset_name: "better-stack-collector"
+    - k8s_daemonset_name: "better-stack-collector" # No traces for Better Stack Collector
 
     - exe_path: ".*/vector$"
     - exe_path: ".*/fluentd$"
