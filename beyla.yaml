@@ -1,9 +1,9 @@
-application_discovery:
+discovery:
   # Make discovery less resource intensive
   poll_interval: 30s      # Check for new processes every 30s
   min_process_age: 30s    # Only instrument processes older than 30s
 
-  include_instrument:
+  instrument:
     - open_ports: "1-65535"
 
   exclude_instrument:
