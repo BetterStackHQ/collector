@@ -1,19 +1,37 @@
 discovery:
-  services:
+  # Make discovery less resource intensive
+  poll_interval: 30s      # Check for new processes every 30s
+  min_process_age: 30s    # Only instrument processes older than 30s
+
+  include_instrument:
     - open_ports: "1-65535"
 
-  exclude_services:
+  exclude_instrument:
+    - k8s_namespace: "kube-*"        # Matches kube-system, kube-public, etc.
+    - k8s_namespace: "monitoring"
+    - k8s_namespace: "observability"
+    - k8s_namespace: "istio-system"
+    - k8s_namespace: "flux"
+    - k8s_namespace: "gitops"
+    - k8s_daemonset_name: "better-stack-collector" # No traces for Better Stack Collector
+
     - exe_path: ".*/vector$"
+    - exe_path: ".*/fluentd$"
+    - exe_path: ".*/fluentbit$"
 
   exclude_otel_instrumented_services: false
 
+
 otel_metrics_export:
-  features:
-    - application
-    - application_process
-  # Required to enable SQL database metrics collection
-  instrumentations:
-    - "*"
+  features: []             # disables groups like application, network
+  instrumentations: []     # disables http, grpc, sql, etc
+
+prometheus_export:
+  port: 0
+
+network:
+  cache_max_flows: 5000
+  enable: false
 
 otel_traces_export:
   # Required to create trace spans for database operations
@@ -21,6 +39,9 @@ otel_traces_export:
     - "*"
 
 ebpf:
+  context_propagation: all
+  track_request_headers: true
+
   # Without this, Beyla only detects MySQL/PostgreSQL binary protocols
   # Enable to capture SQL from ORMs, connection poolers, or other databases
   heuristic_sql_detect: true
@@ -36,18 +57,7 @@ ebpf:
 
 attributes:
   select:
-    http_server_request_duration:
-      include: ["service.name", "server.address", "http.response.status_code"]
-    rpc_server_duration:
-      include: ["service.name", "server.address", "rpc.grpc.status_code"]
-    http_client_request_duration:
-      include: ["service.name", "server.address", "http.response.status_code"]
-    rpc_client_duration:
-      include: ["service.name", "server.address", "rpc.grpc.status_code"]
-    sql_client_duration:
-      include: ["*"]
-    # CRITICAL: Without this, traces show only "SELECT" not the actual query
-    # Beyla hides db.query.text by default for security reasons
     traces:
       include:
+        # Get full database query 
         - "db.query.text"
