@@ -2,8 +2,31 @@ discovery:
   services:
     - open_ports: "1-65535"
 
+  exclude_instrument:
+    # Basic selectors
+    # - open_ports: 9090
+
+    # Kubernetes selectors
+    - k8s_namespace: "kube-*"        # Matches kube-system, kube-public, etc.
+    - k8s_namespace: "monitoring"
+    - k8s_namespace: "observability"
+    - k8s_namespace: "istio-system"
+    - k8s_namespace: "flux"
+    - k8s_namespace: "gitops"
+    # - k8s_pod_name: "redis-*"
+    # - k8s_deployment_name: "nginx"
+    # - k8s_replicaset_name: "frontend-*"
+    - k8s_daemonset_name: "better-stack-collector"
+    # - k8s_statefulset_name: "postgres"
+    # - k8s_job_name: "backup-*"
+    # - k8s_cronjob_name: "cleanup"
+    # - k8s_owner_name: "my-deployment"  # Matches any owner type
+    - k8s_container_name: "sidecar"
+
   exclude_services:
     - exe_path: ".*/vector$"
+    - exe_path: ".*/fluentd$"
+    - exe_path: ".*/fluentbit$"
 
   exclude_otel_instrumented_services: false
 
