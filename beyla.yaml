@@ -4,7 +4,7 @@ discovery:
   min_process_age: 30s    # Only instrument processes older than 30s
 
   include_instrument:
-    - open_ports: "1-32767" # Don't track requests for ephemeral ports
+    - open_ports: "1-65535"
     # - k8s_pod_name: "my-app-*"
     # - k8s_deployment_name: "nginx"
     # - k8s_replicaset_name: "frontend-*"
