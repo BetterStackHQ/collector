@@ -27,6 +27,7 @@ discovery:
     - exe_path: ".*/vector$"
     - exe_path: ".*/fluentd$"
     - exe_path: ".*/fluentbit$"
+    - exe_path: ".*/load-generator$"
 
   exclude_otel_instrumented_services: false
 
