@@ -16,21 +16,21 @@ discovery:
     # - k8s_pod_name: "load-generator-*"
     # - k8s_deployment_name: "nginx"
     # - k8s_replicaset_name: "frontend-*"
-    - k8s_daemonset_name: "better-stack-collector"
+    # - k8s_daemonset_name: "better-stack-collector"
     # - k8s_statefulset_name: "postgres"
     # - k8s_job_name: "backup-*"
     # - k8s_cronjob_name: "cleanup"
     # - k8s_owner_name: "my-deployment"  # Matches any owner type
-    - k8s_container_name: "sidecar"
+    # - k8s_container_name: "sidecar"
 
     - exe_path: ".*/vector$"
     - exe_path: ".*/fluentd$"
     - exe_path: ".*/fluentbit$"
 
-  include_instrument:
-    - k8s_replicaset_name: "frontend-*"
-    - k8s_pod_name: "frontend-*"
-    - k8s_pod_name: "better-stack-collector-*"
+  # include_instrument:
+    # - k8s_replicaset_name: "frontend-*"
+    # - k8s_pod_name: "frontend-*"
+    # - k8s_pod_name: "better-stack-collector-*"
 
   exclude_otel_instrumented_services: false
 
