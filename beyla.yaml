@@ -1,11 +1,12 @@
 discovery:
-  services:
-    - open_ports: "1-65535"
+  include_instrument:
+    - open_ports: "1-32767"
+
+    # - k8s_replicaset_name: "frontend-*"
+    # - k8s_pod_name: "frontend-*"
+    # - k8s_pod_name: "better-stack-collector-*"
 
   exclude_instrument:
-    # Basic selectors
-    # - open_ports: 9090
-
     # Kubernetes selectors
     - k8s_namespace: "kube-*"        # Matches kube-system, kube-public, etc.
     - k8s_namespace: "monitoring"
@@ -27,10 +28,6 @@ discovery:
     - exe_path: ".*/fluentd$"
     - exe_path: ".*/fluentbit$"
 
-  # include_instrument:
-    # - k8s_replicaset_name: "frontend-*"
-    # - k8s_pod_name: "frontend-*"
-    # - k8s_pod_name: "better-stack-collector-*"
 
   exclude_otel_instrumented_services: false
 
