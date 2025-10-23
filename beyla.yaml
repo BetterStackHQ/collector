@@ -23,6 +23,9 @@ discovery:
     # - k8s_owner_name: "my-deployment"  # Matches any owner type
     - k8s_container_name: "sidecar"
 
+  include_services:
+    - exe_path: ".*/frontend$"
+
   exclude_services:
     - exe_path: ".*/vector$"
     - exe_path: ".*/fluentd$"
