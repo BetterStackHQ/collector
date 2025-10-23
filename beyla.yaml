@@ -1,4 +1,4 @@
-application_discovery:
+discovery:
   # Make discovery less resource intensive
   poll_interval: 30s      # Check for new processes every 30s
   min_process_age: 30s    # Only instrument processes older than 30s
