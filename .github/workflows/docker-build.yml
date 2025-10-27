@@ -28,6 +28,28 @@ jobs:
         with:
           submodules: true
 
+      - name: Modify COLLECTOR_VERSION for branch builds
+        if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
+        run: |
+          # Get short SHA (first 7 characters)
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+
+          # Determine the suffix based on build type
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # PR build: add -prX-SHA suffix
+            SUFFIX="-pr${{ github.event.pull_request.number }}-${SHORT_SHA}"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            # Main branch build: add -canary-SHA suffix
+            SUFFIX="-canary-${SHORT_SHA}"
+          fi
+
+          # Modify the Dockerfile to append suffix to COLLECTOR_VERSION
+          sed -i "s/^ENV COLLECTOR_VERSION=\(.*\)/ENV COLLECTOR_VERSION=\1${SUFFIX}/" Dockerfile
+
+          # Show what was changed for debugging
+          echo "Modified COLLECTOR_VERSION:"
+          grep "^ENV COLLECTOR_VERSION=" Dockerfile
+
       - name: Ensure tag version matches collector version
         id: ensure-tag-version
         run: |
