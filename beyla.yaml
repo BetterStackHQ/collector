@@ -7,6 +7,8 @@ discovery:
     - open_ports: "1-65535"
 
   exclude_instrument:
+    - open_ports: "33000"
+    - open_ports: "34320"
     - k8s_namespace: "kube-*"        # Matches kube-system, kube-public, etc.
     - k8s_namespace: "monitoring"
     - k8s_namespace: "observability"
@@ -18,6 +20,8 @@ discovery:
     - exe_path: ".*/vector$"
     - exe_path: ".*/fluentd$"
     - exe_path: ".*/fluentbit$"
+    - exe_path: ".*/cluster-agent$"
+    - exe_path: ".*/node-agent$"
 
   exclude_otel_instrumented_services: false
 
@@ -45,10 +49,10 @@ ebpf:
   # Without this, Beyla only detects MySQL/PostgreSQL binary protocols
   # Enable to capture SQL from ORMs, connection poolers, or other databases
   heuristic_sql_detect: true
-  
+
   # Required for tracking prepared statements which use numeric IDs instead of SQL text
   mysql_prepared_statements_cache_size: 100
-  
+
   # Without adequate buffer size, long SQL queries get truncated
   # 4096 bytes captures most queries without excessive memory usage
   buffer_sizes:
@@ -59,5 +63,5 @@ attributes:
   select:
     traces:
       include:
-        # Get full database query 
+        # Get full database query
         - "db.query.text"
