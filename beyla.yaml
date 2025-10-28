@@ -7,8 +7,6 @@ discovery:
     - open_ports: "1-65535"
 
   exclude_instrument:
-    - open_ports: "33000"
-    - open_ports: "34320"
     - k8s_namespace: "kube-*"        # Matches kube-system, kube-public, etc.
     - k8s_namespace: "monitoring"
     - k8s_namespace: "observability"
