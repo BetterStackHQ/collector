@@ -5,7 +5,7 @@ FROM ghcr.io/coroot/coroot-node-agent:1.25.0 AS node-agent
 FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
 
 # Add Beyla to the image
-FROM grafana/beyla:2.7.5 AS beyla-source
+FROM grafana/beyla:2.7.3 AS beyla-source
 
 # Final stage - Using Debian 12.11-slim for glibc compatibility with node-agent
 FROM debian:12.11-slim
