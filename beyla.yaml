@@ -43,7 +43,7 @@ otel_traces_export:
     - "*"
 
 ebpf:
-  context_propagation: headers
+  context_propagation: disabled
   track_request_headers: true
 
   # Without this, Beyla only detects MySQL/PostgreSQL binary protocols
