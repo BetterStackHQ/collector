@@ -1,5 +1,5 @@
 # Add Node Agent to the image
-FROM ghcr.io/coroot/coroot-node-agent:1.25.0 AS node-agent
+FROM ghcr.io/coroot/coroot-node-agent:1.26.4 AS node-agent
 
 # Add Cluster Agent to the image
 FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
