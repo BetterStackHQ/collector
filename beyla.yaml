@@ -33,17 +33,13 @@ otel_metrics_export:
 prometheus_export:
   port: 0
 
-network:
-  cache_max_flows: 5000
-  enable: false
-
 otel_traces_export:
   # Required to create trace spans for database operations
   instrumentations:
     - "*"
 
 ebpf:
-  context_propagation: disabled
+  context_propagation: all
   track_request_headers: true
 
   # Without this, Beyla only detects MySQL/PostgreSQL binary protocols
