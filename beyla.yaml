@@ -14,13 +14,7 @@ discovery:
 
 
 otel_metrics_export:
-  # Enable only the application_process - simple metrics we can get service labels from
-  features:
-    - "application"
-    - "application_container"
-    - "application_process"
-    - "application_host"
-  instrumentations: []     # disables http, grpc, sql, etc
+  # default lol
 
 prometheus_export:
   port: 0
