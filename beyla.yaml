@@ -12,7 +12,6 @@ discovery:
 
   exclude_otel_instrumented_services: false
 
-
 otel_metrics_export:
 
 prometheus_export:
