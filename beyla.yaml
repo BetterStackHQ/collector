@@ -9,6 +9,10 @@ discovery:
   exclude_instrument:
     - open_ports: "33000"
     - open_ports: "34320"
+    - exe_path: ".*/vector$"
+    - exe_path: ".*/fluentd$"
+    - exe_path: ".*/fluentbit$"
+    - exe_path: ".*/cluster-agent$"
 
   exclude_otel_instrumented_services: false
 
