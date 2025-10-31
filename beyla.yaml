@@ -29,7 +29,7 @@ discovery:
 otel_metrics_export:
   # Enable only the application_process - simple metrics we can get service labels from
   features:
-    - "application_process"
+    - "application"
   instrumentations: []     # disables http, grpc, sql, etc
 
 prometheus_export:
