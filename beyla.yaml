@@ -22,6 +22,7 @@ discovery:
     - exe_path: ".*/fluentbit$"
     - exe_path: ".*/cluster-agent$"
     - exe_path: ".*/node-agent$"
+    - exe_path: ".*uvicorn.*"
 
   exclude_otel_instrumented_services: false
 
