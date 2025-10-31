@@ -16,9 +16,6 @@ discovery:
 otel_metrics_export:
   # default lol
 
-prometheus_export:
-  port: 0
-
 network:
   cache_max_flows: 5000
   enable: false
