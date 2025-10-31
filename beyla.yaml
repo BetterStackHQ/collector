@@ -9,26 +9,14 @@ discovery:
   exclude_instrument:
     - open_ports: "33000"
     - open_ports: "34320"
-    - k8s_namespace: "kube-*"        # Matches kube-system, kube-public, etc.
-    - k8s_namespace: "monitoring"
-    - k8s_namespace: "observability"
-    - k8s_namespace: "istio-system"
-    - k8s_namespace: "flux"
-    - k8s_namespace: "gitops"
-    - k8s_daemonset_name: "better-stack-collector" # No traces for Better Stack Collector
-
     - exe_path: ".*/vector$"
     - exe_path: ".*/fluentd$"
     - exe_path: ".*/fluentbit$"
     - exe_path: ".*/cluster-agent$"
-    - exe_path: ".*/node-agent$"
 
   exclude_otel_instrumented_services: false
 
-
 otel_metrics_export:
-  features: []             # disables groups like application, network
-  instrumentations: []     # disables http, grpc, sql, etc
 
 prometheus_export:
   port: 0
