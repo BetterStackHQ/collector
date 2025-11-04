@@ -14,7 +14,7 @@ discovery:
     - exe_path: ".*/fluentbit$"
     - exe_path: ".*/cluster-agent$"
 
-  exclude_otel_instrumented_services: false
+  exclude_otel_instrumented_services: true
 
 otel_metrics_export:
 
