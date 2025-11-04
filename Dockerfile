@@ -54,11 +54,11 @@ ENV CLUSTER_AGENT_VERSION=1.2.4
 # This is considered a best practice when running multi-process containers with Tini as the init system.
 ENV TINI_SUBREAPER=true
 
-# Copy bootstrap supervisor configuration
+# Copy bootstrap supervisor configuration and necessary initialization scripts
 COPY bootstrap_supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-
-# Copy Ruby scripts
 COPY --chmod=755 healthcheck.sh /healthcheck.sh
+COPY --chmod=755 bootstrap.sh /bootstrap.sh
+
 COPY versions/0-default/vector.yaml /versions/0-default/vector.yaml
 COPY versions/0-default/databases.json /versions/0-default/databases.json
 COPY kubernetes-discovery/0-default/discovered_pods.yaml /kubernetes-discovery/0-default/discovered_pods.yaml

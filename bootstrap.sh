@@ -52,6 +52,17 @@ fi
 
 log_info "BASE_URL: $BASE_URL"
 
+# Check if already bootstrapped
+MANIFEST_DIR="/var/lib/better-stack"
+BOOTSTRAPPED_FILE="$MANIFEST_DIR/bootstrapped.txt"
+
+if [ -f "$BOOTSTRAPPED_FILE" ]; then
+    log_info "Bootstrap already completed (found $BOOTSTRAPPED_FILE)"
+    log_info "Bootstrapped on: $(cat "$BOOTSTRAPPED_FILE")"
+    log_info "Exiting without changes."
+    exit 0
+fi
+
 # Function to make API request with error handling
 make_api_request() {
     local url="$1"
@@ -115,7 +126,6 @@ log_info "Latest manifest version: $MANIFEST_VERSION"
 log_info "Downloading manifest version $MANIFEST_VERSION..."
 MANIFEST_URL="$BASE_URL/api/collector/manifest?collector_secret=$(printf %s "$COLLECTOR_SECRET" | jq -sRr @uri)&manifest_version=$MANIFEST_VERSION"
 
-MANIFEST_DIR="/var/lib/better-stack"
 MANIFEST_FILE="$MANIFEST_DIR/manifest.json"
 
 # Create directory if it doesn't exist
@@ -196,5 +206,9 @@ log_info "Bootstrap completed successfully!"
 log_info "Manifest version: $MANIFEST_VERSION"
 log_info "Files downloaded: $FILES_COUNT"
 log_info "Location: $MANIFEST_DIR"
+
+# Mark bootstrap as completed
+date > "$BOOTSTRAPPED_FILE"
+log_info "Bootstrap marker written to: $BOOTSTRAPPED_FILE"
 
 exit 0
