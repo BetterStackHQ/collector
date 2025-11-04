@@ -7,7 +7,7 @@ discovery:
     - open_ports: "1-65535"
 
   exclude_instrument:
-    - deployment_name: "es-java-otel-simple"
+    - k8s_deployment_name: "es-java-otel-simple"
     - open_ports: "33000"
     - open_ports: "34320"
     - exe_path: ".*/vector$"
