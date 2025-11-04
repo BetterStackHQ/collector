@@ -37,16 +37,5 @@ COPY --from=node-agent --chmod=755 /usr/bin/coroot-node-agent /usr/local/bin/nod
 # Copy Cluster Agent
 COPY --from=cluster-agent --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent
 
-# Copy Ruby dockerprobe implementation to working directory
-COPY dockerprobe /dockerprobe
-
-# Copy configuration files
-COPY beyla/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-COPY --chmod=755 beyla/entrypoint.sh /entrypoint.sh
-COPY --chmod=755 beyla/cluster-collector.sh /cluster-collector.sh
-
-# Copy Beyla configuration
-COPY beyla.yaml /etc/beyla/beyla.yaml
-
 # Default command
-CMD ["/entrypoint.sh"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

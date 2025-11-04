@@ -54,21 +54,14 @@ ENV CLUSTER_AGENT_VERSION=1.2.4
 # This is considered a best practice when running multi-process containers with Tini as the init system.
 ENV TINI_SUBREAPER=true
 
-# Copy supervisor configuration
-COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+# Copy bootstrap supervisor configuration
+COPY bootstrap_supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 # Copy Ruby scripts
-COPY --chmod=755 updater.rb /updater.rb
-COPY --chmod=755 proxy.rb /proxy.rb
-COPY --chmod=755 vector.sh /vector.sh
 COPY --chmod=755 healthcheck.sh /healthcheck.sh
-COPY --chmod=755 certbot-runner.sh /certbot-runner.sh
-COPY --chmod=755 certbot-deploy-hook.sh /certbot-deploy-hook.sh
 COPY versions/0-default/vector.yaml /versions/0-default/vector.yaml
 COPY versions/0-default/databases.json /versions/0-default/databases.json
 COPY kubernetes-discovery/0-default/discovered_pods.yaml /kubernetes-discovery/0-default/discovered_pods.yaml
-COPY engine /engine
-COPY --chmod=755 ebpf.sh /ebpf.sh
 # Copy default enrichment files to both locations
 # /enrichment-defaults is the source for copying at runtime
 # /enrichment is for Kubernetes compatibility, since it's volume mounts work differently from compose/swarm
