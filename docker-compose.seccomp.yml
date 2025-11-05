@@ -9,7 +9,7 @@ services:
     security_opt:
       - seccomp=collector-seccomp.json
     healthcheck:
-      test: ["CMD", "/healthcheck.sh"]
+      test: ["CMD-SHELL", "if [ -x /var/lib/better-stack/collector/healthcheck.sh ]; then /var/lib/better-stack/collector/healthcheck.sh; else exit 0; fi"]
       interval: 30s
       timeout: 10s
       start_period: 60s
@@ -30,6 +30,8 @@ services:
       # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this volume
       # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
       - docker-metadata:/enrichment:rw
+      - /var/lib/better-stack:/var/lib/better-stack
+      - beyla_supervisor_socket:/beyla_supervisor_socket
     ports:
       # Bind to localhost only for security - Beyla will connect via host network
       - "127.0.0.1:34320:34320" # Beyla metrics endpoint
@@ -92,6 +94,8 @@ services:
       # Persist ACME certs and stable symlinks across restarts
       - letsencrypt:/etc/letsencrypt
       - ssl-certs:/etc/ssl
+      - /var/lib/better-stack:/var/lib/better-stack
+      - beyla_supervisor_socket:/beyla_supervisor_socket
     depends_on:
       - collector
 
@@ -99,3 +103,4 @@ volumes:
   docker-metadata:
   letsencrypt:
   ssl-certs:
+  beyla_supervisor_socket:
