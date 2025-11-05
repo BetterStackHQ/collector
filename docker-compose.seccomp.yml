@@ -76,7 +76,7 @@ services:
       # Override OTLP endpoint to point to collector container
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:34320
       - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-      - BEYLA_CONFIG_PATH=/etc/beyla/beyla.yaml
+      - BEYLA_CONFIG_PATH=/var/lib/better-stack/beyla/beyla.yaml
       # Disable Kubernetes metadata
       - BEYLA_KUBE_METADATA_ENABLE=false
       # Enable dockerprobe
