@@ -55,7 +55,7 @@ ENV CLUSTER_AGENT_VERSION=1.2.4
 ENV TINI_SUBREAPER=true
 
 # Copy bootstrap supervisor configuration and necessary initialization scripts
-COPY bootstrap_supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY bootstrap_supervisord.conf /var/lib/better-stack/collector/supervisord.conf
 COPY --chmod=755 healthcheck.sh /healthcheck.sh
 COPY --chmod=755 bootstrap.sh /bootstrap.sh
 
@@ -83,4 +83,4 @@ RUN mkdir -p /vector-config/0-default \
 ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
 
 # Start supervisor
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+CMD ["/usr/bin/supervisord", "-c", "/var/lib/better-stack/collector/supervisord.conf"]

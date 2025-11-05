@@ -29,6 +29,7 @@ services:
       # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
       - docker-metadata:/enrichment:rw
       - /var/lib/better-stack:/var/lib/better-stack
+      - beyla_supervisor_socket:/beyla_supervisor_socket
     ports:
       # Bind to localhost only for security - Beyla will connect via host network
       - "127.0.0.1:34320:34320" # Beyla metrics endpoint
@@ -92,6 +93,7 @@ services:
       - letsencrypt:/etc/letsencrypt
       - ssl-certs:/etc/ssl
       - /var/lib/better-stack:/var/lib/better-stack
+      - beyla_supervisor_socket:/beyla_supervisor_socket
     depends_on:
       - collector
 
@@ -99,3 +101,4 @@ volumes:
   docker-metadata:
   letsencrypt:
   ssl-certs:
+  beyla_supervisor_socket:

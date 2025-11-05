@@ -37,5 +37,7 @@ COPY --from=node-agent --chmod=755 /usr/bin/coroot-node-agent /usr/local/bin/nod
 # Copy Cluster Agent
 COPY --from=cluster-agent --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent
 
+COPY beyla/bootstrap_supervisord.conf /var/lib/better-stack/beyla/supervisord.conf
+
 # Default command
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+CMD ["/usr/bin/supervisord", "-c", "/var/lib/better-stack/beyla/supervisord.conf"]

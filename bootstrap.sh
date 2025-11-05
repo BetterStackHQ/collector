@@ -213,6 +213,10 @@ log_info "Bootstrap marker written to: $BOOTSTRAPPED_FILE"
 
 # reload supervisord config and start processes as indicated by new config (overwriting bootstrap config)
 supervisorctl reread
-supervisorctl update
+supervisorctl restart all
+
+# same thing for Beyla container
+supervisorctl -s /beyla_supervisor_socket/supervisor.sock reread
+supervisorctl -s /beyla_supervisor_socket/supervisor.sock restart all
 
 exit 0
