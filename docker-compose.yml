@@ -71,7 +71,6 @@ services:
       - GOMEMLIMIT=1400MiB
       # Pass hostname of host machine to Beyla; needs `export HOSTNAME` before running `docker compose up`
       - HOSTNAME
-      - BEYLA_CONFIG_PATH=/var/lib/better-stack/beyla/beyla.yaml
       # Enable dockerprobe
       - ENABLE_DOCKERPROBE
     volumes:
