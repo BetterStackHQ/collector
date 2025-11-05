@@ -63,13 +63,6 @@ COPY --chmod=755 run_supervisord.sh /run_supervisord.sh
 COPY versions/0-default/vector.yaml /versions/0-default/vector.yaml
 COPY versions/0-default/databases.json /versions/0-default/databases.json
 COPY kubernetes-discovery/0-default/discovered_pods.yaml /kubernetes-discovery/0-default/discovered_pods.yaml
-# Copy default enrichment files to both locations
-# /enrichment-defaults is the source for copying at runtime
-# /enrichment is for Kubernetes compatibility, since it's volume mounts work differently from compose/swarm
-COPY dockerprobe/docker-mappings.default.csv /enrichment-defaults/docker-mappings.csv
-COPY dockerprobe/databases.default.csv /enrichment-defaults/databases.csv
-COPY dockerprobe/docker-mappings.default.csv /enrichment/docker-mappings.csv
-COPY dockerprobe/databases.default.csv /enrichment/databases.csv
 
 # Create initial vector-config with symlinks to defaults
 RUN mkdir -p /vector-config/0-default \
