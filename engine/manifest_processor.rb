@@ -102,8 +102,8 @@ class ManifestProcessor
 
     if reload_beyla
       puts "Reloading beyla supervisor..."
-      system('supervisorctl -s /beyla_supervisor_socket/supervisor.sock reread')
-      system('supervisorctl -s /beyla_supervisor_socket/supervisor.sock update')
+      system('supervisorctl -s unix:///beyla_supervisor_socket/supervisor.sock reread')
+      system('supervisorctl -s unix:///beyla_supervisor_socket/supervisor.sock update')
     end
 
     puts "Manifest update completed successfully!"

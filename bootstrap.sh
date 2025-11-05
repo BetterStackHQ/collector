@@ -211,12 +211,12 @@ log_info "Location: $MANIFEST_DIR"
 date > "$BOOTSTRAPPED_FILE"
 log_info "Bootstrap marker written to: $BOOTSTRAPPED_FILE"
 
+# same thing for Beyla container
+supervisorctl -s unix:///beyla_supervisor_socket/supervisor.sock reread
+supervisorctl -s unix:///beyla_supervisor_socket/supervisor.sock update
+
 # reload supervisord config and start processes as indicated by new config (overwriting bootstrap config)
 supervisorctl reread
 supervisorctl update
-
-# same thing for Beyla container
-supervisorctl -s /beyla_supervisor_socket/supervisor.sock reread
-supervisorctl -s /beyla_supervisor_socket/supervisor.sock update
 
 exit 0
