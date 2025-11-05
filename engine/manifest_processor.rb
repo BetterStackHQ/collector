@@ -94,16 +94,16 @@ class ManifestProcessor
     end
 
     # Step 7: Reload supervisor(s) if needed
-    if reload_collector
-      puts "Reloading collector supervisor..."
-      system('supervisorctl reread')
-      system('supervisorctl update')
-    end
-
     if reload_beyla
       puts "Reloading beyla supervisor..."
       system('supervisorctl -s unix:///beyla_supervisor_socket/supervisor.sock reread')
       system('supervisorctl -s unix:///beyla_supervisor_socket/supervisor.sock update')
+    end
+
+    if reload_collector
+      puts "Reloading collector supervisor..."
+      system('supervisorctl reread')
+      system('supervisorctl update')
     end
 
     puts "Manifest update completed successfully!"
