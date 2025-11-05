@@ -7,7 +7,7 @@ services:
     container_name: better-stack-collector
     restart: always
     healthcheck:
-      test: ["CMD", "/healthcheck.sh"]
+      test: ["CMD-SHELL", "if [ -x /var/lib/better-stack/collector/healthcheck.sh ]; then /var/lib/better-stack/collector/healthcheck.sh; else exit 0; fi"]
       interval: 30s
       timeout: 10s
       start_period: 60s

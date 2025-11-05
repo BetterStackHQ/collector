@@ -53,7 +53,6 @@ ENV TINI_SUBREAPER=true
 
 # Copy bootstrap supervisor configuration and necessary initialization scripts
 COPY bootstrap_supervisord.conf /bootstrap/supervisord.conf
-COPY --chmod=755 healthcheck.sh /healthcheck.sh
 COPY --chmod=755 bootstrap.sh /bootstrap.sh
 COPY --chmod=755 run_supervisord.sh /run_supervisord.sh
 
