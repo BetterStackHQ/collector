@@ -20,9 +20,6 @@ RUN apt-get update && apt-get install -y \
 COPY --from=vector --chmod=755 /usr/bin/vector /usr/local/bin/vector
 COPY --from=vector /etc/vector /etc/vector
 
-# Copy mdprobe
-COPY mdprobe /mdprobe
-
 # Create necessary directories
 RUN mkdir -p /versions/0-default \
   && mkdir -p /etc/supervisor/conf.d \
