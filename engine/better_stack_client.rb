@@ -5,6 +5,7 @@ require_relative 'ebpf_compatibility_checker'
 require_relative 'containers_enrichment_table'
 require_relative 'databases_enrichment_table'
 require_relative 'ssl_certificate_manager'
+require_relative 'manifest_processor'
 require 'net/http'
 require 'fileutils'
 require 'time'
@@ -17,6 +18,7 @@ class BetterStackClient
   NOT_CLEARABLE_ERRORS = ['Validation failed', 'Invalid configuration version', 'Invalid filename'].freeze
 
   def_delegator :@vector_config, :reload_vector
+  def_delegators :@manifest_processor, :manifest_version, :update_manifest
 
   def initialize(working_dir)
     @base_url = (ENV['BASE_URL'] || 'https://telemetry.betterstack.com').chomp('/')
@@ -40,6 +42,8 @@ class BetterStackClient
     databases_path = File.join(working_dir, 'enrichment', 'databases.csv')
     databases_incoming_path = File.join(working_dir, 'enrichment', 'databases.incoming.csv')
     @databases_enrichment_table = DatabasesEnrichmentTable.new(databases_path, databases_incoming_path)
+
+    @manifest_processor = ManifestProcessor.new
   end
 
   def make_post_request(path, params)
@@ -166,6 +170,12 @@ class BetterStackClient
     when '200'
       data = JSON.parse(body)
       if data['status'] == 'new_version_available'
+        # deterministic order: apply manifest first, configuration on next go (code for updating config may have changed)
+        new_manifest = data['manifest_version']
+        if new_manifest && new_manifest != manifest_version
+          return update_manifest(new_manifest)
+        end
+
         new_version = data['configuration_version']
         puts "New version available: #{new_version}"
 
