@@ -211,4 +211,8 @@ log_info "Location: $MANIFEST_DIR"
 date > "$BOOTSTRAPPED_FILE"
 log_info "Bootstrap marker written to: $BOOTSTRAPPED_FILE"
 
+# reload supervisord config and start processes as indicated by new config (overwriting bootstrap config)
+supervisorctl reread
+supervisorctl update
+
 exit 0
