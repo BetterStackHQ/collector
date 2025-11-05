@@ -1,7 +1,6 @@
 #!/bin/bash
 
-set -e
-set -o pipefail
+set -euo pipefail
 
 # Color output for better readability
 RED='\033[0;31m'
@@ -72,6 +71,7 @@ make_api_request() {
     local http_code
 
     while [ $retry_count -lt $max_retries ]; do
+      echo "$url"
         if [ -n "$output_file" ]; then
             http_code=$(curl -s -w "%{http_code}" -o "$output_file" "$url")
         else
@@ -181,7 +181,7 @@ for i in $(seq 0 $((FILES_COUNT - 1))); do
     mkdir -p "$DEST_DIR"
 
     # Download file
-    FILE_URL="$BASE_URL/api/collector/manifest_file?collector_secret=$(printf %s "$COLLECTOR_SECRET" | jq -sRr @uri)&manifest_version=$MANIFEST_VERSION&path=$(printf %s "$FILE_PATH" | jq -sRr @uri)&container=$(printf %s "$CONTAINER" | jq -sRr @uri)"
+    FILE_URL="$BASE_URL/api/collector/manifest-file?collector_secret=$(printf %s "$COLLECTOR_SECRET" | jq -sRr @uri)&manifest_version=$MANIFEST_VERSION&path=$(printf %s "$FILE_PATH" | jq -sRr @uri)&container=$(printf %s "$CONTAINER" | jq -sRr @uri)"
 
     TEMP_FILE=$(mktemp)
     if ! make_api_request "$FILE_URL" "$TEMP_FILE"; then
@@ -213,10 +213,10 @@ log_info "Bootstrap marker written to: $BOOTSTRAPPED_FILE"
 
 # reload supervisord config and start processes as indicated by new config (overwriting bootstrap config)
 supervisorctl reread
-supervisorctl restart all
+supervisorctl update
 
 # same thing for Beyla container
 supervisorctl -s /beyla_supervisor_socket/supervisor.sock reread
-supervisorctl -s /beyla_supervisor_socket/supervisor.sock restart all
+supervisorctl -s /beyla_supervisor_socket/supervisor.sock update
 
 exit 0

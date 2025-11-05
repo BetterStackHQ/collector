@@ -23,7 +23,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Create necessary directories
-RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /enrichment
+RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /enrichment /bootstrap
 
 # Copy Beyla files from official image and set permissions
 COPY --from=beyla-source --chmod=755 /beyla /usr/local/bin/beyla
@@ -37,7 +37,8 @@ COPY --from=node-agent --chmod=755 /usr/bin/coroot-node-agent /usr/local/bin/nod
 # Copy Cluster Agent
 COPY --from=cluster-agent --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent
 
-COPY beyla/bootstrap_supervisord.conf /var/lib/better-stack/beyla/supervisord.conf
+COPY beyla/bootstrap_supervisord.conf /bootstrap/supervisord.conf
+COPY --chmod=755 beyla/run_supervisord.sh /run_supervisord.sh
 
 # Default command
-CMD ["/usr/bin/supervisord", "-c", "/var/lib/better-stack/beyla/supervisord.conf"]
+CMD ["/run_supervisord.sh"]
