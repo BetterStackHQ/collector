@@ -39,7 +39,7 @@ services:
   beyla:
     build:
       context: .
-      dockerfile: beyla/Dockerfile.beyla
+      dockerfile: beyla/Dockerfile
     image: betterstack/collector-beyla:latest
     container_name: better-stack-beyla
     restart: always
