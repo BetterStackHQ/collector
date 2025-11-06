@@ -2,7 +2,7 @@ services:
   collector:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: collector/Dockerfile
     image: betterstack/collector:latest
     container_name: better-stack-collector
     restart: always
@@ -29,7 +29,6 @@ services:
       # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
       - docker-metadata:/enrichment:rw
       - /var/lib/better-stack:/var/lib/better-stack
-      - beyla_supervisor_socket:/beyla_supervisor_socket
     ports:
       # Bind to localhost only for security - Beyla will connect via host network
       - "127.0.0.1:34320:34320" # Beyla metrics endpoint
@@ -38,7 +37,7 @@ services:
   beyla:
     build:
       context: .
-      dockerfile: Dockerfile.beyla
+      dockerfile: beyla/Dockerfile
     image: betterstack/collector-beyla:latest
     container_name: better-stack-beyla
     restart: always
@@ -87,7 +86,6 @@ services:
       - letsencrypt:/etc/letsencrypt
       - ssl-certs:/etc/ssl
       - /var/lib/better-stack:/var/lib/better-stack
-      - beyla_supervisor_socket:/beyla_supervisor_socket
     depends_on:
       - collector
 
@@ -95,4 +93,3 @@ volumes:
   docker-metadata:
   letsencrypt:
   ssl-certs:
-  beyla_supervisor_socket:

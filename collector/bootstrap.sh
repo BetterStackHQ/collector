@@ -212,8 +212,8 @@ date > "$BOOTSTRAPPED_FILE"
 log_info "Bootstrap marker written to: $BOOTSTRAPPED_FILE"
 
 # same thing for Beyla container
-supervisorctl -s unix:///beyla_supervisor_socket/supervisor.sock reread
-supervisorctl -s unix:///beyla_supervisor_socket/supervisor.sock update
+supervisorctl -s unix:///var/lib/better-stack/beyla-supervisor.sock
+supervisorctl -s unix:///var/lib/better-stack/beyla-supervisor.sock
 
 # reload supervisord config and start processes as indicated by new config (overwriting bootstrap config)
 supervisorctl reread

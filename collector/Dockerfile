@@ -52,13 +52,13 @@ ENV CLUSTER_AGENT_VERSION=1.2.4
 ENV TINI_SUBREAPER=true
 
 # Copy bootstrap supervisor configuration and necessary initialization scripts
-COPY bootstrap_supervisord.conf /bootstrap/supervisord.conf
-COPY --chmod=755 bootstrap.sh /bootstrap.sh
-COPY --chmod=755 run_supervisord.sh /run_supervisord.sh
+COPY collector/bootstrap_supervisord.conf /bootstrap/supervisord.conf
+COPY --chmod=755 collector/bootstrap.sh /bootstrap.sh
+COPY --chmod=755 collector/run_supervisord.sh /run_supervisord.sh
 
-COPY versions/0-default/vector.yaml /versions/0-default/vector.yaml
-COPY versions/0-default/databases.json /versions/0-default/databases.json
-COPY kubernetes-discovery/0-default/discovered_pods.yaml /kubernetes-discovery/0-default/discovered_pods.yaml
+COPY collector/versions/0-default/vector.yaml /versions/0-default/vector.yaml
+COPY collector/versions/0-default/databases.json /versions/0-default/databases.json
+COPY collector/kubernetes-discovery/0-default/discovered_pods.yaml /kubernetes-discovery/0-default/discovered_pods.yaml
 
 # Create initial vector-config with symlinks to defaults
 RUN mkdir -p /vector-config/0-default \
