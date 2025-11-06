@@ -48,7 +48,7 @@ jobs:
 
           # Show what was changed for debugging
           echo "Modified COLLECTOR_VERSION:"
-          grep "^ENV COLLECTOR_VERSION=" Dockerfile
+          grep "^ENV COLLECTOR_VERSION=" collector/Dockerfile
 
       - name: Ensure tag version matches collector version
         id: ensure-tag-version
