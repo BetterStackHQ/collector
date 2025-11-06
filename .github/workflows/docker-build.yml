@@ -44,7 +44,7 @@ jobs:
           fi
 
           # Modify the Dockerfile to append suffix to COLLECTOR_VERSION
-          sed -i "s/^ENV COLLECTOR_VERSION=\(.*\)/ENV COLLECTOR_VERSION=\1${SUFFIX}/" Dockerfile
+          sed -i "s/^ENV COLLECTOR_VERSION=\(.*\)/ENV COLLECTOR_VERSION=\1${SUFFIX}/" collector/Dockerfile
 
           # Show what was changed for debugging
           echo "Modified COLLECTOR_VERSION:"
@@ -54,7 +54,7 @@ jobs:
         id: ensure-tag-version
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            sed -i "s/^ENV COLLECTOR_VERSION=.*/ENV COLLECTOR_VERSION=${GITHUB_REF#refs\/tags\/v}/" Dockerfile
+            sed -i "s/^ENV COLLECTOR_VERSION=.*/ENV COLLECTOR_VERSION=${GITHUB_REF#refs\/tags\/v}/" collector/Dockerfile
             git diff --exit-code
           fi
 
