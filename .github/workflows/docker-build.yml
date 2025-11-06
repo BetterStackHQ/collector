@@ -94,14 +94,14 @@ jobs:
           project: ${{ secrets.DEPOT_PROJECT_ID }}
           token: ${{ secrets.DEPOT_API_TOKEN }}
           context: .
-          file: Dockerfile
+          file: collector/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ steps.repo.outputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             COLLECTOR_VERSION=${{ github.ref_name }}
-  
+
   build-beyla:
     runs-on: ubuntu-latest
     permissions:
@@ -150,7 +150,7 @@ jobs:
           project: ${{ secrets.DEPOT_PROJECT_ID }}
           token: ${{ secrets.DEPOT_API_TOKEN }}
           context: .
-          file: Dockerfile.beyla
+          file: beyla/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ steps.repo.outputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
