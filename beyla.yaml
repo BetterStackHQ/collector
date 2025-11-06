@@ -7,6 +7,7 @@ discovery:
     - open_ports: "1-65535"
 
   exclude_instrument:
+    - k8s_deployment_name: "es-java-otel-simple"
     - open_ports: "33000"
     - open_ports: "34320"
     - exe_path: ".*/vector$"
@@ -14,7 +15,7 @@ discovery:
     - exe_path: ".*/fluentbit$"
     - exe_path: ".*/cluster-agent$"
 
-  exclude_otel_instrumented_services: false
+  exclude_otel_instrumented_services: true
 
 otel_metrics_export:
 
