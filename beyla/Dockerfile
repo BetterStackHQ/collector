@@ -1,5 +1,5 @@
 # Add Node Agent to the image
-FROM ghcr.io/coroot/coroot-node-agent:1.25.0 AS node-agent
+FROM ghcr.io/coroot/coroot-node-agent:1.27.0 AS node-agent
 
 # Add Cluster Agent to the image
 FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
@@ -23,7 +23,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Create necessary directories
-RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /enrichment
+RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /enrichment /bootstrap
 
 # Copy Beyla files from official image and set permissions
 COPY --from=beyla-source --chmod=755 /beyla /usr/local/bin/beyla
@@ -37,16 +37,8 @@ COPY --from=node-agent --chmod=755 /usr/bin/coroot-node-agent /usr/local/bin/nod
 # Copy Cluster Agent
 COPY --from=cluster-agent --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent
 
-# Copy Ruby dockerprobe implementation to working directory
-COPY dockerprobe /dockerprobe
-
-# Copy configuration files
-COPY beyla/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-COPY --chmod=755 beyla/entrypoint.sh /entrypoint.sh
-COPY --chmod=755 beyla/cluster-collector.sh /cluster-collector.sh
-
-# Copy Beyla configuration
-COPY beyla.yaml /etc/beyla/beyla.yaml
+COPY beyla/bootstrap_supervisord.conf /bootstrap/supervisord.conf
+COPY --chmod=755 beyla/run_supervisord.sh /run_supervisord.sh
 
 # Default command
-CMD ["/entrypoint.sh"]
+CMD ["/run_supervisord.sh"]

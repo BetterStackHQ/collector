@@ -44,17 +44,17 @@ jobs:
           fi
 
           # Modify the Dockerfile to append suffix to COLLECTOR_VERSION
-          sed -i "s/^ENV COLLECTOR_VERSION=\(.*\)/ENV COLLECTOR_VERSION=\1${SUFFIX}/" Dockerfile
+          sed -i "s/^ENV COLLECTOR_VERSION=\(.*\)/ENV COLLECTOR_VERSION=\1${SUFFIX}/" collector/Dockerfile
 
           # Show what was changed for debugging
           echo "Modified COLLECTOR_VERSION:"
-          grep "^ENV COLLECTOR_VERSION=" Dockerfile
+          grep "^ENV COLLECTOR_VERSION=" collector/Dockerfile
 
       - name: Ensure tag version matches collector version
         id: ensure-tag-version
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            sed -i "s/^ENV COLLECTOR_VERSION=.*/ENV COLLECTOR_VERSION=${GITHUB_REF#refs\/tags\/v}/" Dockerfile
+            sed -i "s/^ENV COLLECTOR_VERSION=.*/ENV COLLECTOR_VERSION=${GITHUB_REF#refs\/tags\/v}/" collector/Dockerfile
             git diff --exit-code
           fi
 
@@ -94,14 +94,14 @@ jobs:
           project: ${{ secrets.DEPOT_PROJECT_ID }}
           token: ${{ secrets.DEPOT_API_TOKEN }}
           context: .
-          file: Dockerfile
+          file: collector/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ steps.repo.outputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             COLLECTOR_VERSION=${{ github.ref_name }}
-  
+
   build-beyla:
     runs-on: ubuntu-latest
     permissions:
@@ -150,7 +150,7 @@ jobs:
           project: ${{ secrets.DEPOT_PROJECT_ID }}
           token: ${{ secrets.DEPOT_API_TOKEN }}
           context: .
-          file: Dockerfile.beyla
+          file: beyla/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ steps.repo.outputs.push }}
           tags: ${{ steps.meta.outputs.tags }}

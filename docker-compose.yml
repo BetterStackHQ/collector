@@ -2,12 +2,12 @@ services:
   collector:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: collector/Dockerfile
     image: betterstack/collector:latest
     container_name: better-stack-collector
     restart: always
     healthcheck:
-      test: ["CMD", "/healthcheck.sh"]
+      test: ["CMD-SHELL", "if [ -x /var/lib/better-stack/collector/healthcheck.sh ]; then /var/lib/better-stack/collector/healthcheck.sh; else exit 0; fi"]
       interval: 30s
       timeout: 10s
       start_period: 60s
@@ -28,6 +28,7 @@ services:
       # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this volume
       # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
       - docker-metadata:/enrichment:rw
+      - /var/lib/better-stack:/var/lib/better-stack
     ports:
       # Bind to localhost only for security - Beyla will connect via host network
       - "127.0.0.1:34320:34320" # Beyla metrics endpoint
@@ -36,7 +37,7 @@ services:
   beyla:
     build:
       context: .
-      dockerfile: Dockerfile.beyla
+      dockerfile: beyla/Dockerfile
     image: betterstack/collector-beyla:latest
     container_name: better-stack-beyla
     restart: always
@@ -69,12 +70,6 @@ services:
       - GOMEMLIMIT=1400MiB
       # Pass hostname of host machine to Beyla; needs `export HOSTNAME` before running `docker compose up`
       - HOSTNAME
-      # Override OTLP endpoint to point to collector container
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:34320
-      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-      - BEYLA_CONFIG_PATH=/etc/beyla/beyla.yaml
-      # Disable Kubernetes metadata
-      - BEYLA_KUBE_METADATA_ENABLE=false
       # Enable dockerprobe
       - ENABLE_DOCKERPROBE
     volumes:
@@ -90,6 +85,7 @@ services:
       # Persist ACME certs and stable symlinks across restarts
       - letsencrypt:/etc/letsencrypt
       - ssl-certs:/etc/ssl
+      - /var/lib/better-stack:/var/lib/better-stack
     depends_on:
       - collector
 

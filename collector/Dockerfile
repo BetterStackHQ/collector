@@ -20,9 +20,6 @@ RUN apt-get update && apt-get install -y \
 COPY --from=vector --chmod=755 /usr/bin/vector /usr/local/bin/vector
 COPY --from=vector /etc/vector /etc/vector
 
-# Copy mdprobe
-COPY mdprobe /mdprobe
-
 # Create necessary directories
 RUN mkdir -p /versions/0-default \
   && mkdir -p /etc/supervisor/conf.d \
@@ -36,7 +33,7 @@ RUN mkdir -p /versions/0-default \
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
 ENV CLUSTER_COLLECTOR=false
-ENV COLLECTOR_VERSION=1.0.40
+ENV COLLECTOR_VERSION=1.1.0
 ENV VECTOR_VERSION=0.47.0
 ENV BEYLA_VERSION=2.7.5
 ENV CLUSTER_AGENT_VERSION=1.2.4
@@ -54,28 +51,14 @@ ENV CLUSTER_AGENT_VERSION=1.2.4
 # This is considered a best practice when running multi-process containers with Tini as the init system.
 ENV TINI_SUBREAPER=true
 
-# Copy supervisor configuration
-COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+# Copy bootstrap supervisor configuration and necessary initialization scripts
+COPY collector/bootstrap_supervisord.conf /bootstrap/supervisord.conf
+COPY --chmod=755 collector/bootstrap.sh /bootstrap.sh
+COPY --chmod=755 collector/run_supervisord.sh /run_supervisord.sh
 
-# Copy Ruby scripts
-COPY --chmod=755 updater.rb /updater.rb
-COPY --chmod=755 proxy.rb /proxy.rb
-COPY --chmod=755 vector.sh /vector.sh
-COPY --chmod=755 healthcheck.sh /healthcheck.sh
-COPY --chmod=755 certbot-runner.sh /certbot-runner.sh
-COPY --chmod=755 certbot-deploy-hook.sh /certbot-deploy-hook.sh
-COPY versions/0-default/vector.yaml /versions/0-default/vector.yaml
-COPY versions/0-default/databases.json /versions/0-default/databases.json
-COPY kubernetes-discovery/0-default/discovered_pods.yaml /kubernetes-discovery/0-default/discovered_pods.yaml
-COPY engine /engine
-COPY --chmod=755 ebpf.sh /ebpf.sh
-# Copy default enrichment files to both locations
-# /enrichment-defaults is the source for copying at runtime
-# /enrichment is for Kubernetes compatibility, since it's volume mounts work differently from compose/swarm
-COPY dockerprobe/docker-mappings.default.csv /enrichment-defaults/docker-mappings.csv
-COPY dockerprobe/databases.default.csv /enrichment-defaults/databases.csv
-COPY dockerprobe/docker-mappings.default.csv /enrichment/docker-mappings.csv
-COPY dockerprobe/databases.default.csv /enrichment/databases.csv
+COPY collector/versions/0-default/vector.yaml /versions/0-default/vector.yaml
+COPY collector/versions/0-default/databases.json /versions/0-default/databases.json
+COPY collector/kubernetes-discovery/0-default/discovered_pods.yaml /kubernetes-discovery/0-default/discovered_pods.yaml
 
 # Create initial vector-config with symlinks to defaults
 RUN mkdir -p /vector-config/0-default \
@@ -90,4 +73,4 @@ RUN mkdir -p /vector-config/0-default \
 ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
 
 # Start supervisor
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+CMD ["/run_supervisord.sh"]
