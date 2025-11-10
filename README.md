@@ -3,7 +3,6 @@
 [![Better Stack dashboard](https://github.com/user-attachments/assets/e84ed542-a9b9-4a7b-9442-3c145593406a)](https://betterstack.com/tracing)
 
 [![Apache 2.0 License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE.md)
-[![Run Tests](https://github.com/BetterStackHQ/collector/actions/workflows/test.yml/badge.svg)](https://github.com/BetterStackHQ/collector/actions/workflows/test.yml)
 
 Better Stack collector is the easiest and recommended way of integrating Better Stack into your environment. 
 
