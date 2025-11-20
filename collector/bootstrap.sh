@@ -123,6 +123,8 @@ log_info "Fetching latest manifest version..."
 LATEST_MANIFEST_URL="$BASE_URL/api/collector/latest-manifest?collector_secret=$(printf %s "$COLLECTOR_SECRET" | jq -sRr @uri)"
 
 TEMP_VERSION_FILE=$(mktemp)
+
+# shellcheck disable=SC2064
 trap "rm -f $TEMP_VERSION_FILE" EXIT
 
 if ! make_api_request "$LATEST_MANIFEST_URL" "$TEMP_VERSION_FILE"; then
