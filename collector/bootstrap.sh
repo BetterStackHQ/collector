@@ -54,12 +54,29 @@ log_info "BASE_URL: $BASE_URL"
 # Check if already bootstrapped
 MANIFEST_DIR="/var/lib/better-stack"
 BOOTSTRAPPED_FILE="$MANIFEST_DIR/bootstrapped.txt"
+BEYLA_UNPROVISIONED_FILE="$MANIFEST_DIR/beyla-unprovisioned.txt"
 
+# sanity check: if bootstrap is restarted and bootstrap marker is found, it's likely supervisor restart failed
+# perhaps a bad supervisord.conf file was sent - in any case, re-attempt bootstrapping on latest manifest
 if [ -f "$BOOTSTRAPPED_FILE" ]; then
-    log_info "Bootstrap already completed (found $BOOTSTRAPPED_FILE)"
-    log_info "Bootstrapped on: $(cat "$BOOTSTRAPPED_FILE")"
-    log_info "Exiting without changes."
-    exit 0
+    log_info "Bootstrap marker found (bootstrapped on: $(cat "$BOOTSTRAPPED_FILE"))"
+
+    # Verify bootstrap actually succeeded by checking if updater process exists
+    log_info "Verifying bootstrap integrity..."
+    if supervisorctl status | grep -q "updater"; then
+        log_info "Bootstrap verified successfully (updater process found)"
+        log_info "Exiting without changes."
+        exit 0
+    else
+        log_warn "Bootstrap marker exists but updater process not found!"
+        log_warn "Bootstrap may have failed previously. Re-bootstrapping..."
+
+        # Remove markers to allow re-bootstrap
+        rm -f "$BOOTSTRAPPED_FILE"
+        rm -f "$BEYLA_UNPROVISIONED_FILE"
+
+        log_info "Removed bootstrap markers, proceeding with bootstrap..."
+    fi
 fi
 
 # Function to make API request with error handling
@@ -209,7 +226,6 @@ log_info "Location: $MANIFEST_DIR"
 
 # Wait for Beyla supervisor socket (up to 30 seconds)
 BEYLA_SOCKET="/var/lib/better-stack/beyla-supervisor.sock"
-BEYLA_UNPROVISIONED_FILE="/var/lib/better-stack/beyla-unprovisioned.txt"
 WAIT_SECONDS=30
 BEYLA_SOCKET_EXISTS=false
 
@@ -237,6 +253,7 @@ else
 fi
 
 # Mark bootstrap as completed
+# XXX: it may still fail on supervisorctl commands, but if it does, the integrity check will re-bootstrap
 date > "$BOOTSTRAPPED_FILE"
 log_info "Bootstrap marker written to: $BOOTSTRAPPED_FILE"
 
