@@ -207,15 +207,41 @@ log_info "Manifest version: $MANIFEST_VERSION"
 log_info "Files downloaded: $FILES_COUNT"
 log_info "Location: $MANIFEST_DIR"
 
+# Wait for Beyla supervisor socket (up to 30 seconds)
+BEYLA_SOCKET="/var/lib/better-stack/beyla-supervisor.sock"
+BEYLA_UNPROVISIONED_FILE="/var/lib/better-stack/beyla-unprovisioned.txt"
+WAIT_SECONDS=30
+BEYLA_SOCKET_EXISTS=false
+
+log_info "Waiting up to ${WAIT_SECONDS}s for Beyla supervisor socket..."
+for i in $(seq 1 $WAIT_SECONDS); do
+    if [ -S "$BEYLA_SOCKET" ]; then
+        log_info "Beyla supervisor socket found after ${i}s"
+        BEYLA_SOCKET_EXISTS=true
+        break
+    fi
+    sleep 1
+done
+
+if [ "$BEYLA_SOCKET_EXISTS" = true ]; then
+    # Socket exists - reload Beyla supervisor
+    log_info "Reloading Beyla supervisor configuration..."
+    supervisorctl -s unix://"$BEYLA_SOCKET" reread
+    supervisorctl -s unix://"$BEYLA_SOCKET" update
+else
+    # Socket not found - mark as unprovisioned
+    log_warn "Beyla supervisor socket not found after ${WAIT_SECONDS}s"
+    log_warn "Marking Beyla as unprovisioned"
+    date > "$BEYLA_UNPROVISIONED_FILE"
+    log_info "Beyla unprovisioned marker written to: $BEYLA_UNPROVISIONED_FILE"
+fi
+
 # Mark bootstrap as completed
 date > "$BOOTSTRAPPED_FILE"
 log_info "Bootstrap marker written to: $BOOTSTRAPPED_FILE"
 
-# same thing for Beyla container
-supervisorctl -s unix:///var/lib/better-stack/beyla-supervisor.sock reread
-supervisorctl -s unix:///var/lib/better-stack/beyla-supervisor.sock update
-
 # reload supervisord config and start processes as indicated by new config (overwriting bootstrap config)
+log_info "Reloading local supervisor configuration..."
 supervisorctl reread
 supervisorctl update
 
