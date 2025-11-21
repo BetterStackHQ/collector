@@ -26,10 +26,6 @@ services:
       # Can be customized via MOUNT_HOST_PATHS environment variable in install.sh to restrict access to specific paths
       - /:/host:ro
       - /var/lib/better-stack:/var/lib/better-stack
-    ports:
-      # Bind to localhost only for security - Beyla will connect via host network
-      - "127.0.0.1:34320:34320" # Beyla metrics endpoint
-      - "127.0.0.1:33000:33000" # Vector proxy endpoint
 
   beyla:
     build:
