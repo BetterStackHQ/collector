@@ -27,14 +27,7 @@ services:
       # Mount host root filesystem to enable reading system metrics, logs (including logs outside /var/log), and container data
       # Can be customized via MOUNT_HOST_PATHS environment variable in install.sh to restrict access to specific paths
       - /:/host:ro
-      # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this volume
-      # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
-      - docker-metadata:/enrichment:rw
       - /var/lib/better-stack:/var/lib/better-stack
-    ports:
-      # Bind to localhost only for security - Beyla will connect via host network
-      - "127.0.0.1:34320:34320" # Beyla metrics endpoint
-      - "127.0.0.1:33000:33000" # Vector proxy endpoint
 
   beyla:
     build:
@@ -81,17 +74,6 @@ services:
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
       # Docker socket for dockerprobe
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # dockerprobe running in the beyla container writes a map of PIDs->container IDs and names to this volume
-      # Vector uses this file as an enrichment table to tag logs, metrics, and traces with container metadata.
-      - docker-metadata:/enrichment:rw
-      # Persist ACME certs and stable symlinks across restarts
-      - letsencrypt:/etc/letsencrypt
-      - ssl-certs:/etc/ssl
       - /var/lib/better-stack:/var/lib/better-stack
     depends_on:
       - collector
-
-volumes:
-  docker-metadata:
-  letsencrypt:
-  ssl-certs:
