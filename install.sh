@@ -120,7 +120,7 @@ else
 fi
 
 # Adjust Compose port exposure rules
-# - Keep existing localhost bindings: 34320 and 33000
+# - Adds ports section to collector service (inserted before volumes section)
 # - If PROXY_PORT present, add host mapping: ${PROXY_PORT}:${PROXY_PORT} (for upstream proxy in Vector)
 # - Add port 80 for ACME validation when PROXY_PORT==443 or USE_TLS is set (and PROXY_PORT!=80)
 
@@ -136,21 +136,36 @@ adjust_compose_ports() {
   fi
 
   awk -v addport="$PROXY_PORT" -v add80="$bind80" '
-    BEGIN { inserted=0 }
+    BEGIN { inserted=0; in_collector=0 }
     {
       # Remove previously inserted install lines for idempotence
-      if ($0 ~ /# install: (proxy port|acme http-01)/) { next }
-      print $0
-      # Append new mappings right after the 33000 mapping
-      if ($0 ~ /127\.0\.0\.1:33000:33000/ && inserted==0) {
-        if (addport != "") {
-          print "      - \"" addport ":" addport "\" # install: proxy port"
-        }
-        if (add80 != "") {
-          print "      - \"80:80\" # install: acme http-01"
+      if ($0 ~ /# install: (proxy port|acme http-01|ports section)/) { next }
+      if ($0 ~ /^[[:space:]]*ports:[[:space:]]*$/ && in_collector==1) { next }
+
+      # Track if we are in the collector service
+      if ($0 ~ /^[[:space:]]*collector:[[:space:]]*$/) {
+        in_collector=1
+      }
+      # Reset when we hit the next service (beyla, etc.)
+      if ($0 ~ /^[[:space:]]*[a-z_-]+:[[:space:]]*$/ && $0 !~ /collector:/) {
+        in_collector=0
+      }
+
+      # Insert ports section before volumes section in collector
+      if (in_collector==1 && inserted==0 && $0 ~ /^[[:space:]]*volumes:[[:space:]]*$/) {
+        if (addport != "" || add80 != "") {
+          print "    ports: # install: ports section"
+          if (addport != "") {
+            print "      - \"" addport ":" addport "\" # install: proxy port"
+          }
+          if (add80 != "") {
+            print "      - \"80:80\" # install: acme http-01"
+          }
         }
         inserted=1
       }
+
+      print $0
     }
   ' "$file" > "$tmpfile"
   mv "$tmpfile" "$file"
