@@ -54,12 +54,29 @@ log_info "BASE_URL: $BASE_URL"
 # Check if already bootstrapped
 MANIFEST_DIR="/var/lib/better-stack"
 BOOTSTRAPPED_FILE="$MANIFEST_DIR/bootstrapped.txt"
+BEYLA_UNPROVISIONED_FILE="$MANIFEST_DIR/beyla-unprovisioned.txt"
 
+# sanity check: if bootstrap is restarted and bootstrap marker is found, it's likely supervisor restart failed
+# perhaps a bad supervisord.conf file was sent - in any case, re-attempt bootstrapping on latest manifest
 if [ -f "$BOOTSTRAPPED_FILE" ]; then
-    log_info "Bootstrap already completed (found $BOOTSTRAPPED_FILE)"
-    log_info "Bootstrapped on: $(cat "$BOOTSTRAPPED_FILE")"
-    log_info "Exiting without changes."
-    exit 0
+    log_info "Bootstrap marker found (bootstrapped on: $(cat "$BOOTSTRAPPED_FILE"))"
+
+    # Verify bootstrap actually succeeded by checking if updater process exists
+    log_info "Verifying bootstrap integrity..."
+    if supervisorctl status | grep -q "updater"; then
+        log_info "Bootstrap verified successfully (updater process found)"
+        log_info "Exiting without changes."
+        exit 0
+    else
+        log_warn "Bootstrap marker exists but updater process not found!"
+        log_warn "Bootstrap may have failed previously. Re-bootstrapping..."
+
+        # Remove markers to allow re-bootstrap
+        rm -f "$BOOTSTRAPPED_FILE"
+        rm -f "$BEYLA_UNPROVISIONED_FILE"
+
+        log_info "Removed bootstrap markers, proceeding with bootstrap..."
+    fi
 fi
 
 # Function to make API request with error handling
@@ -106,6 +123,8 @@ log_info "Fetching latest manifest version..."
 LATEST_MANIFEST_URL="$BASE_URL/api/collector/latest-manifest?collector_secret=$(printf %s "$COLLECTOR_SECRET" | jq -sRr @uri)"
 
 TEMP_VERSION_FILE=$(mktemp)
+
+# shellcheck disable=SC2064
 trap "rm -f $TEMP_VERSION_FILE" EXIT
 
 if ! make_api_request "$LATEST_MANIFEST_URL" "$TEMP_VERSION_FILE"; then
@@ -207,15 +226,41 @@ log_info "Manifest version: $MANIFEST_VERSION"
 log_info "Files downloaded: $FILES_COUNT"
 log_info "Location: $MANIFEST_DIR"
 
+# Wait for Beyla supervisor socket (up to 30 seconds)
+BEYLA_SOCKET="/var/lib/better-stack/beyla-supervisor.sock"
+WAIT_SECONDS=30
+BEYLA_SOCKET_EXISTS=false
+
+log_info "Waiting up to ${WAIT_SECONDS}s for Beyla supervisor socket..."
+for i in $(seq 1 $WAIT_SECONDS); do
+    if [ -S "$BEYLA_SOCKET" ]; then
+        log_info "Beyla supervisor socket found after ${i}s"
+        BEYLA_SOCKET_EXISTS=true
+        break
+    fi
+    sleep 1
+done
+
+if [ "$BEYLA_SOCKET_EXISTS" = true ]; then
+    # Socket exists - reload Beyla supervisor
+    log_info "Reloading Beyla supervisor configuration..."
+    supervisorctl -s unix://"$BEYLA_SOCKET" reread
+    supervisorctl -s unix://"$BEYLA_SOCKET" update
+else
+    # Socket not found - mark as unprovisioned
+    log_warn "Beyla supervisor socket not found after ${WAIT_SECONDS}s"
+    log_warn "Marking Beyla as unprovisioned"
+    date > "$BEYLA_UNPROVISIONED_FILE"
+    log_info "Beyla unprovisioned marker written to: $BEYLA_UNPROVISIONED_FILE"
+fi
+
 # Mark bootstrap as completed
+# XXX: it may still fail on supervisorctl commands, but if it does, the integrity check will re-bootstrap
 date > "$BOOTSTRAPPED_FILE"
 log_info "Bootstrap marker written to: $BOOTSTRAPPED_FILE"
 
-# same thing for Beyla container
-supervisorctl -s unix:///var/lib/better-stack/beyla-supervisor.sock reread
-supervisorctl -s unix:///var/lib/better-stack/beyla-supervisor.sock update
-
 # reload supervisord config and start processes as indicated by new config (overwriting bootstrap config)
+log_info "Reloading local supervisor configuration..."
 supervisorctl reread
 supervisorctl update
 
