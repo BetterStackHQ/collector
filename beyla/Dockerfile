@@ -5,7 +5,7 @@ FROM ghcr.io/coroot/coroot-node-agent:1.27.0 AS node-agent
 FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
 
 # Add Beyla to the image
-FROM grafana/beyla:2.7.8 AS beyla-source
+FROM grafana/beyla:2.7.9 AS beyla-source
 
 # Add node exporter to the image
 FROM prom/node-exporter:v1.10.2 AS node-exporter-source
