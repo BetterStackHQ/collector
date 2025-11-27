@@ -5,7 +5,10 @@ FROM ghcr.io/coroot/coroot-node-agent:1.27.0 AS node-agent
 FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
 
 # Add Beyla to the image
-FROM grafana/beyla:2.7.7 AS beyla-source
+FROM grafana/beyla:2.7.9 AS beyla-source
+
+# Add node exporter to the image
+FROM prom/node-exporter:v1.10.2 AS node-exporter-source
 
 # Final stage - Using Debian 12.11-slim for glibc compatibility with node-agent
 FROM debian:12.11-slim
@@ -36,6 +39,9 @@ COPY --from=node-agent --chmod=755 /usr/bin/coroot-node-agent /usr/local/bin/nod
 
 # Copy Cluster Agent
 COPY --from=cluster-agent --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent
+
+# Copy Node exporter
+COPY --from=node-exporter-source --chmod=755 /bin/node_exporter /usr/local/bin/node_exporter
 
 COPY beyla/bootstrap_supervisord.conf /bootstrap/supervisord.conf
 COPY --chmod=755 beyla/run_supervisord.sh /run_supervisord.sh
