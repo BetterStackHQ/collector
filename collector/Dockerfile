@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y \
   jq \
   certbot \
   openssl \
+  traceroute \
   && rm -rf /var/lib/apt/lists/*
 
 # Copy Vector from vector image
@@ -33,7 +34,7 @@ RUN mkdir -p /versions/0-default \
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
 ENV CLUSTER_COLLECTOR=false
-ENV COLLECTOR_VERSION=1.1.3
+ENV COLLECTOR_VERSION=1.1.4
 ENV VECTOR_VERSION=0.47.0
 ENV BEYLA_VERSION=2.7.5
 ENV CLUSTER_AGENT_VERSION=1.2.4
