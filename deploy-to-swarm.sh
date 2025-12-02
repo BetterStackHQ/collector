@@ -28,6 +28,7 @@
 # - CLUSTER_COLLECTOR: Enable cluster collector mode (default: false)
 # - ENABLE_DOCKERPROBE: Enable Docker container metadata collection (default: true)
 # - PROXY_PORT: Optional proxy port for upstream proxy mode
+# - NODE_FILTER: Regex pattern to filter nodes (e.g., 'worker' or 'node-[0-9]+')
 
 set -uo pipefail
 
@@ -90,6 +91,7 @@ BASE_URL="${BASE_URL:-https://telemetry.betterstack.com}"
 CLUSTER_COLLECTOR="${CLUSTER_COLLECTOR:-false}"
 ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
 PROXY_PORT="${PROXY_PORT:-}"
+NODE_FILTER="${NODE_FILTER:-}"
 
 # GitHub raw URL base for downloading compose files
 GITHUB_RAW_BASE="https://raw.githubusercontent.com/BetterStackHQ/collector/main"
@@ -108,6 +110,12 @@ echo
 # Capture both stdout and stderr, redirect stdin from /dev/null to prevent SSH from reading the script
 NODES=$(${SSH_CMD} "$MANAGER_NODE" "docker node ls --format '{{.Hostname}}'" </dev/null 2>&1)
 EXIT_CODE=$?
+
+# Filter nodes if NODE_FILTER is set
+if [[ $EXIT_CODE -eq 0 && -n "$NODE_FILTER" ]]; then
+    NODES=$(echo "$NODES" | grep -E "$NODE_FILTER" || true)
+    print_blue "Filtered nodes matching: $NODE_FILTER"
+fi
 
 if [[ $EXIT_CODE -ne 0 ]]; then
     echo "${BOLD}${RED}✗ Failed to connect to $MANAGER_NODE:${RESET}"
