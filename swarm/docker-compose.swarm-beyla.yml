@@ -10,7 +10,6 @@
 
 services:
   beyla:
-    # boom
     image: betterstack/collector-beyla:latest
     container_name: better-stack-beyla
     restart: always
