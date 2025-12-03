@@ -8,9 +8,9 @@ services:
     restart: always
     healthcheck:
       test: ["CMD-SHELL", "if [ -x /var/lib/better-stack/collector/healthcheck.sh ]; then /var/lib/better-stack/collector/healthcheck.sh; else exit 0; fi"]
-      interval: 30s
+      interval: 60s
       timeout: 10s
-      start_period: 60s
+      start_period: 120s
       retries: 3
     environment:
       - COLLECTOR_SECRET
