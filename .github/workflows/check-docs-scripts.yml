@@ -1,0 +1,31 @@
+name: Check scripts from docs
+
+on:
+  push:
+
+jobs:
+  verify-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: "Verify all scripts linked in https://betterstack.com/docs/logs/collector exist"
+        run: |
+          missing=0
+
+          for file in install.sh uninstall.sh deploy-to-swarm.sh; do
+            if [ ! -f "$file" ]; then
+              echo "::error file=$file::Required file '$file' is missing."
+              missing=1
+            else
+              echo "Found $file"
+            fi
+          done
+
+          if [ $missing -ne 0 ]; then
+            echo "Some required files are missing."
+            exit 1
+          fi
+
+          echo "All required files are present."
