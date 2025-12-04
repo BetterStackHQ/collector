@@ -7,6 +7,9 @@ FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
 # Add Beyla to the image
 FROM grafana/beyla:2.7.9 AS beyla-source
 
+# Add OBI to the image
+FROM otel/ebpf-instrument:main AS obi-source
+
 # Add node exporter to the image
 FROM prom/node-exporter:v1.10.2 AS node-exporter-source
 
@@ -33,6 +36,8 @@ COPY --from=beyla-source --chmod=755 /beyla /usr/local/bin/beyla
 COPY --from=beyla-source /LICENSE /LICENSE
 COPY --from=beyla-source /NOTICE /NOTICE
 COPY --from=beyla-source /third_party_licenses.csv /third_party_licenses.csv
+
+COPY --from=obi-source --chmod=755 /ebpf-instrument /usr/local/bin/ebpf-instrument
 
 # Copy Node Agent
 COPY --from=node-agent --chmod=755 /usr/bin/coroot-node-agent /usr/local/bin/node-agent
