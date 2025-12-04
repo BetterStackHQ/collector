@@ -2,6 +2,13 @@ name: Check scripts from docs
 
 on:
   push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
 
 jobs:
   verify-scripts:
