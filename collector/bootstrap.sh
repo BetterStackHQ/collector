@@ -221,18 +221,33 @@ for i in $(seq 0 $((FILES_COUNT - 1))); do
     log_info "  Saved to: $DEST_FILE"
 done
 
-# Step 4: Download topology configuration (optional)
+# Step 4: Download topology configuration (optional, with retries)
 log_info "Downloading topology configuration..."
 TOPOLOGY_URL="$BASE_URL/api/collector/configuration-file?collector_secret=$(printf %s "$COLLECTOR_SECRET" | jq -sRr @uri)&configuration_version=latest&file=topology.json"
 TOPOLOGY_FILE="$MANIFEST_DIR/topology.json"
+TOPOLOGY_MAX_ATTEMPTS=3
+TOPOLOGY_ATTEMPT=1
+TOPOLOGY_SUCCESS=false
 
-TEMP_TOPOLOGY=$(mktemp)
-if make_api_request "$TOPOLOGY_URL" "$TEMP_TOPOLOGY"; then
-    mv "$TEMP_TOPOLOGY" "$TOPOLOGY_FILE"
-    log_info "Topology configuration saved to: $TOPOLOGY_FILE"
-else
-    log_warn "Failed to download topology configuration (continuing anyway)"
-    rm -f "$TEMP_TOPOLOGY"
+while [ "$TOPOLOGY_ATTEMPT" -le "$TOPOLOGY_MAX_ATTEMPTS" ]; do
+    TEMP_TOPOLOGY=$(mktemp)
+    if make_api_request "$TOPOLOGY_URL" "$TEMP_TOPOLOGY"; then
+        mv "$TEMP_TOPOLOGY" "$TOPOLOGY_FILE"
+        log_info "Topology configuration saved to: $TOPOLOGY_FILE"
+        TOPOLOGY_SUCCESS=true
+        break
+    else
+        rm -f "$TEMP_TOPOLOGY"
+        if [ "$TOPOLOGY_ATTEMPT" -lt "$TOPOLOGY_MAX_ATTEMPTS" ]; then
+            log_warn "Failed to download topology configuration (attempt $TOPOLOGY_ATTEMPT/$TOPOLOGY_MAX_ATTEMPTS, retrying...)"
+            sleep 2
+        fi
+        TOPOLOGY_ATTEMPT=$((TOPOLOGY_ATTEMPT + 1))
+    fi
+done
+
+if [ "$TOPOLOGY_SUCCESS" = false ]; then
+    log_warn "Failed to download topology configuration after $TOPOLOGY_MAX_ATTEMPTS attempts (continuing anyway)"
 fi
 
 log_info "Bootstrap completed successfully!"
