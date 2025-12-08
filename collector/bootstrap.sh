@@ -221,6 +221,20 @@ for i in $(seq 0 $((FILES_COUNT - 1))); do
     log_info "  Saved to: $DEST_FILE"
 done
 
+# Step 4: Download topology configuration (optional)
+log_info "Downloading topology configuration..."
+TOPOLOGY_URL="$BASE_URL/api/collector/configuration-file?collector_secret=$(printf %s "$COLLECTOR_SECRET" | jq -sRr @uri)&configuration_version=latest&file=topology.json"
+TOPOLOGY_FILE="$MANIFEST_DIR/topology.json"
+
+TEMP_TOPOLOGY=$(mktemp)
+if make_api_request "$TOPOLOGY_URL" "$TEMP_TOPOLOGY"; then
+    mv "$TEMP_TOPOLOGY" "$TOPOLOGY_FILE"
+    log_info "Topology configuration saved to: $TOPOLOGY_FILE"
+else
+    log_warn "Failed to download topology configuration (continuing anyway)"
+    rm -f "$TEMP_TOPOLOGY"
+fi
+
 log_info "Bootstrap completed successfully!"
 log_info "Manifest version: $MANIFEST_VERSION"
 log_info "Files downloaded: $FILES_COUNT"
