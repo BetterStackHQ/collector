@@ -8,7 +8,7 @@ FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
 FROM grafana/beyla:2.7.9 AS beyla-source
 
 # Add OBI to the image
-FROM otel/ebpf-instrument:main AS obi-source
+FROM otel/ebpf-instrument:v0.3.0 AS obi-source
 
 # Add node exporter to the image
 FROM prom/node-exporter:v1.10.2 AS node-exporter-source
