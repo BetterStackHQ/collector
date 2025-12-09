@@ -1,5 +1,35 @@
 #!/bin/bash
 
+# This script deploys Better Stack Collector across a Docker Swarm cluster.
+#
+# Architecture:
+# - Collector is deployed as a Docker Swarm global service (one instance per node)
+# - Beyla is deployed separately on each node via docker-compose (requires network_mode: host)
+# - Communication between collector and beyla happens via Unix sockets on shared /var/lib/better-stack volume
+#
+# What it does:
+# 1. Connects to swarm manager node via SSH
+# 2. Creates /var/lib/better-stack directory on all nodes
+# 3. Deploys collector as a global swarm service
+# 4. Installs beyla on each node via docker-compose
+# 5. Optionally attaches collector to overlay networks for service discovery
+#
+# Required environment variables:
+# - MANAGER_NODE: SSH target for swarm manager (format: user@host or host)
+# - COLLECTOR_SECRET: Better Stack authentication token
+#
+# Optional environment variables:
+# - ACTION: install (default), uninstall, or force_upgrade
+# - SSH_CMD: Custom SSH command (default: ssh), e.g., 'tsh ssh' for Teleport
+# - IMAGE_TAG: Docker image tag (default: latest)
+# - MOUNT_HOST_PATHS: Comma-separated list of host paths to mount (default: / for entire filesystem)
+# - ATTACH_NETWORKS: Comma-separated overlay network names to attach collector to
+# - BASE_URL: Better Stack API endpoint (default: https://telemetry.betterstack.com)
+# - CLUSTER_COLLECTOR: Enable cluster collector mode (default: false)
+# - ENABLE_DOCKERPROBE: Enable Docker container metadata collection (default: true)
+# - PROXY_PORT: Optional proxy port for upstream proxy mode
+# - NODE_FILTER: Regex pattern to filter nodes (e.g., 'worker' or 'node-[0-9]+')
+
 set -uo pipefail
 
 # Color support functions
@@ -52,10 +82,19 @@ if [[ -z "${COLLECTOR_SECRET:-}" ]]; then
     exit 1
 fi
 
-# Use SSH_CMD from environment or default to ssh
+# Optional environment variables with defaults
 SSH_CMD="${SSH_CMD:-ssh}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 MOUNT_HOST_PATHS="${MOUNT_HOST_PATHS:-}"
+ATTACH_NETWORKS="${ATTACH_NETWORKS:-}"
+BASE_URL="${BASE_URL:-https://telemetry.betterstack.com}"
+CLUSTER_COLLECTOR="${CLUSTER_COLLECTOR:-false}"
+ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
+PROXY_PORT="${PROXY_PORT:-}"
+NODE_FILTER="${NODE_FILTER:-}"
+
+# GitHub raw URL base for downloading compose files
+GITHUB_RAW_BASE="https://raw.githubusercontent.com/BetterStackHQ/collector/main"
 
 print_blue "Connecting to swarm manager: $MANAGER_NODE"
 [[ "$ACTION" != "install" ]] && print_blue "Action: $ACTION"
@@ -71,6 +110,12 @@ echo
 # Capture both stdout and stderr, redirect stdin from /dev/null to prevent SSH from reading the script
 NODES=$(${SSH_CMD} "$MANAGER_NODE" "docker node ls --format '{{.Hostname}}'" </dev/null 2>&1)
 EXIT_CODE=$?
+
+# Filter nodes if NODE_FILTER is set
+if [[ $EXIT_CODE -eq 0 && -n "$NODE_FILTER" ]]; then
+    NODES=$(echo "$NODES" | grep -E "$NODE_FILTER" || true)
+    print_blue "Filtered nodes matching: $NODE_FILTER"
+fi
 
 if [[ $EXIT_CODE -ne 0 ]]; then
     echo "${BOLD}${RED}✗ Failed to connect to $MANAGER_NODE:${RESET}"
@@ -97,101 +142,350 @@ print_green "✓ Found $NODE_COUNT nodes:"
 echo "$NODES"
 echo
 
-# Deploy to each node
-CURRENT=0
-for NODE in $NODES; do
-    ((CURRENT++))
-    
-    case "$ACTION" in
-        "install")
-            print_blue "Installing on node: $NODE ($CURRENT/$NODE_COUNT)"
-            ;;
-        "uninstall")
-            print_blue "Uninstalling from node: $NODE ($CURRENT/$NODE_COUNT)"
-            ;;
-        "force_upgrade")
-            print_blue "Force upgrading on node: $NODE ($CURRENT/$NODE_COUNT)"
-            ;;
-    esac
-
-    # Extract user from MANAGER_NODE if present
+# Function to get SSH target for a node
+get_node_target() {
+    local node="$1"
     if [[ "$MANAGER_NODE" == *"@"* ]]; then
-        SSH_USER="${MANAGER_NODE%%@*}"
-        NODE_TARGET="${SSH_USER}@${NODE}"
+        local ssh_user="${MANAGER_NODE%%@*}"
+        echo "${ssh_user}@${node}"
     else
-        NODE_TARGET="$NODE"
+        echo "$node"
+    fi
+}
+
+# Function to deploy collector stack to swarm
+deploy_collector_stack() {
+    print_blue "Deploying collector stack to swarm..."
+
+    # Build the heredoc with proper escaping
+    local image_tag="$IMAGE_TAG"
+    local mount_host_paths="$MOUNT_HOST_PATHS"
+    local attach_networks="$ATTACH_NETWORKS"
+    local collector_secret="$COLLECTOR_SECRET"
+    local base_url="$BASE_URL"
+    local cluster_collector="$CLUSTER_COLLECTOR"
+    local proxy_port="$PROXY_PORT"
+
+    $SSH_CMD "$MANAGER_NODE" /bin/bash <<EOF
+        set -e
+
+        # Create temporary directory
+        TEMP_DIR=\$(mktemp -d)
+        cd "\$TEMP_DIR"
+        trap "rm -rf \$TEMP_DIR" EXIT
+
+        # Download collector compose file
+        echo "Downloading collector compose file..."
+        curl -sSL "${GITHUB_RAW_BASE}/swarm/docker-compose.swarm-collector.yml" -o docker-compose.yml
+
+        # Replace image tag if not latest
+        if [ "$image_tag" != "latest" ]; then
+            echo "Setting image tag to: $image_tag"
+            sed -i "s/:latest/:${image_tag}/g" docker-compose.yml
+        fi
+
+        # Handle custom mount paths
+        if [ -n "$mount_host_paths" ]; then
+            echo "Configuring custom mount paths: $mount_host_paths"
+            # Create a temporary file with new mounts
+            MOUNT_FILE=\$(mktemp)
+            IFS=',' read -ra PATHS <<< "$mount_host_paths"
+            for path in "\${PATHS[@]}"; do
+                path=\$(echo "\$path" | sed 's/^[[:space:]]*//;s/[[:space:]]*\$//')
+                if [ -n "\$path" ]; then
+                    path="\${path%/}"
+                    cat >> "\$MOUNT_FILE" << MOUNT_ENTRY
+      - type: bind
+        source: \$path
+        target: /host\$path
+        read_only: true
+MOUNT_ENTRY
+                fi
+            done
+
+            # Replace the default /:/host mount with custom mounts
+            awk -v mounts_file="\$MOUNT_FILE" '
+                /source: \// && /target: \/host/ && /read_only: true/ {
+                    if (prev ~ /type: bind/) {
+                        # Skip the previous "- type: bind" line that was already printed
+                        # and the current line, then insert custom mounts
+                        while ((getline line < mounts_file) > 0) {
+                            print line
+                        }
+                        close(mounts_file)
+                        skip_next = 1
+                        next
+                    }
+                }
+                {
+                    if (skip_next) {
+                        skip_next = 0
+                        next
+                    }
+                    prev = \$0
+                    print
+                }
+            ' docker-compose.yml > docker-compose.yml.tmp
+            mv docker-compose.yml.tmp docker-compose.yml
+            rm -f "\$MOUNT_FILE"
+        fi
+
+        # Auto-detect overlay networks if ATTACH_NETWORKS not specified
+        NETWORKS_TO_ATTACH="$attach_networks"
+        if [ -z "\$NETWORKS_TO_ATTACH" ]; then
+            echo "Auto-detecting overlay networks..."
+            NETWORKS_TO_ATTACH=\$(docker network ls --filter driver=overlay --format '{{.Name}}' | grep -v '^ingress\$' | head -5 | tr '\n' ',' | sed 's/,\$//')
+            if [ -n "\$NETWORKS_TO_ATTACH" ]; then
+                echo "Detected overlay networks: \$NETWORKS_TO_ATTACH"
+            else
+                echo "No overlay networks detected (besides ingress)"
+            fi
+        fi
+
+        # Append networks section if we have networks to attach
+        if [ -n "\$NETWORKS_TO_ATTACH" ]; then
+            echo "" >> docker-compose.yml
+            echo "networks:" >> docker-compose.yml
+
+            IFS=',' read -ra NETWORK_ARRAY <<< "\$NETWORKS_TO_ATTACH"
+            for network in "\${NETWORK_ARRAY[@]}"; do
+                network=\$(echo "\$network" | sed 's/^[[:space:]]*//;s/[[:space:]]*\$//')
+                if [ -n "\$network" ]; then
+                    echo "  \$network:" >> docker-compose.yml
+                    echo "    external: true" >> docker-compose.yml
+                fi
+            done
+
+            # Add networks to collector service
+            # Find the last line of volumes section and add networks after it
+            sed -i '/^    # Networks are added dynamically/d' docker-compose.yml
+
+            # Build networks list for the service
+            NETWORKS_LIST=""
+            for network in "\${NETWORK_ARRAY[@]}"; do
+                network=\$(echo "\$network" | sed 's/^[[:space:]]*//;s/[[:space:]]*\$//')
+                if [ -n "\$network" ]; then
+                    NETWORKS_LIST="\${NETWORKS_LIST}      - \$network\n"
+                fi
+            done
+
+            # Insert networks section in collector service (before the closing of service definition)
+            if [ -n "\$NETWORKS_LIST" ]; then
+                # Add networks to the collector service by appending before the networks: section
+                sed -i "/^      - type: bind\$/,/\/var\/lib\/better-stack/ {
+                    /\/var\/lib\/better-stack/ a\\
+    networks:\\
+\$(echo -e "\$NETWORKS_LIST" | sed 's/^/      /' | sed 's/\$/\\\\/')
+                }" docker-compose.yml 2>/dev/null || true
+            fi
+        fi
+
+        echo "Compose file prepared. Deploying stack..."
+
+        # Deploy the stack
+        COLLECTOR_SECRET="$collector_secret" \\
+        BASE_URL="$base_url" \\
+        CLUSTER_COLLECTOR="$cluster_collector" \\
+        PROXY_PORT="$proxy_port" \\
+            docker stack deploy -c docker-compose.yml better-stack
+
+        echo "Stack deployment initiated."
+EOF
+
+    if [[ $? -eq 0 ]]; then
+        print_green "✓ Collector stack deployed to swarm"
+    else
+        print_red "✗ Failed to deploy collector stack"
+        exit 1
     fi
 
-    case "$ACTION" in
-        "install")
-            if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
-                set -e
-                echo "Running: Better Stack collector install..."
-                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/install.sh | \\
-                  COLLECTOR_SECRET="$COLLECTOR_SECRET" IMAGE_TAG="$IMAGE_TAG" MOUNT_HOST_PATHS="$MOUNT_HOST_PATHS" bash
+    # Wait for services to start
+    print_blue "Waiting for collector service to start..."
+    sleep 10
 
-                echo "Checking deployment status..."
-                docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"
-EOF
-            then
-                print_green "✓ Better Stack collector installed on $NODE"
-            else
-                print_red "✗ Failed to install on $NODE"
-                exit 1
-            fi
-            ;;
-            
-        "uninstall")
-            if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
-                set -e
-                echo "Stopping and removing Better Stack containers..."
-                docker stop better-stack-collector better-stack-beyla 2>/dev/null || true
-                docker rm better-stack-collector better-stack-beyla 2>/dev/null || true
-                echo "Containers removed."
-EOF
-            then
-                print_green "✓ Better Stack collector uninstalled from $NODE"
-            else
-                print_red "✗ Failed to uninstall from $NODE"
-                exit 1
-            fi
-            ;;
-            
-        "force_upgrade")
-            if $SSH_CMD "$NODE_TARGET" /bin/bash <<EOF
-                set -e
-                echo "Stopping and removing Better Stack containers..."
-                docker stop better-stack-collector better-stack-beyla 2>/dev/null || true
-                docker rm better-stack-collector better-stack-beyla 2>/dev/null || true
-                echo "Containers removed. Waiting 3 seconds..."
-                sleep 3
-                echo "Installing Better Stack collector..."
-                curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/install.sh | \\
-                  COLLECTOR_SECRET="$COLLECTOR_SECRET" IMAGE_TAG="$IMAGE_TAG" MOUNT_HOST_PATHS="$MOUNT_HOST_PATHS" bash
-
-                echo "Checking deployment status..."
-                docker ps --filter "name=better-stack" --format "table {{.Names}}\t{{.Status}}"
-EOF
-            then
-                print_green "✓ Better Stack collector force upgraded on $NODE"
-            else
-                print_red "✗ Failed to force upgrade on $NODE"
-                exit 1
-            fi
-            ;;
-    esac
+    # Check service status
+    $SSH_CMD "$MANAGER_NODE" "docker service ls --filter name=better-stack" </dev/null
     echo
+}
 
-done
+# Function to deploy beyla to a single node
+deploy_beyla_to_node() {
+    local node="$1"
+    local node_target
+    node_target=$(get_node_target "$node")
 
+    local image_tag="$IMAGE_TAG"
+    local enable_dockerprobe="$ENABLE_DOCKERPROBE"
+
+    if $SSH_CMD "$node_target" /bin/bash <<EOF
+        set -e
+
+        # Create shared directory for collector/beyla communication (must exist before swarm service starts)
+        mkdir -p /var/lib/better-stack
+        chmod 755 /var/lib/better-stack
+
+        # Create temporary directory
+        TEMP_DIR=\$(mktemp -d)
+        cd "\$TEMP_DIR"
+        trap "rm -rf \$TEMP_DIR" EXIT
+
+        # Download beyla compose file
+        echo "Downloading beyla compose file..."
+        curl -sSL "${GITHUB_RAW_BASE}/swarm/docker-compose.swarm-beyla.yml" -o docker-compose.yml
+
+        # Replace image tag if not latest
+        if [ "$image_tag" != "latest" ]; then
+            echo "Setting image tag to: $image_tag"
+            sed -i "s/:latest/:${image_tag}/g" docker-compose.yml
+        fi
+
+        # Detect Docker Compose command
+        if docker compose version &> /dev/null; then
+            COMPOSE_CMD="docker compose"
+        elif docker-compose version &> /dev/null; then
+            COMPOSE_CMD="docker-compose"
+        else
+            echo "Error: Docker Compose not found"
+            exit 1
+        fi
+
+        # Export environment variables
+        export HOSTNAME=\$(hostname)
+        export ENABLE_DOCKERPROBE="$enable_dockerprobe"
+
+        # Pull and start beyla
+        echo "Pulling beyla image..."
+        \$COMPOSE_CMD -f docker-compose.yml -p better-stack-beyla pull
+
+        echo "Starting beyla..."
+        \$COMPOSE_CMD -f docker-compose.yml -p better-stack-beyla up -d
+
+        echo "Checking beyla status..."
+        docker ps --filter "name=better-stack-beyla" --format "table {{.Names}}\t{{.Status}}"
+EOF
+    then
+        print_green "✓ Beyla installed on $node"
+    else
+        print_red "✗ Failed to install beyla on $node"
+        return 1
+    fi
+}
+
+# Function to uninstall from a single node
+uninstall_beyla_from_node() {
+    local node="$1"
+    local node_target
+    node_target=$(get_node_target "$node")
+
+    if $SSH_CMD "$node_target" /bin/bash <<'EOF'
+        set -e
+
+        echo "Stopping and removing beyla container..."
+
+        # Try docker-compose first
+        if docker compose version &> /dev/null; then
+            docker compose -p better-stack-beyla down 2>/dev/null || true
+        elif docker-compose version &> /dev/null; then
+            docker-compose -p better-stack-beyla down 2>/dev/null || true
+        fi
+
+        # Also try direct container removal as fallback
+        docker stop better-stack-beyla 2>/dev/null || true
+        docker rm better-stack-beyla 2>/dev/null || true
+
+        echo "Beyla removed."
+EOF
+    then
+        print_green "✓ Beyla uninstalled from $node"
+    else
+        print_red "✗ Failed to uninstall beyla from $node"
+        return 1
+    fi
+}
+
+# Function to uninstall collector stack
+uninstall_collector_stack() {
+    print_blue "Removing collector stack from swarm..."
+
+    if $SSH_CMD "$MANAGER_NODE" "docker stack rm better-stack" </dev/null; then
+        print_green "✓ Collector stack removed"
+    else
+        print_red "✗ Failed to remove collector stack"
+        return 1
+    fi
+
+    # Wait for services to be removed
+    sleep 5
+}
+
+# Main execution
 case "$ACTION" in
     "install")
+        # Deploy beyla to each node first (this also creates /var/lib/better-stack directory)
+        CURRENT=0
+        for NODE in $NODES; do
+            ((CURRENT++))
+            print_blue "Installing beyla on node: $NODE ($CURRENT/$NODE_COUNT)"
+            deploy_beyla_to_node "$NODE"
+            echo
+        done
+
+        # Deploy collector stack (requires /var/lib/better-stack to exist on all nodes)
+        deploy_collector_stack
+
         print_green "✓ Better Stack collector successfully installed on all swarm nodes!"
+        echo
+        print_blue "Collector is running as a Docker Swarm global service."
+        print_blue "Beyla is running as docker-compose on each node."
         ;;
+
     "uninstall")
+        # Uninstall beyla from each node first
+        CURRENT=0
+        for NODE in $NODES; do
+            ((CURRENT++))
+            print_blue "Uninstalling beyla from node: $NODE ($CURRENT/$NODE_COUNT)"
+            uninstall_beyla_from_node "$NODE"
+            echo
+        done
+
+        # Remove collector stack
+        uninstall_collector_stack
+
         print_green "✓ Better Stack collector successfully uninstalled from all swarm nodes!"
         ;;
+
     "force_upgrade")
+        print_blue "Force upgrading Better Stack collector..."
+        echo
+
+        # Remove collector stack first
+        uninstall_collector_stack
+
+        # Uninstall beyla from each node
+        CURRENT=0
+        for NODE in $NODES; do
+            ((CURRENT++))
+            print_blue "Removing beyla from node: $NODE ($CURRENT/$NODE_COUNT)"
+            uninstall_beyla_from_node "$NODE"
+            echo
+        done
+
+        print_blue "Waiting for cleanup..."
+        sleep 5
+
+        # Deploy beyla to each node first (this also creates /var/lib/better-stack directory)
+        CURRENT=0
+        for NODE in $NODES; do
+            ((CURRENT++))
+            print_blue "Installing beyla on node: $NODE ($CURRENT/$NODE_COUNT)"
+            deploy_beyla_to_node "$NODE"
+            echo
+        done
+
+        # Deploy collector stack
+        deploy_collector_stack
+
         print_green "✓ Better Stack collector successfully force upgraded on all swarm nodes!"
         ;;
 esac

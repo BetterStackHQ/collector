@@ -1,0 +1,50 @@
+# Docker Swarm stack file for Better Stack Collector
+# Deploy with: docker stack deploy -c docker-compose.swarm-collector.yml better-stack
+#
+# NOTE: Beyla must be deployed separately via docker-compose on each node
+# because it requires network_mode: host which is not supported in swarm services.
+
+services:
+  collector:
+    image: betterstack/collector:latest
+    hostname: "{{.Node.Hostname}}"
+    deploy:
+      mode: global
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+    healthcheck:
+      test: ["CMD-SHELL", "if [ -x /var/lib/better-stack/collector/healthcheck.sh ]; then /var/lib/better-stack/collector/healthcheck.sh; else exit 0; fi"]
+      interval: 60s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    environment:
+      - COLLECTOR_SECRET
+      - BASE_URL
+      - CLUSTER_COLLECTOR
+      - VECTOR_LOG_FORMAT=json
+      # Optional proxy port for upstream proxy mode
+      - PROXY_PORT
+    volumes:
+      # Mount host root filesystem to enable reading system metrics, logs (including logs outside /var/log), and container data
+      # Can be customized via MOUNT_HOST_PATHS environment variable in deploy-to-swarm.sh to restrict access to specific paths
+      - type: bind
+        source: /
+        target: /host
+        read_only: true
+      # Shared volume for Unix socket communication with beyla and persistent data
+      - type: bind
+        source: /var/lib/better-stack
+        target: /var/lib/better-stack
+    # Networks are added dynamically by deploy-to-swarm.sh based on overlay network auto-detection
