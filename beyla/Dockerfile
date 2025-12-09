@@ -21,7 +21,8 @@ RUN apt-get update && \
         curl \
         procps \
         ruby \
-        ruby-json && \
+        ruby-json \
+        jq && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
