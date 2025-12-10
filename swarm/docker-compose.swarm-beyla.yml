@@ -18,8 +18,8 @@ services:
     stop_grace_period: 90s
     privileged: true
     pid: host
-    network_mode: host
     uts: host
+    network_mode: host
     mem_limit: 1536m
     healthcheck:
       test: ["CMD-SHELL", "if [ -x /var/lib/better-stack/beyla/healthcheck.sh ]; then /var/lib/better-stack/beyla/healthcheck.sh; else exit 0; fi"]
