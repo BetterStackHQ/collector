@@ -89,8 +89,10 @@ if [ -n "$PROXY_PORT" ]; then
     fi
 fi
 
-# Set hostname if not provided
-HOSTNAME="${HOSTNAME:-$(hostname)}"
+# Set hostname if not provided (use empty string HOSTNAME="" to trigger runtime detection via uts:host)
+if [ -z "${HOSTNAME+x}" ]; then
+    HOSTNAME=$(hostname)
+fi
 
 # Set default values for environment variables
 BASE_URL="${BASE_URL:-https://telemetry.betterstack.com}"

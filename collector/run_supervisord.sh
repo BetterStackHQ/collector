@@ -13,5 +13,11 @@ if [ ! -f "$SUPERVISORD_CONF" ]; then
   echo "Copied bootstrap supervisord config to $SUPERVISORD_CONF"
 fi
 
+# Ensure HOSTNAME is set (use hostname command as fallback)
+if [ -z "$HOSTNAME" ]; then
+  HOSTNAME=$(hostname)
+  export HOSTNAME
+fi
+
 # Start supervisord
 exec /usr/bin/supervisord -c "$SUPERVISORD_CONF"
