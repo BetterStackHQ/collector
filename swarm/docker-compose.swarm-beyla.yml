@@ -13,6 +13,7 @@ services:
     image: betterstack/collector-beyla:latest
     container_name: better-stack-beyla
     restart: always
+    uts: host
     init: true
     stop_signal: SIGTERM
     stop_grace_period: 90s

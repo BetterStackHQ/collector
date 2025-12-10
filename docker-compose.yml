@@ -6,6 +6,7 @@ services:
     image: betterstack/collector:latest
     container_name: better-stack-collector
     restart: always
+    uts: host
     healthcheck:
       test: ["CMD-SHELL", "if [ -x /var/lib/better-stack/collector/healthcheck.sh ]; then /var/lib/better-stack/collector/healthcheck.sh; else exit 0; fi"]
       interval: 60s
@@ -39,6 +40,7 @@ services:
     stop_grace_period: 90s
     privileged: true
     pid: host
+    uts: host
     network_mode: host
     mem_limit: 1536m
     healthcheck:
