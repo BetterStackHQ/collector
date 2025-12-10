@@ -349,6 +349,17 @@ deploy_beyla_to_node() {
             exit 1
         fi
 
+        # Apply v1 compatibility fixes if using docker-compose
+        if [ "\$COMPOSE_CMD" = "docker-compose" ]; then
+            echo "Applying docker-compose v1 compatibility fixes..."
+            # Remove uts: lines (not supported in compose v1)
+            sed -i '/^[[:space:]]*uts:[[:space:]]/d' docker-compose.yml
+            # Add version header if missing
+            if ! grep -q '^version:' docker-compose.yml; then
+                sed -i '1i version: "2.4"' docker-compose.yml
+            fi
+        fi
+
         # Export environment variables
         export HOSTNAME=\$(hostname)
         export ENABLE_DOCKERPROBE="$enable_dockerprobe"

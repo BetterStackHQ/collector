@@ -234,6 +234,7 @@ docker_v1_compatibility() {
   awk '
     BEGIN { in_build = 0; build_indent = 0 }
     /^[[:space:]]*#/ { next }
+    /^[[:space:]]*uts:[[:space:]]/ { next }
     {
       if ($0 ~ /^[[:space:]]*build:[[:space:]]*$/) {
         match($0, /^[[:space:]]*/)
