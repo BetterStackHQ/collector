@@ -1,6 +1,8 @@
 # Use Vector as the base image
 FROM timberio/vector:0.47.0-debian AS vector
 
+FROM prometheuscommunity/postgres-exporter:v0.18.1 AS postgres-exporter
+
 # Final stage
 FROM debian:12.11-slim
 
@@ -21,6 +23,8 @@ RUN apt-get update && apt-get install -y \
 COPY --from=vector --chmod=755 /usr/bin/vector /usr/local/bin/vector
 COPY --from=vector /etc/vector /etc/vector
 
+COPY --from=postgres-exporter --chmod=755 /bin/postgres_exporter /usr/local/bin/postgres_exporter
+
 # Create necessary directories
 RUN mkdir -p /versions/0-default \
   && mkdir -p /etc/supervisor/conf.d \
@@ -34,7 +38,7 @@ RUN mkdir -p /versions/0-default \
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
 ENV CLUSTER_COLLECTOR=false
-ENV COLLECTOR_VERSION=1.1.9
+ENV COLLECTOR_VERSION=1.1.10
 ENV VECTOR_VERSION=0.47.0
 ENV BEYLA_VERSION=2.7.5
 ENV CLUSTER_AGENT_VERSION=1.2.4
