@@ -4,11 +4,11 @@ FROM ghcr.io/coroot/coroot-node-agent:1.27.0 AS node-agent
 # Add Cluster Agent to the image
 FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
 
-# Add Beyla to the image
-FROM grafana/beyla:2.7.9 AS beyla-source
-
 # Add node exporter to the image
 FROM prom/node-exporter:v1.10.2 AS node-exporter-source
+
+# Add OBI to the image
+FROM otel/ebpf-instrument:v0.3.0 AS obi-source
 
 # Final stage - Using Debian 12.11-slim for glibc compatibility with node-agent
 FROM debian:12.11-slim
@@ -30,10 +30,9 @@ RUN apt-get update && \
 RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /enrichment /bootstrap
 
 # Copy Beyla files from official image and set permissions
-COPY --from=beyla-source --chmod=755 /beyla /usr/local/bin/beyla
-COPY --from=beyla-source /LICENSE /LICENSE
-COPY --from=beyla-source /NOTICE /NOTICE
-COPY --from=beyla-source /third_party_licenses.csv /third_party_licenses.csv
+COPY --from=obi-source --chmod=755 /ebpf-instrument /usr/local/bin/ebpf-instrument
+COPY --from=obi-source /LICENSE /LICENSE
+COPY --from=obi-source /NOTICE /NOTICE
 
 # Copy Node Agent
 COPY --from=node-agent --chmod=755 /usr/bin/coroot-node-agent /usr/local/bin/node-agent
