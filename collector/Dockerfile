@@ -1,8 +1,6 @@
 # Use Vector as the base image
 FROM timberio/vector:0.47.0-debian AS vector
 
-FROM prometheuscommunity/postgres-exporter:v0.18.1 AS postgres-exporter
-
 # Final stage
 FROM debian:12.11-slim
 
@@ -22,8 +20,6 @@ RUN apt-get update && apt-get install -y \
 # Copy Vector from vector image
 COPY --from=vector --chmod=755 /usr/bin/vector /usr/local/bin/vector
 COPY --from=vector /etc/vector /etc/vector
-
-COPY --from=postgres-exporter --chmod=755 /bin/postgres_exporter /usr/local/bin/postgres_exporter
 
 # Create necessary directories
 RUN mkdir -p /versions/0-default \

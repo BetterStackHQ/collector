@@ -10,6 +10,9 @@ FROM grafana/beyla:2.7.9 AS beyla-source
 # Add node exporter to the image
 FROM prom/node-exporter:v1.10.2 AS node-exporter-source
 
+# Add postgres exporter to the image
+FROM prometheuscommunity/postgres-exporter:v0.18.1 AS postgres-exporter
+
 # Final stage - Using Debian 12.11-slim for glibc compatibility with node-agent
 FROM debian:12.11-slim
 
@@ -43,6 +46,8 @@ COPY --from=cluster-agent --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/b
 
 # Copy Node exporter
 COPY --from=node-exporter-source --chmod=755 /bin/node_exporter /usr/local/bin/node_exporter
+
+COPY --from=postgres-exporter --chmod=755 /bin/postgres_exporter /usr/local/bin/postgres_exporter
 
 COPY beyla/bootstrap_supervisord.conf /bootstrap/supervisord.conf
 COPY --chmod=755 beyla/run_supervisord.sh /run_supervisord.sh
