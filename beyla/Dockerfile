@@ -7,6 +7,9 @@ FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
 # Add node exporter to the image
 FROM prom/node-exporter:v1.10.2 AS node-exporter-source
 
+# Add postgres exporter to the image
+FROM prometheuscommunity/postgres-exporter:v0.18.1 AS postgres-exporter
+
 # Add OBI to the image
 FROM otel/ebpf-instrument:v0.3.0 AS obi-source
 
@@ -42,6 +45,9 @@ COPY --from=cluster-agent --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/b
 
 # Copy Node exporter
 COPY --from=node-exporter-source --chmod=755 /bin/node_exporter /usr/local/bin/node_exporter
+
+# Copy Postgres exporter
+COPY --from=postgres-exporter --chmod=755 /bin/postgres_exporter /usr/local/bin/postgres_exporter
 
 COPY beyla/bootstrap_supervisord.conf /bootstrap/supervisord.conf
 COPY --chmod=755 beyla/run_supervisord.sh /run_supervisord.sh
