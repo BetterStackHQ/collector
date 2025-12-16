@@ -321,9 +321,9 @@ MOUNT_ENTRY
         PROXY_PORT="$proxy_port" \\
             docker stack deploy -c docker-compose.yml better-stack
 
-        # Force service update to pick up any newly labeled nodes
-        echo "Forcing service update to pick up node changes..."
-        docker service update --force better-stack_collector
+        # Trigger service reconciliation to schedule tasks on newly labeled nodes
+        echo "Reconciling service to pick up node label changes..."
+        docker service update better-stack_collector
 
         echo "Stack deployment initiated."
 EOF
