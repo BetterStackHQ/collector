@@ -7,7 +7,7 @@ name: Build and Push Docker Image
 #
 # Images are pushed to:
 # - Docker Hub: betterstack/collector, betterstack/collector-beyla
-# - GHCR: ghcr.io/<owner>/collector, ghcr.io/<owner>/collector-beyla, ghcr.io/<owner>/collector-ebpf
+# - GHCR: ghcr.io/<owner>/collector, ghcr.io/<owner>/collector-ebpf
 
 on:
   push:
@@ -140,7 +140,6 @@ jobs:
         with:
           images: |
             ${{ steps.repo.outputs.repository }}
-            ghcr.io/${{ github.repository_owner }}/collector-beyla
             ghcr.io/${{ github.repository_owner }}/collector-ebpf
           tags: |
             # For version tags, tag as version and latest
