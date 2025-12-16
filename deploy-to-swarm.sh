@@ -28,7 +28,12 @@
 # - CLUSTER_COLLECTOR: Enable cluster collector mode (default: false)
 # - ENABLE_DOCKERPROBE: Enable Docker container metadata collection (default: true)
 # - PROXY_PORT: Optional proxy port for upstream proxy mode
-# - NODE_FILTER: Regex pattern to filter nodes (e.g., 'worker' or 'node-[0-9]+')
+#
+# Node filtering:
+# - To deploy only to specific nodes, label them beforehand:
+#   docker node update --label-add better-stack.collector=true <node-name>
+# - If any nodes have this label, deployment will be restricted to those nodes only
+# - If no nodes have this label, deployment will proceed to all nodes
 
 set -uo pipefail
 
@@ -91,7 +96,6 @@ BASE_URL="${BASE_URL:-https://telemetry.betterstack.com}"
 CLUSTER_COLLECTOR="${CLUSTER_COLLECTOR:-false}"
 ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
 PROXY_PORT="${PROXY_PORT:-}"
-NODE_FILTER="${NODE_FILTER:-}"
 
 # GitHub raw URL base for downloading compose files
 GITHUB_RAW_BASE="https://raw.githubusercontent.com/BetterStackHQ/collector/main"
@@ -111,10 +115,16 @@ echo
 NODES=$(${SSH_CMD} "$MANAGER_NODE" "docker node ls --format '{{.Hostname}}'" </dev/null 2>&1)
 EXIT_CODE=$?
 
-# Filter nodes if NODE_FILTER is set
-if [[ $EXIT_CODE -eq 0 && -n "$NODE_FILTER" ]]; then
-    NODES=$(echo "$NODES" | grep -E "$NODE_FILTER" || true)
-    print_blue "Filtered nodes matching: $NODE_FILTER"
+# Check for labeled nodes (better-stack.collector=true)
+# Note: docker node ls --filter label= doesn't work reliably, so we use docker node inspect
+USE_LABELED_NODES=false
+if [[ $EXIT_CODE -eq 0 ]]; then
+    LABELED_NODES=$(${SSH_CMD} "$MANAGER_NODE" "docker node ls -q | xargs -I{} docker node inspect {} --format '{{if index .Spec.Labels \"better-stack.collector\"}}{{.Description.Hostname}}{{end}}' | grep -v '^\$'" </dev/null 2>&1 || true)
+    if [[ -n "$LABELED_NODES" ]]; then
+        NODES="$LABELED_NODES"
+        USE_LABELED_NODES=true
+        print_blue "Found nodes labeled with better-stack.collector=true, restricting deployment to these nodes"
+    fi
 fi
 
 if [[ $EXIT_CODE -ne 0 ]]; then
@@ -142,6 +152,14 @@ print_green "✓ Found $NODE_COUNT nodes:"
 echo "$NODES"
 echo
 
+# Ask for confirmation before proceeding
+read -r -p "Proceed with ${ACTION} on these nodes? [Y/n] " CONFIRM
+if [[ "$CONFIRM" =~ ^[Nn]$ ]]; then
+    echo "Aborted."
+    exit 0
+fi
+echo
+
 # Function to get SSH target for a node
 get_node_target() {
     local node="$1"
@@ -165,6 +183,7 @@ deploy_collector_stack() {
     local base_url="$BASE_URL"
     local cluster_collector="$CLUSTER_COLLECTOR"
     local proxy_port="$PROXY_PORT"
+    local use_labeled_nodes="$USE_LABELED_NODES"
 
     $SSH_CMD "$MANAGER_NODE" /bin/bash <<EOF
         set -e
@@ -182,6 +201,19 @@ deploy_collector_stack() {
         if [ "$image_tag" != "latest" ]; then
             echo "Setting image tag to: $image_tag"
             sed -i "s/:latest/:${image_tag}/g" docker-compose.yml
+        fi
+
+        # Add placement constraint if using labeled nodes
+        if [ "$use_labeled_nodes" = "true" ]; then
+            echo "Adding placement constraint for labeled nodes..."
+            # Insert placement constraint after 'mode: global' line using awk for reliable multi-line insertion
+            awk '/mode: global/ {
+                print
+                print "      placement:"
+                print "        constraints:"
+                print "          - node.labels.better-stack.collector == true"
+                next
+            } {print}' docker-compose.yml > docker-compose.yml.tmp && mv docker-compose.yml.tmp docker-compose.yml
         fi
 
         # Handle custom mount paths
@@ -288,6 +320,10 @@ MOUNT_ENTRY
         CLUSTER_COLLECTOR="$cluster_collector" \\
         PROXY_PORT="$proxy_port" \\
             docker stack deploy -c docker-compose.yml better-stack
+
+        # Force service update to pick up any newly labeled nodes
+        echo "Forcing service update to pick up node changes..."
+        docker service update --force better-stack_collector
 
         echo "Stack deployment initiated."
 EOF
