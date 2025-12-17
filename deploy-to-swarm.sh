@@ -152,14 +152,6 @@ print_green "✓ Found $NODE_COUNT nodes:"
 echo "$NODES"
 echo
 
-# Ask for confirmation before proceeding
-read -r -p "Proceed with ${ACTION} on these nodes? [Y/n] " CONFIRM
-if [[ "$CONFIRM" =~ ^[Nn]$ ]]; then
-    echo "Aborted."
-    exit 0
-fi
-echo
-
 # Function to get SSH target for a node
 get_node_target() {
     local node="$1"
