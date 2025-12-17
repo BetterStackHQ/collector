@@ -10,7 +10,7 @@
 
 services:
   beyla:
-    image: betterstack/collector-beyla:latest
+    image: ghcr.io/betterstackhq/collector-ebpf:latest
     container_name: better-stack-beyla
     restart: always
     init: true

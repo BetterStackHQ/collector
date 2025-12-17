@@ -6,7 +6,7 @@
 
 services:
   collector:
-    image: betterstack/collector:latest
+    image: ghcr.io/betterstackhq/collector:latest
     hostname: "{{.Node.Hostname}}"
     deploy:
       mode: global

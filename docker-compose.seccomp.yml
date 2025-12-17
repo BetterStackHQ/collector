@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: collector/Dockerfile
-    image: betterstack/collector:latest
+    image: ghcr.io/betterstackhq/collector:latest
     container_name: better-stack-collector
     restart: always
     uts: host
@@ -34,7 +34,7 @@ services:
     build:
       context: .
       dockerfile: beyla/Dockerfile
-    image: betterstack/collector-beyla:latest
+    image: ghcr.io/betterstackhq/collector-ebpf:latest
     container_name: better-stack-beyla
     restart: always
     init: true
