@@ -1,12 +1,11 @@
 name: Build and Push Docker Image
 
-# This workflow builds and pushes Docker images to Docker Hub and GitHub Container Registry:
+# This workflow builds and pushes Docker images to GitHub Container Registry:
 # - Pull requests: Tagged as pr-NUMBER (e.g., pr-59)
 # - Main branch: Tagged as canary
 # - Version tags: Tagged as the version and latest
 #
 # Images are pushed to:
-# - Docker Hub: betterstack/collector, betterstack/collector-beyla
 # - GHCR: ghcr.io/<owner>/collector, ghcr.io/<owner>/collector-ebpf
 
 on:
@@ -62,11 +61,9 @@ jobs:
             git diff --exit-code
           fi
 
-      - name: Determine repository and tags
+      - name: Determine push flag
         id: repo
         run: |
-          # Always use public repo
-          echo "repository=betterstack/collector" >> $GITHUB_OUTPUT
           echo "push=true" >> $GITHUB_OUTPUT
 
       - name: Set up Docker metadata
@@ -74,7 +71,6 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ steps.repo.outputs.repository }}
             ghcr.io/${{ github.repository_owner }}/collector
           tags: |
             # For version tags, tag as version and latest
@@ -84,12 +80,6 @@ jobs:
             type=raw,value=canary,enable=${{ github.ref == 'refs/heads/main' }}
             # For pull requests, tag as pr-NUMBER
             type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ github.event_name == 'pull_request' }}
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -112,8 +102,6 @@ jobs:
           push: ${{ steps.repo.outputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            COLLECTOR_VERSION=${{ github.ref_name }}
 
   build-beyla:
     runs-on: ubuntu-latest
@@ -127,11 +115,9 @@ jobs:
         with:
           submodules: true
 
-      - name: Determine repository and tags
+      - name: Determine push flag
         id: repo
         run: |
-          # Always use public repo
-          echo "repository=betterstack/collector-beyla" >> $GITHUB_OUTPUT
           echo "push=true" >> $GITHUB_OUTPUT
 
       - name: Set up Docker metadata
@@ -139,7 +125,6 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ steps.repo.outputs.repository }}
             ghcr.io/${{ github.repository_owner }}/collector-ebpf
           tags: |
             # For version tags, tag as version and latest
@@ -149,12 +134,6 @@ jobs:
             type=raw,value=canary,enable=${{ github.ref == 'refs/heads/main' }}
             # For pull requests, tag as pr-NUMBER
             type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ github.event_name == 'pull_request' }}
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
