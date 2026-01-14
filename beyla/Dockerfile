@@ -11,7 +11,7 @@ FROM prom/node-exporter:v1.10.2 AS node-exporter-source
 FROM prometheuscommunity/postgres-exporter:v0.18.1 AS postgres-exporter
 
 # Add OBI to the image
-FROM otel/ebpf-instrument:v0.3.0 AS obi-source
+FROM otel/ebpf-instrument:v0.4.1 AS obi-source
 
 # Final stage - Using Debian 12.11-slim for glibc compatibility with node-agent
 FROM debian:12.11-slim
