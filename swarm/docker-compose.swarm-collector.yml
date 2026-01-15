@@ -36,6 +36,7 @@ services:
       - VECTOR_LOG_FORMAT=json
       # Optional proxy port for upstream proxy mode
       - PROXY_PORT
+      - INSTALLED_AS=swarm
     volumes:
       # Mount host root filesystem to enable reading system metrics, logs (including logs outside /var/log), and container data
       # Can be customized via MOUNT_HOST_PATHS environment variable in deploy-to-swarm.sh to restrict access to specific paths

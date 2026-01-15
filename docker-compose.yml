@@ -22,6 +22,7 @@ services:
       - HOSTNAME
       # Optional proxy port for upstream proxy mode
       - PROXY_PORT
+      - INSTALLED_AS=docker
     volumes:
       # Mount host root filesystem to enable reading system metrics, logs (including logs outside /var/log), and container data
       # Can be customized via MOUNT_HOST_PATHS environment variable in install.sh to restrict access to specific paths
@@ -56,6 +57,7 @@ services:
       - HOSTNAME
       # Enable dockerprobe
       - ENABLE_DOCKERPROBE
+      - INSTALLED_AS=docker
     volumes:
       - /sys/kernel/tracing:/sys/kernel/tracing:rw
       - /sys/kernel/debug:/sys/kernel/debug:rw

@@ -34,6 +34,7 @@ jobs:
       run: |
         # Extract beyla service from docker-compose.yml, excluding build: and depends_on: sections
         # These sections are not applicable in the swarm beyla file
+        # Also exclude INSTALLED_AS= line as it's intentionally different (docker vs swarm)
         awk '
           BEGIN { in_beyla = 0; skip_block = 0; block_indent = 0 }
           /^  beyla:$/ { in_beyla = 1; next }
@@ -54,6 +55,9 @@ jobs:
               }
             }
 
+            # Skip INSTALLED_AS line (intentionally different between docker and swarm)
+            if (/INSTALLED_AS=/) { next }
+
             if (skip_block == 0) {
               print
             }
@@ -61,9 +65,11 @@ jobs:
         ' docker-compose.yml > /tmp/beyla-main.yml
 
         # Extract beyla service from swarm file (skip header comments and services: line)
+        # Also exclude INSTALLED_AS= line as it's intentionally different (docker vs swarm)
         awk '
           BEGIN { in_beyla = 0 }
           /^  beyla:$/ { in_beyla = 1; next }
+          /INSTALLED_AS=/ { next }
           in_beyla == 1 { print }
         ' swarm/docker-compose.swarm-beyla.yml > /tmp/beyla-swarm.yml
 
