@@ -1,6 +1,9 @@
 # Use Vector as the base image
 FROM timberio/vector:0.47.0-debian AS vector
 
+# Add Cluster Agent to the image
+FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
+
 # Final stage
 FROM debian:12.11-slim
 
@@ -21,6 +24,9 @@ RUN apt-get update && apt-get install -y \
 COPY --from=vector --chmod=755 /usr/bin/vector /usr/local/bin/vector
 COPY --from=vector /etc/vector /etc/vector
 
+# Copy Cluster Agent
+COPY --from=cluster-agent --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent
+
 # Create necessary directories
 RUN mkdir -p /versions/0-default \
   && mkdir -p /etc/supervisor/conf.d \
@@ -34,7 +40,7 @@ RUN mkdir -p /versions/0-default \
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
 ENV CLUSTER_COLLECTOR=false
-ENV COLLECTOR_VERSION=1.1.12
+ENV COLLECTOR_VERSION=1.1.13
 ENV VECTOR_VERSION=0.47.0
 ENV BEYLA_VERSION=2.7.5
 ENV CLUSTER_AGENT_VERSION=1.2.4
