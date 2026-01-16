@@ -281,27 +281,27 @@ MOUNT_ENTRY
             done
 
             # Add networks to collector service
-            # Find the last line of volumes section and add networks after it
             sed -i '/^    # Networks are added dynamically/d' docker-compose.yml
 
-            # Build networks list for the service
-            NETWORKS_LIST=""
+            # Build networks section with proper YAML indentation
+            NETWORKS_YAML="    networks:"
             for network in "\${NETWORK_ARRAY[@]}"; do
                 network=\$(echo "\$network" | sed 's/^[[:space:]]*//;s/[[:space:]]*\$//')
                 if [ -n "\$network" ]; then
-                    NETWORKS_LIST="\${NETWORKS_LIST}      - \$network\n"
+                    NETWORKS_YAML="\${NETWORKS_YAML}
+      - \$network"
                 fi
             done
 
-            # Insert networks section in collector service (before the closing of service definition)
-            if [ -n "\$NETWORKS_LIST" ]; then
-                # Add networks to the collector service by appending before the networks: section
-                sed -i "/^      - type: bind\$/,/\/var\/lib\/better-stack/ {
-                    /\/var\/lib\/better-stack/ a\\
-    networks:\\
-\$(echo -e "\$NETWORKS_LIST" | sed 's/^/      /' | sed 's/\$/\\\\/')
-                }" docker-compose.yml 2>/dev/null || true
-            fi
+            # Insert networks section after the /var/lib/better-stack volume using awk
+            awk -v networks="\$NETWORKS_YAML" '
+                /^        target: \/var\/lib\/better-stack\$/ {
+                    print
+                    print networks
+                    next
+                }
+                {print}
+            ' docker-compose.yml > docker-compose.yml.tmp && mv docker-compose.yml.tmp docker-compose.yml
         fi
 
         echo "Compose file prepared. Deploying stack..."
