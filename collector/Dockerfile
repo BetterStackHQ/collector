@@ -1,6 +1,9 @@
 # Use Vector as the base image
 FROM timberio/vector:0.47.0-debian AS vector
 
+# Add Cluster Agent to the image
+FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
+
 # Final stage
 FROM debian:12.11-slim
 
@@ -20,6 +23,9 @@ RUN apt-get update && apt-get install -y \
 # Copy Vector from vector image
 COPY --from=vector --chmod=755 /usr/bin/vector /usr/local/bin/vector
 COPY --from=vector /etc/vector /etc/vector
+
+# Copy Cluster Agent
+COPY --from=cluster-agent --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent
 
 # Create necessary directories
 RUN mkdir -p /versions/0-default \

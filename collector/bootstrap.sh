@@ -55,6 +55,9 @@ log_info "BASE_URL: $BASE_URL"
 MANIFEST_DIR="/var/lib/better-stack"
 BOOTSTRAPPED_FILE="$MANIFEST_DIR/bootstrapped.txt"
 BEYLA_UNPROVISIONED_FILE="$MANIFEST_DIR/beyla-unprovisioned.txt"
+BEYLA_SOCKET="$MANIFEST_DIR/beyla-supervisor.sock"
+BEYLA_SUPERVISOR_CONF="$MANIFEST_DIR/beyla/supervisord.conf"
+COLLECTOR_SUPERVISOR_CONF="$MANIFEST_DIR/collector/supervisord.conf"
 
 # sanity check: if bootstrap is restarted and bootstrap marker is found, it's likely supervisor restart failed
 # perhaps a bad supervisord.conf file was sent - in any case, re-attempt bootstrapping on latest manifest
@@ -256,7 +259,6 @@ log_info "Files downloaded: $FILES_COUNT"
 log_info "Location: $MANIFEST_DIR"
 
 # Wait for Beyla supervisor socket (up to 30 seconds)
-BEYLA_SOCKET="/var/lib/better-stack/beyla-supervisor.sock"
 WAIT_SECONDS=30
 BEYLA_SOCKET_EXISTS=false
 
@@ -273,8 +275,8 @@ done
 if [ "$BEYLA_SOCKET_EXISTS" = true ]; then
     # Socket exists - reload Beyla supervisor
     log_info "Reloading Beyla supervisor configuration..."
-    supervisorctl -s unix://"$BEYLA_SOCKET" reread
-    supervisorctl -s unix://"$BEYLA_SOCKET" update
+    supervisorctl -c "$BEYLA_SUPERVISOR_CONF" reread
+    supervisorctl -c "$BEYLA_SUPERVISOR_CONF" update
 else
     # Socket not found - mark as unprovisioned
     log_warn "Beyla supervisor socket not found after ${WAIT_SECONDS}s"
@@ -290,7 +292,7 @@ log_info "Bootstrap marker written to: $BOOTSTRAPPED_FILE"
 
 # reload supervisord config and start processes as indicated by new config (overwriting bootstrap config)
 log_info "Reloading local supervisor configuration..."
-supervisorctl reread
-supervisorctl update
+supervisorctl -c "$COLLECTOR_SUPERVISOR_CONF" reread
+supervisorctl -c "$COLLECTOR_SUPERVISOR_CONF" update
 
 exit 0
