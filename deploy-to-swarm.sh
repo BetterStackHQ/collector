@@ -403,9 +403,9 @@ deploy_beyla_to_node() {
         docker ps --filter "name=better-stack-beyla" --format "table {{.Names}}\t{{.Status}}"
 EOF
     then
-        print_green "✓ Beyla installed on $node"
+        print_green "✓ eBPF agent installed on $node"
     else
-        print_red "✗ Failed to install beyla on $node"
+        print_red "✗ Failed to install eBPF agent on $node"
         return 1
     fi
 }
@@ -435,9 +435,9 @@ uninstall_beyla_from_node() {
         echo "Beyla removed."
 EOF
     then
-        print_green "✓ Beyla uninstalled from $node"
+        print_green "✓ eBPF agent uninstalled from $node"
     else
-        print_red "✗ Failed to uninstall beyla from $node"
+        print_red "✗ Failed to uninstall eBPF agent from $node"
         return 1
     fi
 }
@@ -464,8 +464,11 @@ case "$ACTION" in
         CURRENT=0
         for NODE in $NODES; do
             ((CURRENT++))
-            print_blue "Installing beyla on node: $NODE ($CURRENT/$NODE_COUNT)"
-            deploy_beyla_to_node "$NODE"
+            print_blue "Installing eBPF agent on node: $NODE ($CURRENT/$NODE_COUNT)"
+            if ! deploy_beyla_to_node "$NODE"; then
+                print_red "Aborting deployment due to eBPF agent installation failure on $NODE"
+                exit 1
+            fi
             echo
         done
 
@@ -475,7 +478,7 @@ case "$ACTION" in
         print_green "✓ Better Stack collector successfully installed on all swarm nodes!"
         echo
         print_blue "Collector is running as a Docker Swarm global service."
-        print_blue "Beyla is running as docker-compose on each node."
+        print_blue "eBPF agent is running as docker-compose on each node."
         ;;
 
     "uninstall")
@@ -483,7 +486,7 @@ case "$ACTION" in
         CURRENT=0
         for NODE in $NODES; do
             ((CURRENT++))
-            print_blue "Uninstalling beyla from node: $NODE ($CURRENT/$NODE_COUNT)"
+            print_blue "Uninstalling eBPF agent from node: $NODE ($CURRENT/$NODE_COUNT)"
             uninstall_beyla_from_node "$NODE"
             echo
         done
@@ -505,7 +508,7 @@ case "$ACTION" in
         CURRENT=0
         for NODE in $NODES; do
             ((CURRENT++))
-            print_blue "Removing beyla from node: $NODE ($CURRENT/$NODE_COUNT)"
+            print_blue "Removing eBPF agent from node: $NODE ($CURRENT/$NODE_COUNT)"
             uninstall_beyla_from_node "$NODE"
             echo
         done
@@ -517,8 +520,11 @@ case "$ACTION" in
         CURRENT=0
         for NODE in $NODES; do
             ((CURRENT++))
-            print_blue "Installing beyla on node: $NODE ($CURRENT/$NODE_COUNT)"
-            deploy_beyla_to_node "$NODE"
+            print_blue "Installing eBPF agent on node: $NODE ($CURRENT/$NODE_COUNT)"
+            if ! deploy_beyla_to_node "$NODE"; then
+                print_red "Aborting force upgrade due to eBPF agent installation failure on $NODE"
+                exit 1
+            fi
             echo
         done
 
