@@ -18,7 +18,13 @@ RUN apt-get update && apt-get install -y \
   certbot \
   openssl \
   traceroute \
+  ca-certificates \
   && rm -rf /var/lib/apt/lists/*
+
+# Download AWS RDS CA bundle and update system CA store
+RUN curl -sS https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+  -o /usr/local/share/ca-certificates/aws-rds.crt \
+  && update-ca-certificates
 
 # Copy Vector from vector image
 COPY --from=vector --chmod=755 /usr/bin/vector /usr/local/bin/vector
