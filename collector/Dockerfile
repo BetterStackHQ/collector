@@ -18,7 +18,13 @@ RUN apt-get update && apt-get install -y \
   certbot \
   openssl \
   traceroute \
+  ca-certificates \
   && rm -rf /var/lib/apt/lists/*
+
+# Download AWS RDS CA bundle and update system CA store
+RUN curl -sS https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+  -o /usr/local/share/ca-certificates/aws-rds.crt \
+  && update-ca-certificates
 
 # Copy Vector from vector image
 COPY --from=vector --chmod=755 /usr/bin/vector /usr/local/bin/vector
@@ -40,7 +46,7 @@ RUN mkdir -p /versions/0-default \
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
 ENV CLUSTER_COLLECTOR=false
-ENV COLLECTOR_VERSION=1.1.13
+ENV COLLECTOR_VERSION=1.1.14
 ENV VECTOR_VERSION=0.47.0
 ENV BEYLA_VERSION=2.7.5
 ENV CLUSTER_AGENT_VERSION=1.2.4
