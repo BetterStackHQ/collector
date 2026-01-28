@@ -19,5 +19,9 @@ if [ -z "$HOSTNAME" ]; then
   export HOSTNAME
 fi
 
+# Ensure logs directories exist in volume at runtime
+mkdir -p /var/lib/better-stack/logs/collector
+mkdir -p /var/lib/better-stack/logs/ebpf
+
 # Start supervisord
 exec /usr/bin/supervisord -c "$SUPERVISORD_CONF"
