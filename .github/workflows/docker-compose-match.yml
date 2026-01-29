@@ -30,15 +30,15 @@ jobs:
         fi
         echo "✓ Diff is exactly 3 lines as expected"
 
-    - name: check beyla section matches between docker-compose.yml and swarm/docker-compose.swarm-beyla.yml
+    - name: check ebpf section matches between docker-compose.yml and swarm/docker-compose.swarm-ebpf.yml
       run: |
-        # Extract beyla service from docker-compose.yml, excluding build: and depends_on: sections
-        # These sections are not applicable in the swarm beyla file
+        # Extract ebpf service from docker-compose.yml, excluding build: and depends_on: sections
+        # These sections are not applicable in the swarm ebpf file
         # Also exclude INSTALLED_AS= line as it's intentionally different (docker vs swarm)
         awk '
-          BEGIN { in_beyla = 0; skip_block = 0; block_indent = 0 }
-          /^  beyla:$/ { in_beyla = 1; next }
-          in_beyla == 1 {
+          BEGIN { in_ebpf = 0; skip_block = 0; block_indent = 0 }
+          /^  ebpf:$/ { in_ebpf = 1; next }
+          in_ebpf == 1 {
             # Skip build: and depends_on: blocks (4 spaces = service property level)
             if (/^    build:/ || /^    depends_on:/) {
               skip_block = 1
@@ -62,30 +62,30 @@ jobs:
               print
             }
           }
-        ' docker-compose.yml > /tmp/beyla-main.yml
+        ' docker-compose.yml > /tmp/ebpf-main.yml
 
-        # Extract beyla service from swarm file (skip header comments and services: line)
+        # Extract ebpf service from swarm file (skip header comments and services: line)
         # Also exclude INSTALLED_AS= line as it's intentionally different (docker vs swarm)
         awk '
-          BEGIN { in_beyla = 0 }
-          /^  beyla:$/ { in_beyla = 1; next }
+          BEGIN { in_ebpf = 0 }
+          /^  ebpf:$/ { in_ebpf = 1; next }
           /INSTALLED_AS=/ { next }
-          in_beyla == 1 { print }
-        ' swarm/docker-compose.swarm-beyla.yml > /tmp/beyla-swarm.yml
+          in_ebpf == 1 { print }
+        ' swarm/docker-compose.swarm-ebpf.yml > /tmp/ebpf-swarm.yml
 
         # Compare the extracted sections
-        echo "=== docker-compose.yml beyla section (excluding build/depends_on) ==="
-        cat /tmp/beyla-main.yml
+        echo "=== docker-compose.yml ebpf section (excluding build/depends_on) ==="
+        cat /tmp/ebpf-main.yml
         echo ""
-        echo "=== swarm/docker-compose.swarm-beyla.yml beyla section ==="
-        cat /tmp/beyla-swarm.yml
+        echo "=== swarm/docker-compose.swarm-ebpf.yml ebpf section ==="
+        cat /tmp/ebpf-swarm.yml
         echo ""
 
-        if ! diff -q /tmp/beyla-main.yml /tmp/beyla-swarm.yml > /dev/null; then
-          echo "ERROR: beyla sections do not match!"
+        if ! diff -q /tmp/ebpf-main.yml /tmp/ebpf-swarm.yml > /dev/null; then
+          echo "ERROR: ebpf sections do not match!"
           echo ""
           echo "=== Differences ==="
-          diff /tmp/beyla-main.yml /tmp/beyla-swarm.yml || true
+          diff /tmp/ebpf-main.yml /tmp/ebpf-swarm.yml || true
           exit 1
         fi
-        echo "✓ beyla sections match between docker-compose.yml and swarm/docker-compose.swarm-beyla.yml"
+        echo "✓ ebpf sections match between docker-compose.yml and swarm/docker-compose.swarm-ebpf.yml"

@@ -20,8 +20,9 @@ fi
 # Fallback for docker-compose v1 or when compose is not available
 echo "Docker Compose v2 not found, using direct Docker commands..."
 
-# Stop and remove containers (beyla first since it depends on collector)
-for container in better-stack-beyla better-stack-collector; do
+# Stop and remove containers (eBPF agent first since it depends on collector)
+# Handle both old (better-stack-beyla) and new (better-stack-ebpf) container names
+for container in better-stack-ebpf better-stack-beyla better-stack-collector; do
     if docker ps -a --format "{{.Names}}" | grep -q "^${container}$"; then
         echo "Stopping container: $container"
         docker stop "$container" 2>/dev/null || true

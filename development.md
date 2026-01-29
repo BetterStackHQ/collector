@@ -26,12 +26,12 @@ docker-compose up
 ```
 
 - See live Vector stats: `docker exec -it better-stack-collector vector top`
-- See live Beyla data in Vector: `docker exec -it better-stack-collector vector tap 'beyla_otel*'`
+- See live eBPF data in Vector: `docker exec -it better-stack-collector vector tap 'ebpf_otel*'`
 
 Tail collector logs:
 
 - Collector container: `docker exec -it better-stack-collector bash -c "tail -f /var/log/supervisor/*"`
-- Beyla container: `docker logs -f better-stack-beyla`
+- eBPF container: `docker logs -f better-stack-ebpf`
 
 ## Development troubleshooting
 
@@ -76,8 +76,8 @@ Tail collector logs:
 
 ## Topology
 
-- Beyla container talks to collector via host network on port 34320. Only localhost is allowed to connect to this port.
-- Cluster agent and node agent run in the beyla container and connect to the collector via host network on port 33000.
+- eBPF container talks to collector via host network on port 34320. Only localhost is allowed to connect to this port.
+- Cluster agent and node agent run in the eBPF container and connect to the collector via host network on port 33000.
 - Cluster agent obtains configuration from the collector via the /v1/config endpoint.
 - Cluster agent checks if it should run via the /v1/cluster-agent-enabled endpoint.
 
