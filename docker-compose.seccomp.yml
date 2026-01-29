@@ -45,7 +45,7 @@ services:
     pid: host
     uts: host
     network_mode: host
-    mem_limit: 1536m
+    mem_limit: 3072m
     healthcheck:
       test: ["CMD-SHELL", "if [ -x /var/lib/better-stack/beyla/healthcheck.sh ]; then /var/lib/better-stack/beyla/healthcheck.sh; else exit 0; fi"]
       interval: 30s
