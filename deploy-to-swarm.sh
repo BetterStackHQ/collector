@@ -392,6 +392,10 @@ deploy_ebpf_to_node() {
         export HOSTNAME=\$(hostname)
         export ENABLE_DOCKERPROBE="$enable_dockerprobe"
 
+        # Stop old better-stack-beyla service if it exists (for upgrades from older versions)
+        echo "Stopping old better-stack-beyla service if present..."
+        \$COMPOSE_CMD -p better-stack-beyla down 2>/dev/null || true
+
         # Pull and start eBPF agent
         echo "Pulling eBPF image..."
         \$COMPOSE_CMD -f docker-compose.yml -p better-stack-ebpf pull
