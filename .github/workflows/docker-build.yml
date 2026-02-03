@@ -103,7 +103,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-  build-beyla:
+  build-ebpf:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -151,7 +151,7 @@ jobs:
           project: ${{ secrets.DEPOT_PROJECT_ID }}
           token: ${{ secrets.DEPOT_API_TOKEN }}
           context: .
-          file: beyla/Dockerfile
+          file: ebpf/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ steps.repo.outputs.push }}
           tags: ${{ steps.meta.outputs.tags }}

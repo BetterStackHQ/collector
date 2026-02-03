@@ -148,7 +148,7 @@ adjust_compose_ports() {
       if ($0 ~ /^[[:space:]]*collector:[[:space:]]*$/) {
         in_collector=1
       }
-      # Reset when we hit the next service (beyla, etc.)
+      # Reset when we hit the next service (ebpf, etc.)
       if ($0 ~ /^[[:space:]]*[a-z_-]+:[[:space:]]*$/ && $0 !~ /collector:/) {
         in_collector=0
       }

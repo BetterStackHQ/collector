@@ -4,14 +4,14 @@
 #
 # Architecture:
 # - Collector is deployed as a Docker Swarm global service (one instance per node)
-# - Beyla is deployed separately on each node via docker-compose (requires network_mode: host)
-# - Communication between collector and beyla happens via Unix sockets on shared /var/lib/better-stack volume
+# - eBPF agent is deployed separately on each node via docker-compose (requires network_mode: host)
+# - Communication between collector and eBPF agent happens via Unix sockets on shared /var/lib/better-stack volume
 #
 # What it does:
 # 1. Connects to swarm manager node via SSH
 # 2. Creates /var/lib/better-stack directory on all nodes
 # 3. Deploys collector as a global swarm service
-# 4. Installs beyla on each node via docker-compose
+# 4. Installs eBPF agent on each node via docker-compose
 # 5. Optionally attaches collector to overlay networks for service discovery
 #
 # Required environment variables:
@@ -336,8 +336,8 @@ EOF
     echo
 }
 
-# Function to deploy beyla to a single node
-deploy_beyla_to_node() {
+# Function to deploy eBPF agent to a single node
+deploy_ebpf_to_node() {
     local node="$1"
     local node_target
     node_target=$(get_node_target "$node")
@@ -348,7 +348,7 @@ deploy_beyla_to_node() {
     if $SSH_CMD "$node_target" /bin/bash <<EOF
         set -e
 
-        # Create shared directory for collector/beyla communication (must exist before swarm service starts)
+        # Create shared directory for collector/eBPF agent communication (must exist before swarm service starts)
         mkdir -p /var/lib/better-stack
         chmod 755 /var/lib/better-stack
 
@@ -357,9 +357,9 @@ deploy_beyla_to_node() {
         cd "\$TEMP_DIR"
         trap "rm -rf \$TEMP_DIR" EXIT
 
-        # Download beyla compose file
-        echo "Downloading beyla compose file..."
-        curl -sSL "${GITHUB_RAW_BASE}/swarm/docker-compose.swarm-beyla.yml" -o docker-compose.yml
+        # Download eBPF compose file
+        echo "Downloading eBPF compose file..."
+        curl -sSL "${GITHUB_RAW_BASE}/swarm/docker-compose.swarm-ebpf.yml" -o docker-compose.yml
 
         # Replace image tag if not latest
         if [ "$image_tag" != "latest" ]; then
@@ -392,15 +392,15 @@ deploy_beyla_to_node() {
         export HOSTNAME=\$(hostname)
         export ENABLE_DOCKERPROBE="$enable_dockerprobe"
 
-        # Pull and start beyla
-        echo "Pulling beyla image..."
-        \$COMPOSE_CMD -f docker-compose.yml -p better-stack-beyla pull
+        # Pull and start eBPF agent
+        echo "Pulling eBPF image..."
+        \$COMPOSE_CMD -f docker-compose.yml -p better-stack-ebpf pull
 
-        echo "Starting beyla..."
-        \$COMPOSE_CMD -f docker-compose.yml -p better-stack-beyla up -d
+        echo "Starting eBPF agent..."
+        \$COMPOSE_CMD -f docker-compose.yml -p better-stack-ebpf up -d
 
-        echo "Checking beyla status..."
-        docker ps --filter "name=better-stack-beyla" --format "table {{.Names}}\t{{.Status}}"
+        echo "Checking eBPF agent status..."
+        docker ps --filter "name=better-stack-ebpf" --format "table {{.Names}}\t{{.Status}}"
 EOF
     then
         print_green "✓ eBPF agent installed on $node"
@@ -411,7 +411,7 @@ EOF
 }
 
 # Function to uninstall from a single node
-uninstall_beyla_from_node() {
+uninstall_ebpf_from_node() {
     local node="$1"
     local node_target
     node_target=$(get_node_target "$node")
@@ -419,20 +419,24 @@ uninstall_beyla_from_node() {
     if $SSH_CMD "$node_target" /bin/bash <<'EOF'
         set -e
 
-        echo "Stopping and removing beyla container..."
+        echo "Stopping and removing eBPF agent container..."
 
-        # Try docker-compose first
+        # Try docker-compose first (handle both old and new project names)
         if docker compose version &> /dev/null; then
+            docker compose -p better-stack-ebpf down 2>/dev/null || true
             docker compose -p better-stack-beyla down 2>/dev/null || true
         elif docker-compose version &> /dev/null; then
+            docker-compose -p better-stack-ebpf down 2>/dev/null || true
             docker-compose -p better-stack-beyla down 2>/dev/null || true
         fi
 
-        # Also try direct container removal as fallback
+        # Also try direct container removal as fallback (handle both old and new names)
+        docker stop better-stack-ebpf 2>/dev/null || true
+        docker rm better-stack-ebpf 2>/dev/null || true
         docker stop better-stack-beyla 2>/dev/null || true
         docker rm better-stack-beyla 2>/dev/null || true
 
-        echo "Beyla removed."
+        echo "eBPF agent removed."
 EOF
     then
         print_green "✓ eBPF agent uninstalled from $node"
@@ -460,12 +464,12 @@ uninstall_collector_stack() {
 # Main execution
 case "$ACTION" in
     "install")
-        # Deploy beyla to each node first (this also creates /var/lib/better-stack directory)
+        # Deploy eBPF agent to each node first (this also creates /var/lib/better-stack directory)
         CURRENT=0
         for NODE in $NODES; do
             ((CURRENT++))
             print_blue "Installing eBPF agent on node: $NODE ($CURRENT/$NODE_COUNT)"
-            if ! deploy_beyla_to_node "$NODE"; then
+            if ! deploy_ebpf_to_node "$NODE"; then
                 print_red "Aborting deployment due to eBPF agent installation failure on $NODE"
                 exit 1
             fi
@@ -482,12 +486,12 @@ case "$ACTION" in
         ;;
 
     "uninstall")
-        # Uninstall beyla from each node first
+        # Uninstall eBPF agent from each node first
         CURRENT=0
         for NODE in $NODES; do
             ((CURRENT++))
             print_blue "Uninstalling eBPF agent from node: $NODE ($CURRENT/$NODE_COUNT)"
-            uninstall_beyla_from_node "$NODE"
+            uninstall_ebpf_from_node "$NODE"
             echo
         done
 
@@ -504,24 +508,24 @@ case "$ACTION" in
         # Remove collector stack first
         uninstall_collector_stack
 
-        # Uninstall beyla from each node
+        # Uninstall eBPF agent from each node
         CURRENT=0
         for NODE in $NODES; do
             ((CURRENT++))
             print_blue "Removing eBPF agent from node: $NODE ($CURRENT/$NODE_COUNT)"
-            uninstall_beyla_from_node "$NODE"
+            uninstall_ebpf_from_node "$NODE"
             echo
         done
 
         print_blue "Waiting for cleanup..."
         sleep 5
 
-        # Deploy beyla to each node first (this also creates /var/lib/better-stack directory)
+        # Deploy eBPF agent to each node first (this also creates /var/lib/better-stack directory)
         CURRENT=0
         for NODE in $NODES; do
             ((CURRENT++))
             print_blue "Installing eBPF agent on node: $NODE ($CURRENT/$NODE_COUNT)"
-            if ! deploy_beyla_to_node "$NODE"; then
+            if ! deploy_ebpf_to_node "$NODE"; then
                 print_red "Aborting force upgrade due to eBPF agent installation failure on $NODE"
                 exit 1
             fi

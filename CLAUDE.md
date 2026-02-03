@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Better Stack Collector is a Docker-based monitoring solution that collects metrics, logs, and traces using multiple collection agents (Vector, Coroot Node/Cluster Agents, and Beyla). All components are managed by Supervisor within a single container.
+Better Stack Collector is a Docker-based monitoring solution that collects metrics, logs, and traces using multiple collection agents (Vector, Coroot Node/Cluster Agents, and eBPF agent). All components are managed by Supervisor within a single container.
 
 ## Common Development Commands
 
@@ -70,8 +70,8 @@ rake test TESTOPTS="-v"
 - Ruby updater (checks for configuration updates)
 - Certbot (TLS certificate management)
 
-**Beyla Container** - Supervisor manages:
-- Beyla (eBPF application traces)
+**eBPF Container** - Supervisor manages:
+- OBI (OpenTelemetry eBPF Instrumentation for application traces)
 - Node Agent (system metrics collection)
 - Cluster Agent (Kubernetes/database monitoring)
 - Dockerprobe (container metadata collection)
@@ -80,7 +80,7 @@ Logs available in `/var/log/supervisor/*` in each container
 
 ### Container Communication
 
-- **Beyla → Collector**: Via host network mode
+- **eBPF → Collector**: Via host network mode
   - Cluster Agent polls `http://localhost:33000/v1/cluster-agent-enabled` to check if it should run
   - Cluster Agent fetches database config from `http://localhost:33000/v1/config`
   - Node Agent sends metrics to `http://localhost:33000`
