@@ -70,7 +70,8 @@ USE_TLS="${USE_TLS:-}"
 
 # Optional custom host mount paths (comma-separated)
 MOUNT_HOST_PATHS="${MOUNT_HOST_PATHS:-}"
-EXPOSE_PORTS="${EXPOSE_PORTS:-}"
+COLLECT_OTEL_HTTP_PORT="${COLLECT_OTEL_HTTP_PORT:-}"
+COLLECT_OTEL_GRPC_PORT="${COLLECT_OTEL_GRPC_PORT:-}"
 
 # Validate PROXY_PORT if set
 if [ -n "$PROXY_PORT" ]; then
@@ -88,32 +89,6 @@ if [ -n "$PROXY_PORT" ]; then
         echo "Error: PROXY_PORT cannot be 80 when USE_TLS is set (port 80 is reserved for ACME HTTP-01)."
         exit 1
     fi
-fi
-
-if [ -n "$EXPOSE_PORTS" ]; then
-    IFS=',' read -ra EP_ENTRIES <<< "$EXPOSE_PORTS"
-    for entry in "${EP_ENTRIES[@]}"; do
-        entry=$(echo "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        [ -z "$entry" ] && continue
-        if ! [[ "$entry" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}:)?[0-9]+$ ]]; then
-            echo "Error: Invalid EXPOSE_PORTS entry: $entry"
-            echo "Expected format: PORT or IP:PORT (e.g., 4317 or 127.0.0.1:4317)"
-            exit 1
-        fi
-        local_port="${entry##*:}"
-        if [ "$local_port" -lt 1 ] || [ "$local_port" -gt 65535 ]; then
-            echo "Error: EXPOSE_PORTS port $local_port is out of valid range (1-65535)."
-            exit 1
-        fi
-        if [ "$local_port" -eq 33000 ] || [ "$local_port" -eq 34320 ] || [ "$local_port" -eq 39090 ]; then
-            echo "Error: EXPOSE_PORTS entry $entry conflicts with internal collector port $local_port."
-            exit 1
-        fi
-        if [ -n "$PROXY_PORT" ] && [ "$local_port" -eq "$PROXY_PORT" ]; then
-            echo "Error: EXPOSE_PORTS entry $entry conflicts with PROXY_PORT=$PROXY_PORT."
-            exit 1
-        fi
-    done
 fi
 
 # Set hostname if not provided (use empty string HOSTNAME="" to trigger runtime detection via uts:host)
@@ -163,25 +138,10 @@ adjust_compose_ports() {
     bind80="yes"
   fi
 
-  local expose_lines=""
-  if [ -n "$EXPOSE_PORTS" ]; then
-    IFS=',' read -ra EP_ENTRIES <<< "$EXPOSE_PORTS"
-    for entry in "${EP_ENTRIES[@]}"; do
-      entry=$(echo "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-      [ -z "$entry" ] && continue
-      local_port="${entry##*:}"
-      if [[ "$entry" == *":"* ]]; then
-        expose_lines="${expose_lines}${entry}:${local_port}\n"
-      else
-        expose_lines="${expose_lines}${entry}:${entry}\n"
-      fi
-    done
-  fi
-
-  awk -v addport="$PROXY_PORT" -v add80="$bind80" -v expose="$expose_lines" '
+  awk -v addport="$PROXY_PORT" -v add80="$bind80" -v otel_http="$COLLECT_OTEL_HTTP_PORT" -v otel_grpc="$COLLECT_OTEL_GRPC_PORT" '
     BEGIN { inserted=0; in_collector=0 }
     {
-      if ($0 ~ /# install: (proxy port|acme http-01|ports section|exposed port)/) { next }
+      if ($0 ~ /# install: (proxy port|acme http-01|ports section|otel port)/) { next }
       if ($0 ~ /^[[:space:]]*ports:[[:space:]]*$/ && in_collector==1) { next }
 
       if ($0 ~ /^  collector:[[:space:]]*$/) {
@@ -192,7 +152,7 @@ adjust_compose_ports() {
       }
 
       if (in_collector==1 && inserted==0 && $0 ~ /^[[:space:]]*volumes:[[:space:]]*$/) {
-        if (addport != "" || add80 != "" || expose != "") {
+        if (addport != "" || add80 != "" || otel_http != "" || otel_grpc != "") {
           print "    ports: # install: ports section"
           if (addport != "") {
             print "      - \"" addport ":" addport "\" # install: proxy port"
@@ -200,13 +160,11 @@ adjust_compose_ports() {
           if (add80 != "") {
             print "      - \"80:80\" # install: acme http-01"
           }
-          if (expose != "") {
-            n = split(expose, lines, "\\n")
-            for (i = 1; i <= n; i++) {
-              if (lines[i] != "") {
-                print "      - \"" lines[i] "\" # install: exposed port"
-              }
-            }
+          if (otel_http != "") {
+            print "      - \"" otel_http ":" otel_http "\" # install: otel port"
+          }
+          if (otel_grpc != "") {
+            print "      - \"" otel_grpc ":" otel_grpc "\" # install: otel port"
           }
         }
         inserted=1

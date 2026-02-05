@@ -28,7 +28,8 @@
 # - CLUSTER_COLLECTOR: Enable cluster collector mode (default: false)
 # - ENABLE_DOCKERPROBE: Enable Docker container metadata collection (default: true)
 # - PROXY_PORT: Optional proxy port for upstream proxy mode
-# - EXPOSE_PORTS: Comma-separated list of ports to expose (format: PORT or IP:PORT; IP binding ignored in swarm mode)
+# - COLLECT_OTEL_HTTP_PORT: Port to expose for OTel HTTP ingestion (e.g., 4318)
+# - COLLECT_OTEL_GRPC_PORT: Port to expose for OTel gRPC ingestion (e.g., 4317)
 #
 # Node filtering:
 # - To deploy only to specific nodes, label them beforehand:
@@ -97,33 +98,8 @@ BASE_URL="${BASE_URL:-https://telemetry.betterstack.com}"
 CLUSTER_COLLECTOR="${CLUSTER_COLLECTOR:-false}"
 ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
 PROXY_PORT="${PROXY_PORT:-}"
-EXPOSE_PORTS="${EXPOSE_PORTS:-}"
-
-if [ -n "$EXPOSE_PORTS" ]; then
-    IFS=',' read -ra EP_ENTRIES <<< "$EXPOSE_PORTS"
-    for entry in "${EP_ENTRIES[@]}"; do
-        entry=$(echo "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        [ -z "$entry" ] && continue
-        if ! [[ "$entry" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}:)?[0-9]+$ ]]; then
-            print_red "Error: Invalid EXPOSE_PORTS entry: $entry"
-            echo "Expected format: PORT or IP:PORT (e.g., 4317 or 127.0.0.1:4317)"
-            exit 1
-        fi
-        local_port="${entry##*:}"
-        if [ "$local_port" -lt 1 ] || [ "$local_port" -gt 65535 ]; then
-            print_red "Error: EXPOSE_PORTS port $local_port is out of valid range (1-65535)."
-            exit 1
-        fi
-        if [ "$local_port" -eq 33000 ] || [ "$local_port" -eq 34320 ] || [ "$local_port" -eq 39090 ]; then
-            print_red "Error: EXPOSE_PORTS entry $entry conflicts with internal collector port $local_port."
-            exit 1
-        fi
-        if [ -n "$PROXY_PORT" ] && [ "$local_port" -eq "$PROXY_PORT" ]; then
-            print_red "Error: EXPOSE_PORTS entry $entry conflicts with PROXY_PORT=$PROXY_PORT."
-            exit 1
-        fi
-    done
-fi
+COLLECT_OTEL_HTTP_PORT="${COLLECT_OTEL_HTTP_PORT:-}"
+COLLECT_OTEL_GRPC_PORT="${COLLECT_OTEL_GRPC_PORT:-}"
 
 # GitHub raw URL base for downloading compose files
 GITHUB_RAW_BASE="https://raw.githubusercontent.com/BetterStackHQ/collector/main"
@@ -203,7 +179,8 @@ deploy_collector_stack() {
     local base_url="$BASE_URL"
     local cluster_collector="$CLUSTER_COLLECTOR"
     local proxy_port="$PROXY_PORT"
-    local expose_ports="$EXPOSE_PORTS"
+    local otel_http_port="$COLLECT_OTEL_HTTP_PORT"
+    local otel_grpc_port="$COLLECT_OTEL_GRPC_PORT"
     local use_labeled_nodes="$USE_LABELED_NODES"
 
     $SSH_CMD "$MANAGER_NODE" /bin/bash <<EOF
@@ -283,32 +260,24 @@ MOUNT_ENTRY
             rm -f "\$MOUNT_FILE"
         fi
 
-        # Handle EXPOSE_PORTS
-        if [ -n "$expose_ports" ]; then
-            echo "Configuring exposed ports: $expose_ports"
-            PORTS_YAML=""
-            IFS=',' read -ra EP_ENTRIES <<< "$expose_ports"
-            for entry in "\${EP_ENTRIES[@]}"; do
-                entry=\$(echo "\$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*\$//')
-                [ -z "\$entry" ] && continue
-                local_port="\${entry##*:}"
-                if [ "\$entry" != "\$local_port" ]; then
-                    echo "Note: IP binding is not supported in Docker Swarm. Publishing port \$local_port on all interfaces."
-                fi
-                PORTS_YAML="\${PORTS_YAML}
-      - target: \${local_port}
-        published: \${local_port}"
-            done
-
-            if [ -n "\$PORTS_YAML" ]; then
-                awk -v ports="\$PORTS_YAML" '
-                    /^[[:space:]]*volumes:/ && !inserted {
-                        print "    ports:" ports
-                        inserted=1
-                    }
-                    {print}
-                ' docker-compose.yml > docker-compose.yml.tmp && mv docker-compose.yml.tmp docker-compose.yml
-            fi
+        # Handle OTel port exposure
+        PORTS_YAML=""
+        if [ -n "$otel_http_port" ]; then
+            PORTS_YAML="\${PORTS_YAML}
+      - $otel_http_port:$otel_http_port"
+        fi
+        if [ -n "$otel_grpc_port" ]; then
+            PORTS_YAML="\${PORTS_YAML}
+      - $otel_grpc_port:$otel_grpc_port"
+        fi
+        if [ -n "\$PORTS_YAML" ]; then
+            awk -v ports="\$PORTS_YAML" '
+                /^[[:space:]]*volumes:/ && !inserted {
+                    print "    ports:" ports
+                    inserted=1
+                }
+                {print}
+            ' docker-compose.yml > docker-compose.yml.tmp && mv docker-compose.yml.tmp docker-compose.yml
         fi
 
         # Auto-detect overlay networks if ATTACH_NETWORKS not specified
