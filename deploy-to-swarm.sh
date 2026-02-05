@@ -337,6 +337,8 @@ MOUNT_ENTRY
         BASE_URL="$base_url" \\
         CLUSTER_COLLECTOR="$cluster_collector" \\
         PROXY_PORT="$proxy_port" \\
+        COLLECT_OTEL_HTTP_PORT="$otel_http_port" \\
+        COLLECT_OTEL_GRPC_PORT="$otel_grpc_port" \\
             docker stack deploy -c docker-compose.yml better-stack
 
         # Trigger service reconciliation to schedule tasks on newly labeled nodes
