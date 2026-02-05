@@ -70,6 +70,7 @@ USE_TLS="${USE_TLS:-}"
 
 # Optional custom host mount paths (comma-separated)
 MOUNT_HOST_PATHS="${MOUNT_HOST_PATHS:-}"
+EXPOSE_PORTS="${EXPOSE_PORTS:-}"
 
 # Validate PROXY_PORT if set
 if [ -n "$PROXY_PORT" ]; then
@@ -87,6 +88,32 @@ if [ -n "$PROXY_PORT" ]; then
         echo "Error: PROXY_PORT cannot be 80 when USE_TLS is set (port 80 is reserved for ACME HTTP-01)."
         exit 1
     fi
+fi
+
+if [ -n "$EXPOSE_PORTS" ]; then
+    IFS=',' read -ra EP_ENTRIES <<< "$EXPOSE_PORTS"
+    for entry in "${EP_ENTRIES[@]}"; do
+        entry=$(echo "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [ -z "$entry" ] && continue
+        if ! [[ "$entry" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}:)?[0-9]+$ ]]; then
+            echo "Error: Invalid EXPOSE_PORTS entry: $entry"
+            echo "Expected format: PORT or IP:PORT (e.g., 4317 or 127.0.0.1:4317)"
+            exit 1
+        fi
+        local_port="${entry##*:}"
+        if [ "$local_port" -lt 1 ] || [ "$local_port" -gt 65535 ]; then
+            echo "Error: EXPOSE_PORTS port $local_port is out of valid range (1-65535)."
+            exit 1
+        fi
+        if [ "$local_port" -eq 33000 ] || [ "$local_port" -eq 34320 ] || [ "$local_port" -eq 39090 ]; then
+            echo "Error: EXPOSE_PORTS entry $entry conflicts with internal collector port $local_port."
+            exit 1
+        fi
+        if [ -n "$PROXY_PORT" ] && [ "$local_port" -eq "$PROXY_PORT" ]; then
+            echo "Error: EXPOSE_PORTS entry $entry conflicts with PROXY_PORT=$PROXY_PORT."
+            exit 1
+        fi
+    done
 fi
 
 # Set hostname if not provided (use empty string HOSTNAME="" to trigger runtime detection via uts:host)
@@ -131,37 +158,55 @@ adjust_compose_ports() {
   local tmpfile
   tmpfile="$(mktemp)"
 
-  # Determine if we should bind port 80
   local bind80=""
   if [ "$PROXY_PORT" = "443" ] || ([ -n "$USE_TLS" ] && [ "$PROXY_PORT" != "80" ]); then
     bind80="yes"
   fi
 
-  awk -v addport="$PROXY_PORT" -v add80="$bind80" '
+  local expose_lines=""
+  if [ -n "$EXPOSE_PORTS" ]; then
+    IFS=',' read -ra EP_ENTRIES <<< "$EXPOSE_PORTS"
+    for entry in "${EP_ENTRIES[@]}"; do
+      entry=$(echo "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      [ -z "$entry" ] && continue
+      local_port="${entry##*:}"
+      if [[ "$entry" == *":"* ]]; then
+        expose_lines="${expose_lines}${entry}:${local_port}\n"
+      else
+        expose_lines="${expose_lines}${entry}:${entry}\n"
+      fi
+    done
+  fi
+
+  awk -v addport="$PROXY_PORT" -v add80="$bind80" -v expose="$expose_lines" '
     BEGIN { inserted=0; in_collector=0 }
     {
-      # Remove previously inserted install lines for idempotence
-      if ($0 ~ /# install: (proxy port|acme http-01|ports section)/) { next }
+      if ($0 ~ /# install: (proxy port|acme http-01|ports section|exposed port)/) { next }
       if ($0 ~ /^[[:space:]]*ports:[[:space:]]*$/ && in_collector==1) { next }
 
-      # Track if we are in the collector service
-      if ($0 ~ /^[[:space:]]*collector:[[:space:]]*$/) {
+      if ($0 ~ /^  collector:[[:space:]]*$/) {
         in_collector=1
       }
-      # Reset when we hit the next service (beyla, etc.)
-      if ($0 ~ /^[[:space:]]*[a-z_-]+:[[:space:]]*$/ && $0 !~ /collector:/) {
+      if ($0 ~ /^  [a-z_-]+:[[:space:]]*$/ && $0 !~ /collector:/) {
         in_collector=0
       }
 
-      # Insert ports section before volumes section in collector
       if (in_collector==1 && inserted==0 && $0 ~ /^[[:space:]]*volumes:[[:space:]]*$/) {
-        if (addport != "" || add80 != "") {
+        if (addport != "" || add80 != "" || expose != "") {
           print "    ports: # install: ports section"
           if (addport != "") {
             print "      - \"" addport ":" addport "\" # install: proxy port"
           }
           if (add80 != "") {
             print "      - \"80:80\" # install: acme http-01"
+          }
+          if (expose != "") {
+            n = split(expose, lines, "\\n")
+            for (i = 1; i <= n; i++) {
+              if (lines[i] != "") {
+                print "      - \"" lines[i] "\" # install: exposed port"
+              }
+            }
           }
         }
         inserted=1

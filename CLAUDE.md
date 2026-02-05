@@ -111,6 +111,11 @@ Logs available in `/var/log/supervisor/*` in each container
 - `MOUNT_HOST_PATHS` (optional) - Comma-separated list of host paths to mount instead of the default `/:/host:ro`. Each path will be mounted at `/host<path>:ro` inside the container. Useful for restricting filesystem access in security-sensitive or compliance-required environments.
   - Example: `MOUNT_HOST_PATHS="/var/log,/etc"` creates mounts: `/var/log:/host/var/log:ro` and `/etc:/host/etc:ro`
   - If not set, the default mount `/:/host:ro` is used (entire host filesystem)
+- `EXPOSE_PORTS` (optional) - Comma-separated list of ports to expose on the collector container. Each entry can be a bare port (e.g., `4317`) which binds on all interfaces, or `IP:PORT` (e.g., `127.0.0.1:4317`) for specific interface binding. Symmetric host↔container mapping.
+  - Example: `EXPOSE_PORTS="127.0.0.1:4317,127.0.0.1:4318"` exposes OTel gRPC and HTTP ports on localhost only
+  - Example: `EXPOSE_PORTS="4317,4318"` exposes on all interfaces
+  - Cannot use internal ports: 33000, 34320, 39090
+  - In Docker Swarm mode, IP binding is not supported; ports are always published on all interfaces
 
 ### TLS Certificate Management (Certbot)
 
