@@ -111,6 +111,8 @@ Logs available in `/var/log/supervisor/*` in each container
 - `MOUNT_HOST_PATHS` (optional) - Comma-separated list of host paths to mount instead of the default `/:/host:ro`. Each path will be mounted at `/host<path>:ro` inside the container. Useful for restricting filesystem access in security-sensitive or compliance-required environments.
   - Example: `MOUNT_HOST_PATHS="/var/log,/etc"` creates mounts: `/var/log:/host/var/log:ro` and `/etc:/host/etc:ro`
   - If not set, the default mount `/:/host:ro` is used (entire host filesystem)
+- `COLLECT_OTEL_HTTP_PORT` (optional) - Port number to expose for OTel HTTP ingestion (e.g., `4318`). Exposes as `PORT:PORT` on all interfaces.
+- `COLLECT_OTEL_GRPC_PORT` (optional) - Port number to expose for OTel gRPC ingestion (e.g., `4317`). Exposes as `PORT:PORT` on all interfaces.
 
 ### TLS Certificate Management (Certbot)
 
