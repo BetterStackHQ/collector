@@ -70,6 +70,8 @@ USE_TLS="${USE_TLS:-}"
 
 # Optional custom host mount paths (comma-separated)
 MOUNT_HOST_PATHS="${MOUNT_HOST_PATHS:-}"
+COLLECT_OTEL_HTTP_PORT="${COLLECT_OTEL_HTTP_PORT:-}"
+COLLECT_OTEL_GRPC_PORT="${COLLECT_OTEL_GRPC_PORT:-}"
 
 # Validate PROXY_PORT if set
 if [ -n "$PROXY_PORT" ]; then
@@ -131,37 +133,38 @@ adjust_compose_ports() {
   local tmpfile
   tmpfile="$(mktemp)"
 
-  # Determine if we should bind port 80
   local bind80=""
   if [ "$PROXY_PORT" = "443" ] || ([ -n "$USE_TLS" ] && [ "$PROXY_PORT" != "80" ]); then
     bind80="yes"
   fi
 
-  awk -v addport="$PROXY_PORT" -v add80="$bind80" '
+  awk -v addport="$PROXY_PORT" -v add80="$bind80" -v otel_http="$COLLECT_OTEL_HTTP_PORT" -v otel_grpc="$COLLECT_OTEL_GRPC_PORT" '
     BEGIN { inserted=0; in_collector=0 }
     {
-      # Remove previously inserted install lines for idempotence
-      if ($0 ~ /# install: (proxy port|acme http-01|ports section)/) { next }
+      if ($0 ~ /# install: (proxy port|acme http-01|ports section|otel port)/) { next }
       if ($0 ~ /^[[:space:]]*ports:[[:space:]]*$/ && in_collector==1) { next }
 
-      # Track if we are in the collector service
-      if ($0 ~ /^[[:space:]]*collector:[[:space:]]*$/) {
+      if ($0 ~ /^  collector:[[:space:]]*$/) {
         in_collector=1
       }
-      # Reset when we hit the next service (ebpf, etc.)
       if ($0 ~ /^[[:space:]]*[a-z_-]+:[[:space:]]*$/ && $0 !~ /collector:/) {
         in_collector=0
       }
 
-      # Insert ports section before volumes section in collector
       if (in_collector==1 && inserted==0 && $0 ~ /^[[:space:]]*volumes:[[:space:]]*$/) {
-        if (addport != "" || add80 != "") {
+        if (addport != "" || add80 != "" || otel_http != "" || otel_grpc != "") {
           print "    ports: # install: ports section"
           if (addport != "") {
             print "      - \"" addport ":" addport "\" # install: proxy port"
           }
           if (add80 != "") {
             print "      - \"80:80\" # install: acme http-01"
+          }
+          if (otel_http != "") {
+            print "      - \"" otel_http ":" otel_http "\" # install: otel port"
+          }
+          if (otel_grpc != "") {
+            print "      - \"" otel_grpc ":" otel_grpc "\" # install: otel port"
           }
         }
         inserted=1
@@ -293,6 +296,8 @@ CLUSTER_COLLECTOR="$CLUSTER_COLLECTOR" \
 ENABLE_DOCKERPROBE="$ENABLE_DOCKERPROBE" \
 HOSTNAME="$HOSTNAME" \
 PROXY_PORT="$PROXY_PORT" \
+COLLECT_OTEL_HTTP_PORT="$COLLECT_OTEL_HTTP_PORT" \
+COLLECT_OTEL_GRPC_PORT="$COLLECT_OTEL_GRPC_PORT" \
     $COMPOSE_CMD -p better-stack-collector pull
 
 if [ "$COMPOSE_CMD" = "docker-compose" ]; then
@@ -312,4 +317,6 @@ CLUSTER_COLLECTOR="$CLUSTER_COLLECTOR" \
 ENABLE_DOCKERPROBE="$ENABLE_DOCKERPROBE" \
 HOSTNAME="$HOSTNAME" \
 PROXY_PORT="$PROXY_PORT" \
+COLLECT_OTEL_HTTP_PORT="$COLLECT_OTEL_HTTP_PORT" \
+COLLECT_OTEL_GRPC_PORT="$COLLECT_OTEL_GRPC_PORT" \
     $COMPOSE_CMD -p better-stack-collector up -d --no-build

@@ -28,6 +28,8 @@
 # - CLUSTER_COLLECTOR: Enable cluster collector mode (default: false)
 # - ENABLE_DOCKERPROBE: Enable Docker container metadata collection (default: true)
 # - PROXY_PORT: Optional proxy port for upstream proxy mode
+# - COLLECT_OTEL_HTTP_PORT: Port to expose for OTel HTTP ingestion (e.g., 4318)
+# - COLLECT_OTEL_GRPC_PORT: Port to expose for OTel gRPC ingestion (e.g., 4317)
 #
 # Node filtering:
 # - To deploy only to specific nodes, label them beforehand:
@@ -96,6 +98,8 @@ BASE_URL="${BASE_URL:-https://telemetry.betterstack.com}"
 CLUSTER_COLLECTOR="${CLUSTER_COLLECTOR:-false}"
 ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
 PROXY_PORT="${PROXY_PORT:-}"
+COLLECT_OTEL_HTTP_PORT="${COLLECT_OTEL_HTTP_PORT:-}"
+COLLECT_OTEL_GRPC_PORT="${COLLECT_OTEL_GRPC_PORT:-}"
 
 # GitHub raw URL base for downloading compose files
 GITHUB_RAW_BASE="https://raw.githubusercontent.com/BetterStackHQ/collector/main"
@@ -175,6 +179,8 @@ deploy_collector_stack() {
     local base_url="$BASE_URL"
     local cluster_collector="$CLUSTER_COLLECTOR"
     local proxy_port="$PROXY_PORT"
+    local otel_http_port="$COLLECT_OTEL_HTTP_PORT"
+    local otel_grpc_port="$COLLECT_OTEL_GRPC_PORT"
     local use_labeled_nodes="$USE_LABELED_NODES"
 
     $SSH_CMD "$MANAGER_NODE" /bin/bash <<EOF
@@ -254,6 +260,26 @@ MOUNT_ENTRY
             rm -f "\$MOUNT_FILE"
         fi
 
+        # Handle OTel port exposure
+        PORTS_YAML=""
+        if [ -n "$otel_http_port" ]; then
+            PORTS_YAML="\${PORTS_YAML}
+      - $otel_http_port:$otel_http_port"
+        fi
+        if [ -n "$otel_grpc_port" ]; then
+            PORTS_YAML="\${PORTS_YAML}
+      - $otel_grpc_port:$otel_grpc_port"
+        fi
+        if [ -n "\$PORTS_YAML" ]; then
+            awk -v ports="\$PORTS_YAML" '
+                /^[[:space:]]*volumes:/ && !inserted {
+                    print "    ports:" ports
+                    inserted=1
+                }
+                {print}
+            ' docker-compose.yml > docker-compose.yml.tmp && mv docker-compose.yml.tmp docker-compose.yml
+        fi
+
         # Auto-detect overlay networks if ATTACH_NETWORKS not specified
         NETWORKS_TO_ATTACH="$attach_networks"
         if [ -z "\$NETWORKS_TO_ATTACH" ]; then
@@ -311,6 +337,8 @@ MOUNT_ENTRY
         BASE_URL="$base_url" \\
         CLUSTER_COLLECTOR="$cluster_collector" \\
         PROXY_PORT="$proxy_port" \\
+        COLLECT_OTEL_HTTP_PORT="$otel_http_port" \\
+        COLLECT_OTEL_GRPC_PORT="$otel_grpc_port" \\
             docker stack deploy -c docker-compose.yml better-stack
 
         # Trigger service reconciliation to schedule tasks on newly labeled nodes

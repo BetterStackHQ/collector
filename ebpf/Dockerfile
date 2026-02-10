@@ -39,7 +39,6 @@ RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /enrichment /bootstrap
 
 # Copy eBPF instrument files from official image and set permissions
 COPY --from=obi-source --chmod=755 /ebpf-instrument /usr/local/bin/ebpf-instrument
-COPY --from=obi-source /obi-java-agent.jar /usr/local/bin/obi-java-agent.jar
 COPY --from=obi-source /LICENSE /LICENSE
 COPY --from=obi-source /NOTICE /NOTICE
 
