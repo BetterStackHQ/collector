@@ -61,6 +61,7 @@ services:
       - ENABLE_DOCKERPROBE
       - INSTALLED_AS=docker
     volumes:
+      - /:/host:ro
       - /sys/kernel/tracing:/sys/kernel/tracing:rw
       - /sys/kernel/debug:/sys/kernel/debug:rw
       - /sys/kernel/security:/sys/kernel/security:ro
