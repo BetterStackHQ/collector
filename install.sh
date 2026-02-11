@@ -279,6 +279,10 @@ docker_v1_compatibility() {
 adjust_compose_ports docker-compose.yml
 adjust_compose_volumes docker-compose.yml
 
+if [ -n "$PROXY_PORT" ]; then
+    sed -i.bak 's/INSTALLED_AS=docker/INSTALLED_AS=collector/g' docker-compose.yml && rm -f docker-compose.yml.bak
+fi
+
 # Replace :latest tag if IMAGE_TAG is set
 if [ -n "$IMAGE_TAG" ]; then
     echo "Replacing :latest with :$IMAGE_TAG in compose file"
