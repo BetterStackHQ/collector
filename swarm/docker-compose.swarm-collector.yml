@@ -1,7 +1,7 @@
 # Docker Swarm stack file for Better Stack Collector
 # Deploy with: docker stack deploy -c docker-compose.swarm-collector.yml better-stack
 #
-# NOTE: Beyla must be deployed separately via docker-compose on each node
+# NOTE: eBPF agent must be deployed separately via docker-compose on each node
 # because it requires network_mode: host which is not supported in swarm services.
 
 services:
@@ -46,7 +46,7 @@ services:
         source: /
         target: /host
         read_only: true
-      # Shared volume for Unix socket communication with beyla and persistent data
+      # Shared volume for Unix socket communication with eBPF agent and persistent data
       - type: bind
         source: /var/lib/better-stack
         target: /var/lib/better-stack
