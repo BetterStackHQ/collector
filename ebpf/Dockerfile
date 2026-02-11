@@ -11,7 +11,7 @@ FROM prom/node-exporter:v1.10.2 AS node-exporter-source
 FROM prometheuscommunity/postgres-exporter:v0.18.1 AS postgres-exporter
 
 # Add OBI to the image
-FROM otel/ebpf-instrument:v0.4.1 AS obi-source
+FROM otel/ebpf-instrument:main AS obi-source
 
 # Final stage - Using Debian 12.11-slim for glibc compatibility with node-agent
 FROM debian:12.11-slim
@@ -38,7 +38,7 @@ RUN curl -sS https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
 RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /enrichment /bootstrap
 
 # Copy eBPF instrument files from official image and set permissions
-COPY --from=obi-source --chmod=755 /ebpf-instrument /usr/local/bin/ebpf-instrument
+COPY --from=obi-source --chmod=755 /obi /usr/local/bin/ebpf-instrument
 COPY --from=obi-source /LICENSE /LICENSE
 COPY --from=obi-source /NOTICE /NOTICE
 
