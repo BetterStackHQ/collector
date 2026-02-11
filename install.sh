@@ -147,7 +147,7 @@ adjust_compose_ports() {
       if ($0 ~ /^  collector:[[:space:]]*$/) {
         in_collector=1
       }
-      if ($0 ~ /^[[:space:]]*[a-z_-]+:[[:space:]]*$/ && $0 !~ /collector:/) {
+      if ($0 ~ /^  [a-z_-]+:[[:space:]]*$/ && $0 !~ /collector:/) {
         in_collector=0
       }
 
