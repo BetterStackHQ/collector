@@ -31,12 +31,12 @@ services:
       - /:/host:ro
       - /var/lib/better-stack:/var/lib/better-stack
 
-  beyla:
+  ebpf:
     build:
       context: .
-      dockerfile: beyla/Dockerfile
+      dockerfile: ebpf/Dockerfile
     image: ghcr.io/betterstackhq/collector-ebpf:latest
-    container_name: better-stack-beyla
+    container_name: better-stack-ebpf
     restart: always
     init: true
     stop_signal: SIGTERM
@@ -47,7 +47,7 @@ services:
     network_mode: host
     mem_limit: 3072m
     healthcheck:
-      test: ["CMD-SHELL", "if [ -x /var/lib/better-stack/beyla/healthcheck.sh ]; then /var/lib/better-stack/beyla/healthcheck.sh; else exit 0; fi"]
+      test: ["CMD-SHELL", "if [ -x /var/lib/better-stack/ebpf/healthcheck.sh ]; then /var/lib/better-stack/ebpf/healthcheck.sh; else exit 0; fi"]
       interval: 30s
       timeout: 5s
       start_period: 60s
@@ -55,7 +55,7 @@ services:
     environment:
       # Set Go memory limit to slightly less than container limit
       - GOMEMLIMIT=1400MiB
-      # Pass hostname of host machine to Beyla; needs `export HOSTNAME` before running `docker compose up`
+      # Pass hostname of host machine to eBPF agent; needs `export HOSTNAME` before running `docker compose up`
       - HOSTNAME
       # Enable dockerprobe
       - ENABLE_DOCKERPROBE

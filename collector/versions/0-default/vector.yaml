@@ -1,6 +1,6 @@
 # This is a minimal Vector configuration that is used before
 # configuration is downloaded from telemetry.betterstack.com.
-# Cluster agent and Beyla expect to be able to connect to the sources below.
+# Cluster agent and eBPF agent expect to be able to connect to the sources below.
 
 # Enables the `vector top` command in the collector container.
 api:
@@ -12,7 +12,7 @@ sources:
     type: prometheus_remote_write
     address: 127.0.0.1:39090
 
-  # Collects OpenTelemetry traces from Beyla.
+  # Collects OpenTelemetry traces from eBPF agent.
   beyla_otel:
     type: opentelemetry
     grpc:

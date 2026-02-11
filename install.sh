@@ -16,11 +16,11 @@ version_lt() {
     # Handles versions like 20.10.9, 19.03.13, etc.
     local v1=$1
     local v2=$2
-    
+
     # Convert to comparable format (e.g., 20.10.9 -> 200109)
     local v1_comparable=$(echo "$v1" | awk -F. '{printf "%d%02d%02d", $1, $2, $3}')
     local v2_comparable=$(echo "$v2" | awk -F. '{printf "%d%02d%02d", $1, $2, $3}')
-    
+
     if [ "$v1_comparable" -lt "$v2_comparable" ]; then
         return 0
     else
@@ -113,7 +113,7 @@ if [ "$USE_SECCOMP" = true ]; then
     # For older Docker versions, use the seccomp-enabled compose file
     curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/docker-compose.seccomp.yml \
         -o docker-compose.yml
-    
+
     # Also download the seccomp profile
     curl -sSL https://raw.githubusercontent.com/BetterStackHQ/collector/main/collector-seccomp.json \
         -o collector-seccomp.json
@@ -147,7 +147,7 @@ adjust_compose_ports() {
       if ($0 ~ /^  collector:[[:space:]]*$/) {
         in_collector=1
       }
-      if ($0 ~ /^  [a-z_-]+:[[:space:]]*$/ && $0 !~ /collector:/) {
+      if ($0 ~ /^[[:space:]]*[a-z_-]+:[[:space:]]*$/ && $0 !~ /collector:/) {
         in_collector=0
       }
 
@@ -305,6 +305,10 @@ if [ "$COMPOSE_CMD" = "docker-compose" ]; then
     # This is a workaround for a bug in docker-compose v1 where the container stop grace period is not respected
     $COMPOSE_CMD -p better-stack-collector stop -t 90 || true
 fi
+
+# Stop old better-stack-beyla container if it exists (for upgrades from older versions)
+docker stop better-stack-beyla 2>/dev/null || true
+docker rm better-stack-beyla 2>/dev/null || true
 
 # Run containers
 COLLECTOR_SECRET="$COLLECTOR_SECRET" \
