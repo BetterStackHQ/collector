@@ -1,7 +1,7 @@
-# Beyla container for Docker Swarm nodes
-# Deploy with: docker compose -f docker-compose.swarm-beyla.yml -p better-stack-beyla up -d
+# eBPF container for Docker Swarm nodes
+# Deploy with: docker compose -f docker-compose.swarm-ebpf.yml -p better-stack-ebpf up -d
 #
-# This runs outside of Docker Swarm as a regular docker-compose service because beyla requires:
+# This runs outside of Docker Swarm as a regular docker-compose service because eBPF agent requires:
 # - network_mode: host (for eBPF network tracing)
 # - privileged: true (for eBPF access)
 # - pid: host (for process visibility)
@@ -9,9 +9,9 @@
 # These options are not supported in Docker Swarm services.
 
 services:
-  beyla:
+  ebpf:
     image: ghcr.io/betterstackhq/collector-ebpf:latest
-    container_name: better-stack-beyla
+    container_name: better-stack-ebpf
     restart: always
     init: true
     stop_signal: SIGTERM
@@ -22,7 +22,7 @@ services:
     network_mode: host
     mem_limit: 3072m
     healthcheck:
-      test: ["CMD-SHELL", "if [ -x /var/lib/better-stack/beyla/healthcheck.sh ]; then /var/lib/better-stack/beyla/healthcheck.sh; else exit 0; fi"]
+      test: ["CMD-SHELL", "if [ -x /var/lib/better-stack/ebpf/healthcheck.sh ]; then /var/lib/better-stack/ebpf/healthcheck.sh; else exit 0; fi"]
       interval: 30s
       timeout: 5s
       start_period: 60s
@@ -30,12 +30,13 @@ services:
     environment:
       # Set Go memory limit to slightly less than container limit
       - GOMEMLIMIT=1400MiB
-      # Pass hostname of host machine to Beyla; needs `export HOSTNAME` before running `docker compose up`
+      # Pass hostname of host machine to eBPF agent; needs `export HOSTNAME` before running `docker compose up`
       - HOSTNAME
       # Enable dockerprobe
       - ENABLE_DOCKERPROBE
       - INSTALLED_AS=swarm
     volumes:
+      - /:/host:ro
       - /sys/kernel/tracing:/sys/kernel/tracing:rw
       - /sys/kernel/debug:/sys/kernel/debug:rw
       - /sys/kernel/security:/sys/kernel/security:ro

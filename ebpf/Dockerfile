@@ -37,9 +37,8 @@ RUN curl -sS https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
 # Create necessary directories
 RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /enrichment /bootstrap
 
-# Copy Beyla files from official image and set permissions
+# Copy eBPF instrument files from official image and set permissions
 COPY --from=obi-source --chmod=755 /ebpf-instrument /usr/local/bin/ebpf-instrument
-COPY --from=obi-source /obi-java-agent.jar /usr/local/bin/obi-java-agent.jar
 COPY --from=obi-source /LICENSE /LICENSE
 COPY --from=obi-source /NOTICE /NOTICE
 
@@ -55,8 +54,8 @@ COPY --from=node-exporter-source --chmod=755 /bin/node_exporter /usr/local/bin/n
 # Copy Postgres exporter
 COPY --from=postgres-exporter --chmod=755 /bin/postgres_exporter /usr/local/bin/postgres_exporter
 
-COPY beyla/bootstrap_supervisord.conf /bootstrap/supervisord.conf
-COPY --chmod=755 beyla/run_supervisord.sh /run_supervisord.sh
+COPY ebpf/bootstrap_supervisord.conf /bootstrap/supervisord.conf
+COPY --chmod=755 ebpf/run_supervisord.sh /run_supervisord.sh
 
 # Default command
 CMD ["/run_supervisord.sh"]

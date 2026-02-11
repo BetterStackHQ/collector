@@ -16,6 +16,6 @@ Better Stack collector is the easiest and recommended way of integrating Better 
 Please let us know at [hello@betterstack.com](mailto:hello@betterstack.com). We're happy to help!
 
 ## Thank you, open source contributors!
-Better Stack collector wouldn't be possible without the open source community. We are grateful to all the contributors of OpenTelemetry, Cilium, Vector, Beyla, Coroot among others who enabled us to build upon their work. Thank you!
+Better Stack collector wouldn't be possible without the open source community. We are grateful to all the contributors of OpenTelemetry, Cilium, Vector, OBI, Coroot among others who enabled us to build upon their work. Thank you!
 
 [Apache 2.0 License](LICENSE.md)

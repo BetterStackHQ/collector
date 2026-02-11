@@ -54,9 +54,9 @@ log_info "BASE_URL: $BASE_URL"
 # Check if already bootstrapped
 MANIFEST_DIR="/var/lib/better-stack"
 BOOTSTRAPPED_FILE="$MANIFEST_DIR/bootstrapped.txt"
-BEYLA_UNPROVISIONED_FILE="$MANIFEST_DIR/beyla-unprovisioned.txt"
-BEYLA_SOCKET="$MANIFEST_DIR/beyla-supervisor.sock"
-BEYLA_SUPERVISOR_CONF="$MANIFEST_DIR/beyla/supervisord.conf"
+EBPF_UNPROVISIONED_FILE="$MANIFEST_DIR/beyla-unprovisioned.txt"
+EBPF_SOCKET="$MANIFEST_DIR/beyla-supervisor.sock"
+EBPF_SUPERVISOR_CONF="$MANIFEST_DIR/beyla/supervisord.conf"
 COLLECTOR_SUPERVISOR_CONF="$MANIFEST_DIR/collector/supervisord.conf"
 
 # sanity check: if bootstrap is restarted and bootstrap marker is found, it's likely supervisor restart failed
@@ -76,7 +76,7 @@ if [ -f "$BOOTSTRAPPED_FILE" ]; then
 
         # Remove markers to allow re-bootstrap
         rm -f "$BOOTSTRAPPED_FILE"
-        rm -f "$BEYLA_UNPROVISIONED_FILE"
+        rm -f "$EBPF_UNPROVISIONED_FILE"
 
         log_info "Removed bootstrap markers, proceeding with bootstrap..."
     fi
@@ -258,31 +258,31 @@ log_info "Manifest version: $MANIFEST_VERSION"
 log_info "Files downloaded: $FILES_COUNT"
 log_info "Location: $MANIFEST_DIR"
 
-# Wait for Beyla supervisor socket (up to 30 seconds)
+# Wait for eBPF supervisor socket (up to 30 seconds)
 WAIT_SECONDS=30
-BEYLA_SOCKET_EXISTS=false
+EBPF_SOCKET_EXISTS=false
 
-log_info "Waiting up to ${WAIT_SECONDS}s for Beyla supervisor socket..."
+log_info "Waiting up to ${WAIT_SECONDS}s for eBPF supervisor socket..."
 for i in $(seq 1 $WAIT_SECONDS); do
-    if [ -S "$BEYLA_SOCKET" ]; then
-        log_info "Beyla supervisor socket found after ${i}s"
-        BEYLA_SOCKET_EXISTS=true
+    if [ -S "$EBPF_SOCKET" ]; then
+        log_info "eBPF supervisor socket found after ${i}s"
+        EBPF_SOCKET_EXISTS=true
         break
     fi
     sleep 1
 done
 
-if [ "$BEYLA_SOCKET_EXISTS" = true ]; then
-    # Socket exists - reload Beyla supervisor
-    log_info "Reloading Beyla supervisor configuration..."
-    supervisorctl -c "$BEYLA_SUPERVISOR_CONF" reread
-    supervisorctl -c "$BEYLA_SUPERVISOR_CONF" update
+if [ "$EBPF_SOCKET_EXISTS" = true ]; then
+    # Socket exists - reload eBPF supervisor
+    log_info "Reloading eBPF supervisor configuration..."
+    supervisorctl -c "$EBPF_SUPERVISOR_CONF" reread
+    supervisorctl -c "$EBPF_SUPERVISOR_CONF" update
 else
     # Socket not found - mark as unprovisioned
-    log_warn "Beyla supervisor socket not found after ${WAIT_SECONDS}s"
-    log_warn "Marking Beyla as unprovisioned"
-    date > "$BEYLA_UNPROVISIONED_FILE"
-    log_info "Beyla unprovisioned marker written to: $BEYLA_UNPROVISIONED_FILE"
+    log_warn "eBPF supervisor socket not found after ${WAIT_SECONDS}s"
+    log_warn "Marking eBPF agent as unprovisioned"
+    date > "$EBPF_UNPROVISIONED_FILE"
+    log_info "eBPF unprovisioned marker written to: $EBPF_UNPROVISIONED_FILE"
 fi
 
 # Mark bootstrap as completed
