@@ -54,9 +54,9 @@ log_info "BASE_URL: $BASE_URL"
 # Check if already bootstrapped
 MANIFEST_DIR="/var/lib/better-stack"
 BOOTSTRAPPED_FILE="$MANIFEST_DIR/bootstrapped.txt"
-EBPF_UNPROVISIONED_FILE="$MANIFEST_DIR/beyla-unprovisioned.txt"
-EBPF_SOCKET="$MANIFEST_DIR/beyla-supervisor.sock"
-EBPF_SUPERVISOR_CONF="$MANIFEST_DIR/beyla/supervisord.conf"
+EBPF_UNPROVISIONED_FILE="$MANIFEST_DIR/ebpf-unprovisioned.txt"
+EBPF_SOCKET="$MANIFEST_DIR/ebpf-supervisor.sock"
+EBPF_SUPERVISOR_CONF="$MANIFEST_DIR/ebpf/supervisord.conf"
 COLLECTOR_SUPERVISOR_CONF="$MANIFEST_DIR/collector/supervisord.conf"
 
 # sanity check: if bootstrap is restarted and bootstrap marker is found, it's likely supervisor restart failed
@@ -146,7 +146,7 @@ log_info "Latest manifest version: $MANIFEST_VERSION"
 
 # Step 2: Download full manifest
 log_info "Downloading manifest version $MANIFEST_VERSION..."
-MANIFEST_URL="$BASE_URL/api/collector/manifest?collector_secret=$(printf %s "$COLLECTOR_SECRET" | jq -sRr @uri)&manifest_version=$MANIFEST_VERSION"
+MANIFEST_URL="$BASE_URL/api/collector/manifest?collector_secret=$(printf %s "$COLLECTOR_SECRET" | jq -sRr @uri)&manifest_version=$MANIFEST_VERSION&layout_version=2"
 
 MANIFEST_FILE="$MANIFEST_DIR/manifest.json"
 
@@ -203,7 +203,7 @@ for i in $(seq 0 $((FILES_COUNT - 1))); do
     mkdir -p "$DEST_DIR"
 
     # Download file
-    FILE_URL="$BASE_URL/api/collector/manifest-file?collector_secret=$(printf %s "$COLLECTOR_SECRET" | jq -sRr @uri)&manifest_version=$MANIFEST_VERSION&path=$(printf %s "$FILE_PATH" | jq -sRr @uri)&container=$(printf %s "$CONTAINER" | jq -sRr @uri)"
+    FILE_URL="$BASE_URL/api/collector/manifest-file?collector_secret=$(printf %s "$COLLECTOR_SECRET" | jq -sRr @uri)&manifest_version=$MANIFEST_VERSION&path=$(printf %s "$FILE_PATH" | jq -sRr @uri)&container=$(printf %s "$CONTAINER" | jq -sRr @uri)&layout_version=2"
 
     TEMP_FILE=$(mktemp)
     if ! make_api_request "$FILE_URL" "$TEMP_FILE"; then
@@ -226,7 +226,7 @@ done
 
 # Step 4: Download topology configuration (optional, with retries)
 log_info "Downloading topology configuration..."
-TOPOLOGY_URL="$BASE_URL/api/collector/configuration-file?collector_secret=$(printf %s "$COLLECTOR_SECRET" | jq -sRr @uri)&configuration_version=latest&file=topology.json"
+TOPOLOGY_URL="$BASE_URL/api/collector/configuration-file?collector_secret=$(printf %s "$COLLECTOR_SECRET" | jq -sRr @uri)&configuration_version=latest&file=topology.json&layout_version=2"
 TOPOLOGY_FILE="$MANIFEST_DIR/topology.json"
 TOPOLOGY_MAX_ATTEMPTS=3
 TOPOLOGY_ATTEMPT=1
