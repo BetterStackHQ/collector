@@ -1,28 +1,16 @@
 ## Building Better Stack Collector locally
 
-Run the mock test server locally with
-
-```
-INGESTING_HOST=s123456.eu-nbg-2.betterstackdata.com COLLECTOR_SECRET=your_real_collector_secret SOURCE_TOKEN=your_real_production_source_token ruby test/test_server.rb
-```
-
-and
-
-```
-ngrok http 3010
-```
-
 ### Using Docker Compose for local development
 
 Build and run:
 
 ```bash
-docker-compose down
-docker-compose build
+docker compose down
+docker compose build
 export HOSTNAME
 COLLECTOR_SECRET=your_collector_secret_here \
 BASE_URL=https://telemetry.betterstack.ngrok.dev \
-docker-compose up
+docker compose up
 ```
 
 - See live Vector stats: `docker exec -it better-stack-collector vector top`
