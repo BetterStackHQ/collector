@@ -101,6 +101,14 @@ BASE_URL="${BASE_URL:-https://telemetry.betterstack.com}"
 CLUSTER_COLLECTOR="${CLUSTER_COLLECTOR:-false}"
 ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
 
+# Check if collector is already running via Docker Swarm
+SWARM_CONTAINER=$(docker ps --filter "name=better-stack_collector" --format '{{.Names}}' 2>/dev/null || true)
+if [ -n "$SWARM_CONTAINER" ]; then
+    echo "Error: Better Stack collector is already running via Docker Swarm ($SWARM_CONTAINER)."
+    echo "Please uninstall the Swarm deployment first, or use deploy-to-swarm.sh to manage it."
+    exit 1
+fi
+
 # Create temporary directory and cd into it
 TEMP_DIR=$(mktemp -d)
 cd "$TEMP_DIR"
