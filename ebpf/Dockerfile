@@ -10,6 +10,9 @@ FROM prom/node-exporter:v1.10.2 AS node-exporter-source
 # Add postgres exporter to the image
 FROM prometheuscommunity/postgres-exporter:v0.18.1 AS postgres-exporter
 
+# Add kafka exporter to the image
+FROM danielqsj/kafka-exporter:v1.9.0 AS kafka-exporter
+
 # Add OBI to the image
 FROM otel/ebpf-instrument:v0.4.1 AS obi-source
 
@@ -53,6 +56,9 @@ COPY --from=node-exporter-source --chmod=755 /bin/node_exporter /usr/local/bin/n
 
 # Copy Postgres exporter
 COPY --from=postgres-exporter --chmod=755 /bin/postgres_exporter /usr/local/bin/postgres_exporter
+
+# Copy Kafka exporter
+COPY --from=kafka-exporter --chmod=755 /bin/kafka_exporter /usr/local/bin/kafka_exporter
 
 COPY ebpf/bootstrap_supervisord.conf /bootstrap/supervisord.conf
 COPY --chmod=755 ebpf/run_supervisord.sh /run_supervisord.sh
