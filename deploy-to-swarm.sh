@@ -493,6 +493,26 @@ uninstall_collector_stack() {
     sleep 5
 }
 
+# Check for existing compose-mode installations on target nodes
+if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]]; then
+    print_blue "Checking for existing compose-mode installations..."
+    COMPOSE_NODES=""
+    for NODE in $NODES; do
+        node_target=$(get_node_target "$NODE")
+        COMPOSE_CONTAINER=$(${SSH_CMD} "$node_target" "docker ps --filter 'name=better-stack-collector' --format '{{.Names}}'" </dev/null 2>/dev/null || true)
+        if [[ -n "$COMPOSE_CONTAINER" ]]; then
+            COMPOSE_NODES="${COMPOSE_NODES:+$COMPOSE_NODES, }$NODE"
+        fi
+    done
+    if [[ -n "$COMPOSE_NODES" ]]; then
+        print_red "Error: Better Stack collector is already installed via docker-compose on: $COMPOSE_NODES"
+        echo "Please uninstall the compose deployment first (docker compose -p better-stack-collector down) before deploying via Swarm."
+        exit 1
+    fi
+    print_green "✓ No existing compose-mode installations found"
+    echo
+fi
+
 # Main execution
 case "$ACTION" in
     "install")
