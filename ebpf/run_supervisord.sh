@@ -3,7 +3,7 @@
 set -e
 
 # Ensure the supervisord.conf exists in the expected location
-SUPERVISORD_CONF="/var/lib/better-stack/beyla/supervisord.conf"
+SUPERVISORD_CONF="/var/lib/better-stack/ebpf/supervisord.conf"
 BOOTSTRAP_CONF="/bootstrap/supervisord.conf"
 
 if [ ! -f "$SUPERVISORD_CONF" ]; then
