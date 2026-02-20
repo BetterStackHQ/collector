@@ -1,5 +1,5 @@
 # Add Node Agent to the image
-FROM ghcr.io/coroot/coroot-node-agent:1.27.0 AS node-agent
+FROM ghcr.io/coroot/coroot-node-agent:1.28.3 AS node-agent
 
 # Add Cluster Agent to the image
 FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
@@ -13,8 +13,11 @@ FROM prometheuscommunity/postgres-exporter:v0.18.1 AS postgres-exporter
 # Add kafka exporter to the image
 FROM danielqsj/kafka-exporter:v1.9.0 AS kafka-exporter
 
-# Add OBI to the image
-FROM otel/ebpf-instrument:v0.4.1 AS obi-source
+# Download OBI binary from GitHub release (no published Docker image for v0.5.0)
+FROM debian:12.11-slim AS obi-source
+ARG TARGETARCH
+ADD https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/releases/download/v0.5.0/obi-v0.5.0-linux-${TARGETARCH}.tar.gz /tmp/obi.tar.gz
+RUN tar -xzf /tmp/obi.tar.gz -C /tmp
 
 # Final stage - Using Debian 12.11-slim for glibc compatibility with node-agent
 FROM debian:12.11-slim
@@ -40,10 +43,8 @@ RUN curl -sS https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
 # Create necessary directories
 RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /enrichment /bootstrap
 
-# Copy eBPF instrument files from official image and set permissions
-COPY --from=obi-source --chmod=755 /ebpf-instrument /usr/local/bin/ebpf-instrument
-COPY --from=obi-source /LICENSE /LICENSE
-COPY --from=obi-source /NOTICE /NOTICE
+# Copy OBI binary from extracted tarball
+COPY --from=obi-source --chmod=755 /tmp/obi /usr/local/bin/ebpf-instrument
 
 # Copy Node Agent
 COPY --from=node-agent --chmod=755 /usr/bin/coroot-node-agent /usr/local/bin/node-agent
