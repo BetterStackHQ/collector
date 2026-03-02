@@ -414,6 +414,14 @@ deploy_ebpf_to_node() {
             if ! grep -q '^version:' docker-compose.yml; then
                 sed -i '1i version: "2.4"' docker-compose.yml
             fi
+        else
+            # Strip uts: for Docker Compose v2 < 2.15.1
+            COMPOSE_VERSION=\$(docker compose version --short 2>/dev/null || docker compose version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+            COMPOSE_V_NUM=\$(echo "\$COMPOSE_VERSION" | awk -F. '{printf "%d%02d%02d", \$1, \$2, \$3}')
+            if [ "\$COMPOSE_V_NUM" -lt 21501 ]; then
+                echo "Docker Compose \$COMPOSE_VERSION does not support 'uts' property (requires >= 2.15.1), removing it"
+                sed -i '/^[[:space:]]*uts:[[:space:]]/d' docker-compose.yml
+            fi
         fi
 
         # Export environment variables
