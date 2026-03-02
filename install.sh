@@ -299,6 +299,9 @@ fi
 
 if [ "$COMPOSE_CMD" = "docker-compose" ]; then
     docker_v1_compatibility docker-compose.yml
+elif version_lt "$COMPOSE_VERSION" "2.15.1"; then
+    echo "Docker Compose $COMPOSE_VERSION does not support 'uts' property (requires >= 2.15.1), removing it"
+    sed -i.bak '/^[[:space:]]*uts:[[:space:]]/d' docker-compose.yml && rm -f docker-compose.yml.bak
 fi
 
 # Pull images first
