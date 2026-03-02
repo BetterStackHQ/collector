@@ -13,7 +13,7 @@ FROM prometheuscommunity/postgres-exporter:v0.18.1 AS postgres-exporter
 # Add kafka exporter to the image
 FROM danielqsj/kafka-exporter:v1.9.0 AS kafka-exporter
 
-# Download OBI binary from GitHub release (no published Docker image for v0.5.0)
+# Download OBI binary from GitHub release (Docker image otel/ebpf-instrument:v0.5.0 exists but is amd64-only)
 FROM debian:12.11-slim AS obi-source
 ARG TARGETARCH
 ADD https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/releases/download/v0.5.0/obi-v0.5.0-linux-${TARGETARCH}.tar.gz /tmp/obi.tar.gz
@@ -43,8 +43,9 @@ RUN curl -sS https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
 # Create necessary directories
 RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /enrichment /bootstrap
 
-# Copy OBI binary from extracted tarball
+# Copy OBI binary and license files from extracted tarball
 COPY --from=obi-source --chmod=755 /tmp/obi /usr/local/bin/ebpf-instrument
+COPY --from=obi-source /tmp/LICENSE /tmp/NOTICE /usr/share/doc/ebpf-instrument/
 
 # Copy Node Agent
 COPY --from=node-agent --chmod=755 /usr/bin/coroot-node-agent /usr/local/bin/node-agent
