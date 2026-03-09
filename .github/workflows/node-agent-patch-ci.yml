@@ -18,12 +18,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.23.8'
-
-      - run: sudo apt-get install -y libsystemd-dev
-
       - name: Clone node-agent and apply patches
         run: |
           NODE_AGENT_VERSION=$(grep 'NODE_AGENT_VERSION=' ebpf/Dockerfile | head -1 | sed 's/.*=//')
@@ -31,6 +25,13 @@ jobs:
             https://github.com/coroot/coroot-node-agent.git /tmp/node-agent
           cd /tmp/node-agent
           git apply ${{ github.workspace }}/ebpf/patches/node-agent/*.patch
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.8'
+          cache-dependency-path: /tmp/node-agent/go.sum
+
+      - run: sudo apt-get install -y libsystemd-dev
 
       - name: gofmt -l .
         working-directory: /tmp/node-agent
