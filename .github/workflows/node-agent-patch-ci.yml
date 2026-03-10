@@ -1,0 +1,65 @@
+name: Node Agent Patch CI
+
+on:
+  pull_request:
+    paths:
+      - 'ebpf/patches/node-agent/**'
+      - 'ebpf/Dockerfile'
+  push:
+    branches:
+      - main
+    paths:
+      - 'ebpf/patches/node-agent/**'
+      - 'ebpf/Dockerfile'
+
+jobs:
+  test-node-agent-patch:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone node-agent and apply patches
+        run: |
+          NODE_AGENT_VERSION=$(grep 'NODE_AGENT_VERSION=' ebpf/Dockerfile | head -1 | sed 's/.*=//')
+          git clone --depth 1 --branch ${NODE_AGENT_VERSION} \
+            https://github.com/coroot/coroot-node-agent.git /tmp/node-agent
+          cd /tmp/node-agent
+          git apply ${{ github.workspace }}/ebpf/patches/node-agent/*.patch
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.8'
+          cache: false
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: node-agent-go-${{ hashFiles('/tmp/node-agent/go.sum') }}
+          restore-keys: node-agent-go-
+
+      - run: sudo apt-get install -y libsystemd-dev
+
+      - name: go mod download
+        working-directory: /tmp/node-agent
+        run: go mod download
+
+      - name: gofmt -l .
+        working-directory: /tmp/node-agent
+        run: files=$(gofmt -l .); if [[ -n "$files" ]]; then echo "$files"; exit 1; fi
+
+      - name: goimports -l .
+        working-directory: /tmp/node-agent
+        run: |
+          go install golang.org/x/tools/cmd/goimports@latest
+          files=$(goimports -l .); if [[ -n "$files" ]]; then echo "$files"; exit 1; fi
+
+      - name: go vet
+        working-directory: /tmp/node-agent
+        run: go vet ./...
+
+      - name: go test
+        working-directory: /tmp/node-agent
+        run: go test ./...
+
