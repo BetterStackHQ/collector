@@ -35,7 +35,8 @@ FROM quay.io/prometheuscommunity/elasticsearch-exporter:v1.10.0 AS elasticsearch
 # Download OBI binary from GitHub release (Docker image otel/ebpf-instrument:v0.5.0 exists but is amd64-only)
 FROM debian:12.11-slim AS obi-source
 ARG TARGETARCH
-ADD https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/releases/download/v0.5.0/obi-v0.5.0-linux-${TARGETARCH}.tar.gz /tmp/obi.tar.gz
+ARG OBI_VERSION="v0.6.0"
+ADD https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/releases/download/${OBI_VERSION}/obi-${OBI_VERSION}-linux-${TARGETARCH}.tar.gz /tmp/obi.tar.gz
 RUN tar -xzf /tmp/obi.tar.gz -C /tmp
 
 # Final stage - Using Debian 12.11-slim for glibc compatibility with node-agent
