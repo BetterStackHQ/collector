@@ -1,0 +1,228 @@
+diff --git a/containers/registry.go b/containers/registry.go
+index 549d532..64b2d94 100644
+--- a/containers/registry.go
++++ b/containers/registry.go
+@@ -116,7 +116,7 @@ func NewRegistry(reg prometheus.Registerer, processInfoCh chan<- ProcessInfo, gp
+ 
+ 		processInfoCh: processInfoCh,
+ 
+-		tracer: ebpftracer.NewTracer(hostNetNs, selfNetNs, *flags.DisableL7Tracing, *flags.MaxConnections, *flags.MaxL7Requests),
++		tracer: ebpftracer.NewTracer(hostNetNs, selfNetNs, *flags.DisableL7Tracing, *flags.MaxConnections, *flags.MaxL7Requests, *flags.InitScanMode, *flags.InitScanDelay),
+ 
+ 		trafficStatsUpdateCh: make(chan *TrafficStatsUpdate),
+ 		nodejsStatsUpdateCh:  make(chan *NodejsStatsUpdate),
+diff --git a/ebpftracer/init.go b/ebpftracer/init.go
+index bd40fa8..d8bbbc2 100644
+--- a/ebpftracer/init.go
++++ b/ebpftracer/init.go
+@@ -2,6 +2,7 @@ package ebpftracer
+ 
+ import (
+ 	"fmt"
++	"runtime"
+ 	"strings"
+ 	"time"
+ 
+@@ -183,3 +184,119 @@ func (t *Tracer) init(ch chan<- Event) error {
+ 	}
+ 	return nil
+ }
++
++const initBatchSize = 50
++
++func (t *Tracer) batchedInit(ch chan<- Event) error {
++	pids, err := proc.ListPids()
++	if err != nil {
++		return fmt.Errorf("failed to list pids: %w", err)
++	}
++	klog.Infof("batched init scan: %d pids, batch size %d", len(pids), initBatchSize)
++
++	hostNsId := t.hostNetNs.UniqueId()
++	hostConntrack, err := getConntrack(t.hostNetNs)
++	if err != nil {
++		return err
++	}
++
++	ebpfConnectionsMap := t.collection.Maps["active_connections"]
++
++	for i := 0; i < len(pids); i += initBatchSize {
++		batch := pids[i:min(i+initBatchSize, len(pids))]
++
++		nss := map[string]map[string]sock{}
++		var socks []sock
++
++		for _, pid := range batch {
++			ch <- Event{Type: EventTypeProcessStart, Pid: pid}
++
++			ns, err := proc.GetNetNs(pid)
++			if err != nil {
++				klog.Warningf("failed to get net ns for %d: %s", pid, err)
++				continue
++			}
++			nsId := ns.UniqueId()
++			sockets, ok := nss[nsId]
++			if !ok {
++				var nsConntrack map[connId]netaddr.IPPort
++				if nsId != hostNsId {
++					if nsConntrack, err = getConntrack(ns); err != nil {
++						klog.Warningf("failed to dump conntrack for ns %d: %s", pid, err)
++					}
++				}
++				if ss, err := proc.GetSockets(pid); err != nil {
++					klog.Warningf("failed to get sockets for %d: %s", pid, err)
++				} else {
++					sockets = map[string]sock{}
++					nss[nsId] = sockets
++					for _, s := range ss {
++						id := connId{src: s.SAddr, dst: s.DAddr}
++						actualDest, ok := hostConntrack[id]
++						if !ok && nsConntrack != nil {
++							actualDest, ok = nsConntrack[id]
++						}
++						sockets[s.Inode] = sock{Sock: s, actualDest: actualDest}
++					}
++				}
++			}
++			_ = ns.Close()
++
++			fds, err := proc.ReadFds(pid)
++			if err != nil {
++				klog.Warningf("failed to read fds for %d: %s", pid, err)
++				continue
++			}
++			for _, fd := range fds {
++				switch {
++				case fd.SocketInode != "":
++					if s, ok := sockets[fd.SocketInode]; ok {
++						s.fd = fd.Fd
++						s.pid = pid
++						socks = append(socks, s)
++					}
++				case strings.HasPrefix(fd.Dest, "/"):
++					ch <- Event{Type: EventTypeFileOpen, Pid: pid, Fd: fd.Fd, Log: strings.HasPrefix(fd.Dest, "/var/log/")}
++				}
++			}
++		}
++
++		listens := map[uint64]bool{}
++		for _, s := range socks {
++			if s.Listen {
++				listens[uint64(s.pid)<<32|uint64(s.SAddr.Port())] = true
++			}
++		}
++
++		timestamp := uint64(time.Now().UnixNano())
++		for _, s := range socks {
++			typ := EventTypeConnectionOpen
++			if s.Listen {
++				typ = EventTypeListenOpen
++			} else if listens[uint64(s.pid)<<32|uint64(s.SAddr.Port())] || s.DAddr.Port() > s.SAddr.Port() {
++				continue
++			}
++			ch <- Event{
++				Type:          typ,
++				Pid:           s.pid,
++				Timestamp:     timestamp,
++				Fd:            s.fd,
++				SrcAddr:       s.SAddr,
++				DstAddr:       s.DAddr,
++				ActualDstAddr: s.actualDest,
++			}
++			if typ == EventTypeConnectionOpen {
++				id := ConnectionId{FD: s.fd, PID: s.pid}
++				conn := Connection{Timestamp: timestamp}
++				if err := ebpfConnectionsMap.Update(id, conn, ebpf.UpdateNoExist); err != nil {
++					klog.Warningln(err)
++				}
++			}
++		}
++
++		runtime.GC()
++	}
++
++	klog.Infoln("batched init scan complete")
++	return nil
++}
+diff --git a/ebpftracer/tracer.go b/ebpftracer/tracer.go
+index 0d3f445..d89ff6d 100644
+--- a/ebpftracer/tracer.go
++++ b/ebpftracer/tracer.go
+@@ -84,6 +84,8 @@ type Tracer struct {
+ 	selfNetNs        netns.NsHandle
+ 	maxConnections   int
+ 	maxL7Requests    int
++	initScanMode     string
++	initScanDelay    time.Duration
+ 
+ 	collection *ebpf.Collection
+ 	readers    map[string]*perf.Reader
+@@ -91,7 +93,7 @@ type Tracer struct {
+ 	uprobes    map[string]*ebpf.Program
+ }
+ 
+-func NewTracer(hostNetNs, selfNetNs netns.NsHandle, disableL7Tracing bool, maxConnections, maxL7Requests int) *Tracer {
++func NewTracer(hostNetNs, selfNetNs netns.NsHandle, disableL7Tracing bool, maxConnections, maxL7Requests int, initScanMode string, initScanDelay time.Duration) *Tracer {
+ 	if disableL7Tracing {
+ 		klog.Infoln("L7 tracing is disabled")
+ 	}
+@@ -101,6 +103,8 @@ func NewTracer(hostNetNs, selfNetNs netns.NsHandle, disableL7Tracing bool, maxCo
+ 		selfNetNs:        selfNetNs,
+ 		maxConnections:   maxConnections,
+ 		maxL7Requests:    maxL7Requests,
++		initScanMode:     initScanMode,
++		initScanDelay:    initScanDelay,
+ 
+ 		readers: map[string]*perf.Reader{},
+ 		uprobes: map[string]*ebpf.Program{},
+@@ -114,8 +118,22 @@ func (t *Tracer) Run(events chan<- Event) error {
+ 	if err := t.ebpf(events); err != nil {
+ 		return err
+ 	}
+-	if err := t.init(events); err != nil {
+-		return err
++	switch t.initScanMode {
++	case "disabled":
++		klog.Infoln("init scan disabled, relying on eBPF tracepoints only")
++	case "deferred":
++		klog.Infof("deferring init scan by %s", t.initScanDelay)
++		go func() {
++			time.Sleep(t.initScanDelay)
++			klog.Infoln("starting deferred init scan")
++			if err := t.batchedInit(events); err != nil {
++				klog.Warningln("deferred init scan failed:", err)
++			}
++		}()
++	default:
++		if err := t.init(events); err != nil {
++			return err
++		}
+ 	}
+ 	return nil
+ }
+diff --git a/ebpftracer/tracer_test.go b/ebpftracer/tracer_test.go
+index 9fe98de..a542e95 100644
+--- a/ebpftracer/tracer_test.go
++++ b/ebpftracer/tracer_test.go
+@@ -327,7 +327,7 @@ func runTracer(t *testing.T, verbose bool) (func() *Event, func()) {
+ 	assert.NoError(t, common.SetKernelVersion(string(bytes.Split(uname.Release[:], []byte{0})[0])))
+ 
+ 	go func() {
+-		tt := NewTracer(0, 0, false, 0, 0)
++		tt := NewTracer(0, 0, false, 0, 0, "enabled", 0)
+ 		err := tt.Run(events)
+ 		require.NoError(t, err)
+ 		<-done
+diff --git a/flags/flags.go b/flags/flags.go
+index ff89896..82d6016 100644
+--- a/flags/flags.go
++++ b/flags/flags.go
+@@ -20,6 +20,9 @@ var (
+ 	MaxL7Requests  = kingpin.Flag("max-l7-requests", "Maximum number of in-flight L7 requests in eBPF maps").Default("32768").Envar("MAX_L7_REQUESTS").Int()
+ 	GCInterval     = kingpin.Flag("gc-interval", "How often to run container garbage collection").Default("10m").Envar("GC_INTERVAL").Duration()
+ 
++	InitScanMode  = kingpin.Flag("init-scan", "Init scan mode: enabled (default), deferred (scan after delay), disabled (skip scan)").Default("enabled").Envar("INIT_SCAN").Enum("enabled", "deferred", "disabled")
++	InitScanDelay = kingpin.Flag("init-scan-delay", "Delay before running init scan in deferred mode").Default("30s").Envar("INIT_SCAN_DELAY").Duration()
++
+ 	ContainerAllowlist = kingpin.Flag("container-allowlist", "List of allowed containers (regex patterns)").Envar("CONTAINER_ALLOWLIST").Strings()
+ 	ContainerDenylist  = kingpin.Flag("container-denylist", "List of denied containers (regex patterns)").Envar("CONTAINER_DENYLIST").Strings()
+ 
