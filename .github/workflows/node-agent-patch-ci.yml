@@ -5,12 +5,14 @@ on:
     paths:
       - "ebpf/patches/node-agent/**"
       - "ebpf/Dockerfile"
+      - ".github/workflows/node-agent-patch-ci.yml"
   push:
     branches:
       - main
     paths:
       - "ebpf/patches/node-agent/**"
       - "ebpf/Dockerfile"
+      - ".github/workflows/node-agent-patch-ci.yml"
 
 jobs:
   test-node-agent-patch:
