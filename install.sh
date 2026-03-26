@@ -64,32 +64,10 @@ if [ -z "$COLLECTOR_SECRET" ]; then
     exit 1
 fi
 
-# Optional proxy port and TLS indicator
-PROXY_PORT="${PROXY_PORT:-}"
-USE_TLS="${USE_TLS:-}"
-
 # Optional custom host mount paths (comma-separated)
 MOUNT_HOST_PATHS="${MOUNT_HOST_PATHS:-}"
 COLLECT_OTEL_HTTP_PORT="${COLLECT_OTEL_HTTP_PORT:-}"
 COLLECT_OTEL_GRPC_PORT="${COLLECT_OTEL_GRPC_PORT:-}"
-
-# Validate PROXY_PORT if set
-if [ -n "$PROXY_PORT" ]; then
-    if ! [[ "$PROXY_PORT" =~ ^[0-9]+$ ]]; then
-        echo "Error: PROXY_PORT must be an integer."
-        exit 1
-    fi
-    # Check for conflicts with internal ports
-    if [ "$PROXY_PORT" -eq 33000 ] || [ "$PROXY_PORT" -eq 34320 ] || [ "$PROXY_PORT" -eq 39090 ]; then
-        echo "Error: PROXY_PORT cannot be 33000, 34320, or 39090 as these are internal collector ports."
-        exit 1
-    fi
-    # If USE_TLS is set and PROXY_PORT is 80, that's a conflict
-    if [ -n "$USE_TLS" ] && [ "$PROXY_PORT" -eq 80 ]; then
-        echo "Error: PROXY_PORT cannot be 80 when USE_TLS is set (port 80 is reserved for ACME HTTP-01)."
-        exit 1
-    fi
-fi
 
 # Set hostname if not provided (use empty string HOSTNAME="" to trigger runtime detection via uts:host)
 if [ -z "${HOSTNAME+x}" ]; then
@@ -133,23 +111,17 @@ fi
 
 # Adjust Compose port exposure rules
 # - Adds ports section to collector service (inserted before volumes section)
-# - If PROXY_PORT present, add host mapping: ${PROXY_PORT}:${PROXY_PORT} (for upstream proxy in Vector)
-# - Add port 80 for ACME validation when PROXY_PORT==443 or USE_TLS is set (and PROXY_PORT!=80)
+# - If OTel ports are set, add host mappings for them
 
 adjust_compose_ports() {
   local file="$1"
   local tmpfile
   tmpfile="$(mktemp)"
 
-  local bind80=""
-  if [ "$PROXY_PORT" = "443" ] || ([ -n "$USE_TLS" ] && [ "$PROXY_PORT" != "80" ]); then
-    bind80="yes"
-  fi
-
-  awk -v addport="$PROXY_PORT" -v add80="$bind80" -v otel_http="$COLLECT_OTEL_HTTP_PORT" -v otel_grpc="$COLLECT_OTEL_GRPC_PORT" '
+  awk -v otel_http="$COLLECT_OTEL_HTTP_PORT" -v otel_grpc="$COLLECT_OTEL_GRPC_PORT" '
     BEGIN { inserted=0; in_collector=0 }
     {
-      if ($0 ~ /# install: (proxy port|acme http-01|ports section|otel port)/) { next }
+      if ($0 ~ /# install: (ports section|otel port)/) { next }
       if ($0 ~ /^[[:space:]]*ports:[[:space:]]*$/ && in_collector==1) { next }
 
       if ($0 ~ /^  collector:[[:space:]]*$/) {
@@ -160,14 +132,8 @@ adjust_compose_ports() {
       }
 
       if (in_collector==1 && inserted==0 && $0 ~ /^[[:space:]]*volumes:[[:space:]]*$/) {
-        if (addport != "" || add80 != "" || otel_http != "" || otel_grpc != "") {
+        if (otel_http != "" || otel_grpc != "") {
           print "    ports: # install: ports section"
-          if (addport != "") {
-            print "      - \"" addport ":" addport "\" # install: proxy port"
-          }
-          if (add80 != "") {
-            print "      - \"80:80\" # install: acme http-01"
-          }
           if (otel_http != "") {
             print "      - \"" otel_http ":" otel_http "\" # install: otel port"
           }
@@ -287,10 +253,6 @@ docker_v1_compatibility() {
 adjust_compose_ports docker-compose.yml
 adjust_compose_volumes docker-compose.yml
 
-if [ -n "$PROXY_PORT" ]; then
-    sed -i.bak 's/INSTALLED_AS=docker/INSTALLED_AS=proxy/g' docker-compose.yml && rm -f docker-compose.yml.bak
-fi
-
 # Replace :latest tag if IMAGE_TAG is set
 if [ -n "$IMAGE_TAG" ]; then
     echo "Replacing :latest with :$IMAGE_TAG in compose file"
@@ -310,7 +272,6 @@ BASE_URL="$BASE_URL" \
 CLUSTER_COLLECTOR="$CLUSTER_COLLECTOR" \
 ENABLE_DOCKERPROBE="$ENABLE_DOCKERPROBE" \
 HOSTNAME="$HOSTNAME" \
-PROXY_PORT="$PROXY_PORT" \
 COLLECT_OTEL_HTTP_PORT="$COLLECT_OTEL_HTTP_PORT" \
 COLLECT_OTEL_GRPC_PORT="$COLLECT_OTEL_GRPC_PORT" \
     $COMPOSE_CMD -p better-stack-collector pull
@@ -331,7 +292,6 @@ BASE_URL="$BASE_URL" \
 CLUSTER_COLLECTOR="$CLUSTER_COLLECTOR" \
 ENABLE_DOCKERPROBE="$ENABLE_DOCKERPROBE" \
 HOSTNAME="$HOSTNAME" \
-PROXY_PORT="$PROXY_PORT" \
 COLLECT_OTEL_HTTP_PORT="$COLLECT_OTEL_HTTP_PORT" \
 COLLECT_OTEL_GRPC_PORT="$COLLECT_OTEL_GRPC_PORT" \
     $COMPOSE_CMD -p better-stack-collector up -d --no-build

@@ -27,7 +27,6 @@
 # - BASE_URL: Better Stack API endpoint (default: https://telemetry.betterstack.com)
 # - CLUSTER_COLLECTOR: Enable cluster collector mode (default: false)
 # - ENABLE_DOCKERPROBE: Enable Docker container metadata collection (default: true)
-# - PROXY_PORT: Optional proxy port for upstream proxy mode
 # - COLLECT_OTEL_HTTP_PORT: Port to expose for OTel HTTP ingestion (e.g., 4318)
 # - COLLECT_OTEL_GRPC_PORT: Port to expose for OTel gRPC ingestion (e.g., 4317)
 #
@@ -97,7 +96,6 @@ ATTACH_NETWORKS="${ATTACH_NETWORKS:-}"
 BASE_URL="${BASE_URL:-https://telemetry.betterstack.com}"
 CLUSTER_COLLECTOR="${CLUSTER_COLLECTOR:-false}"
 ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
-PROXY_PORT="${PROXY_PORT:-}"
 COLLECT_OTEL_HTTP_PORT="${COLLECT_OTEL_HTTP_PORT:-}"
 COLLECT_OTEL_GRPC_PORT="${COLLECT_OTEL_GRPC_PORT:-}"
 
@@ -178,7 +176,6 @@ deploy_collector_stack() {
     local collector_secret="$COLLECTOR_SECRET"
     local base_url="$BASE_URL"
     local cluster_collector="$CLUSTER_COLLECTOR"
-    local proxy_port="$PROXY_PORT"
     local otel_http_port="$COLLECT_OTEL_HTTP_PORT"
     local otel_grpc_port="$COLLECT_OTEL_GRPC_PORT"
     local use_labeled_nodes="$USE_LABELED_NODES"
@@ -336,7 +333,6 @@ MOUNT_ENTRY
         COLLECTOR_SECRET="$collector_secret" \\
         BASE_URL="$base_url" \\
         CLUSTER_COLLECTOR="$cluster_collector" \\
-        PROXY_PORT="$proxy_port" \\
         COLLECT_OTEL_HTTP_PORT="$otel_http_port" \\
         COLLECT_OTEL_GRPC_PORT="$otel_grpc_port" \\
             docker stack deploy -c docker-compose.yml better-stack
