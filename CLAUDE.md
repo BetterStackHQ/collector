@@ -109,8 +109,6 @@ Both install.sh and deploy-to-swarm.sh check for the other's naming convention t
 - `COLLECTOR_SECRET` (required) — Authentication token
 - `BASE_URL` — API endpoint (default: https://telemetry.betterstack.com)
 - `CLUSTER_COLLECTOR` — Force cluster collector mode (default: false)
-- `PROXY_PORT` (optional) — Host port for upstream proxy (cannot be 80 with USE_TLS, cannot be 33000/34320/39090)
-- `USE_TLS` (optional) — Enable TLS; port 80 exposed for ACME validation. Only used by install.sh.
 - `MOUNT_HOST_PATHS` (optional) — Comma-separated host paths instead of default `/:/host:ro`
 - `COLLECT_OTEL_HTTP_PORT` / `COLLECT_OTEL_GRPC_PORT` (optional) — OTel ingestion ports
 

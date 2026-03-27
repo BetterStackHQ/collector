@@ -44,24 +44,6 @@ Tail collector logs:
 - `BASE_URL` (optional): Better Stack base URL (default: <https://telemetry.betterstack.com>)
 - `CLUSTER_COLLECTOR` (optional): Should we collect metrics from databases in the cluster? Only one collector instance per cluster should have the variable set to true. By default betterstack.com chooses one of the collector instances automatically, use this ENV variable if you want to override this behavior (default: false)
 
-### Domain-based TLS (optional)
-
-- SSL certificate domain is now managed remotely via Better Stack API
-- `PROXY_PORT` (optional): Host port mapped to the in-container proxy. Must be an integer and must not equal `33000` or `34320`. Must not equal `80` when domain is given - certbot binds to it.
-- Domain configuration:
-  - Domain is received in `ssl_certificate_host.txt` file with other configuration files
-  - Stored at `/etc/ssl_certificate_host.txt` in the container
-  - Certbot reads domain from this file instead of environment variable
-- Certificate locations after issuance or renewal:
-  - `/etc/ssl/<domain>.pem` (symlink to fullchain.pem)
-  - `/etc/ssl/<domain>.key` (symlink to privkey.pem)
-- Vector reload behavior:
-  - On successful issuance or renewal, Vector is signaled (HUP) to reload without container restart.
-  - When domain changes, Vector validation is skipped for one ping cycle (30s) to allow certificate acquisition
-- Retry cadence:
-  - Issuance attempts: immediate on domain change, then every 10 minutes until a valid cert exists
-  - Renewals: every 6 hours when a valid cert exists
-
 ## Topology
 
 - eBPF container talks to collector via host network on port 34320. Only localhost is allowed to connect to this port.

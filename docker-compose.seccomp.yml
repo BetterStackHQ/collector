@@ -22,8 +22,6 @@ services:
       - VECTOR_LOG_FORMAT=json
       # Pass hostname of host machine to collector
       - HOSTNAME
-      # Optional proxy port for upstream proxy mode
-      - PROXY_PORT
       - COLLECT_OTEL_HTTP_PORT
       - COLLECT_OTEL_GRPC_PORT
       - INSTALLED_AS=docker

@@ -34,8 +34,6 @@ services:
       - BASE_URL
       - CLUSTER_COLLECTOR
       - VECTOR_LOG_FORMAT=json
-      # Optional proxy port for upstream proxy mode
-      - PROXY_PORT
       - COLLECT_OTEL_HTTP_PORT
       - COLLECT_OTEL_GRPC_PORT
       - INSTALLED_AS=swarm
