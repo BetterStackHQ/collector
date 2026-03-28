@@ -1,0 +1,20 @@
+diff --git a/metrics/target.go b/metrics/target.go
+--- a/metrics/target.go
++++ b/metrics/target.go
+@@ -5,7 +5,6 @@
+ 	"maps"
+ 	"net"
+ 	"net/url"
+-	"strconv"
+ 	"time"
+
+ 	"github.com/coroot/coroot-cluster-agent/config"
+@@ -101,7 +100,6 @@
+ 	case TargetTypePostgres:
+ 		userPass := url.UserPassword(credentials.Username, credentials.Password)
+ 		query := url.Values{}
+ 		query.Set("connect_timeout", "1")
+-		query.Set("statement_timeout", strconv.Itoa(int(collectTimeout.Milliseconds())))
+ 		sslmode := t.Params["sslmode"]
+ 		if sslmode == "" {
+ 			sslmode = "disable"
