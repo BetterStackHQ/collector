@@ -144,10 +144,10 @@ index bd40fa8..d8bbbc2 100644
 +	return nil
 +}
 diff --git a/ebpftracer/tracer.go b/ebpftracer/tracer.go
-index 0d3f445..d89ff6d 100644
+index 44de41d..0fe6805 100644
 --- a/ebpftracer/tracer.go
 +++ b/ebpftracer/tracer.go
-@@ -84,6 +84,8 @@ type Tracer struct {
+@@ -96,6 +96,8 @@ type Tracer struct {
  	selfNetNs        netns.NsHandle
  	maxConnections   int
  	maxL7Requests    int
@@ -156,8 +156,8 @@ index 0d3f445..d89ff6d 100644
  
  	collection *ebpf.Collection
  	readers    map[string]*perf.Reader
-@@ -91,7 +93,7 @@ type Tracer struct {
- 	uprobes    map[string]*ebpf.Program
+@@ -106,7 +108,7 @@ type Tracer struct {
+ 	globalUprobesLock sync.Mutex
  }
  
 -func NewTracer(hostNetNs, selfNetNs netns.NsHandle, disableL7Tracing bool, maxConnections, maxL7Requests int) *Tracer {
@@ -165,16 +165,16 @@ index 0d3f445..d89ff6d 100644
  	if disableL7Tracing {
  		klog.Infoln("L7 tracing is disabled")
  	}
-@@ -101,6 +103,8 @@ func NewTracer(hostNetNs, selfNetNs netns.NsHandle, disableL7Tracing bool, maxCo
+@@ -116,6 +118,8 @@ func NewTracer(hostNetNs, selfNetNs netns.NsHandle, disableL7Tracing bool, maxCo
  		selfNetNs:        selfNetNs,
  		maxConnections:   maxConnections,
  		maxL7Requests:    maxL7Requests,
 +		initScanMode:     initScanMode,
 +		initScanDelay:    initScanDelay,
  
- 		readers: map[string]*perf.Reader{},
- 		uprobes: map[string]*ebpf.Program{},
-@@ -114,8 +118,22 @@ func (t *Tracer) Run(events chan<- Event) error {
+ 		readers:       map[string]*perf.Reader{},
+ 		uprobes:       map[string]*ebpf.Program{},
+@@ -130,8 +134,22 @@ func (t *Tracer) Run(events chan<- Event) error {
  	if err := t.ebpf(events); err != nil {
  		return err
  	}
