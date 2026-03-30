@@ -216,10 +216,10 @@ diff --git a/flags/flags.go b/flags/flags.go
 index ff89896..82d6016 100644
 --- a/flags/flags.go
 +++ b/flags/flags.go
-@@ -20,6 +20,9 @@ var (
+@@ -21,6 +21,9 @@ var (
  	MaxL7Requests  = kingpin.Flag("max-l7-requests", "Maximum number of in-flight L7 requests in eBPF maps").Default("32768").Envar("MAX_L7_REQUESTS").Int()
  	GCInterval     = kingpin.Flag("gc-interval", "How often to run container garbage collection").Default("10m").Envar("GC_INTERVAL").Duration()
- 
+
 +	InitScanMode  = kingpin.Flag("init-scan", "Init scan mode: enabled (default), deferred (scan after delay), disabled (skip scan)").Default("enabled").Envar("INIT_SCAN").Enum("enabled", "deferred", "disabled")
 +	InitScanDelay = kingpin.Flag("init-scan-delay", "Delay before running init scan in deferred mode").Default("30s").Envar("INIT_SCAN_DELAY").Duration()
 +

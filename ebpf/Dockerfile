@@ -7,7 +7,7 @@ RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architectu
     tar -C /usr/local -xzf go.tar.gz && rm go.tar.gz
 ENV PATH="/usr/local/go/bin:${PATH}"
 ARG CUSTOMIZATION_TAG="betterstack"
-ARG NODE_AGENT_VERSION=v1.29.0
+ARG NODE_AGENT_VERSION=v1.30.0
 RUN git clone --depth 1 --branch ${NODE_AGENT_VERSION} \
     https://github.com/coroot/coroot-node-agent.git /tmp/node-agent
 WORKDIR /tmp/node-agent
