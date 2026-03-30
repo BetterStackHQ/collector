@@ -17,8 +17,21 @@ RUN CGO_ENABLED=1 go build -mod=readonly \
     -ldflags "-extldflags='-Wl,-z,lazy' -X 'github.com/coroot/coroot-node-agent/flags.Version=${NODE_AGENT_VERSION}-${CUSTOMIZATION_TAG}'" \
     -o /usr/bin/coroot-node-agent .
 
-# Add Cluster Agent to the image
-FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
+# Build Cluster Agent from source with patches
+FROM debian:bullseye AS cluster-agent-builder
+RUN apt-get update && apt-get install -y curl git
+ARG GO_VERSION=1.24.9
+RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz -o go.tar.gz && \
+    tar -C /usr/local -xzf go.tar.gz && rm go.tar.gz
+ENV PATH="/usr/local/go/bin:${PATH}"
+ARG CLUSTER_AGENT_VERSION=v1.6.1
+RUN git clone --depth 1 --branch ${CLUSTER_AGENT_VERSION} \
+    https://github.com/coroot/coroot-cluster-agent.git /tmp/cluster-agent
+WORKDIR /tmp/cluster-agent
+COPY ebpf/patches/cluster-agent/*.patch ./
+RUN git apply *.patch
+RUN CGO_ENABLED=0 go build -mod=readonly \
+    -o /usr/bin/coroot-cluster-agent .
 
 # Add node exporter to the image
 FROM prom/node-exporter:v1.10.2 AS node-exporter-source
@@ -71,7 +84,7 @@ COPY --from=obi-source /tmp/LICENSE /tmp/NOTICE /usr/share/doc/ebpf-instrument/
 COPY --from=node-agent-builder --chmod=755 /usr/bin/coroot-node-agent /usr/local/bin/node-agent
 
 # Copy Cluster Agent
-COPY --from=cluster-agent --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent
+COPY --from=cluster-agent-builder --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent
 
 # Copy Node exporter
 COPY --from=node-exporter-source --chmod=755 /bin/node_exporter /usr/local/bin/node_exporter

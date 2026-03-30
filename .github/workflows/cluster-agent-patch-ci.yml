@@ -1,0 +1,64 @@
+name: Cluster Agent Patch CI
+
+on:
+  pull_request:
+    paths:
+      - "ebpf/patches/cluster-agent/**"
+      - "ebpf/Dockerfile"
+      - ".github/workflows/cluster-agent-patch-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "ebpf/patches/cluster-agent/**"
+      - "ebpf/Dockerfile"
+      - ".github/workflows/cluster-agent-patch-ci.yml"
+
+jobs:
+  test-cluster-agent-patch:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone cluster-agent and apply patches
+        run: |
+          CLUSTER_AGENT_VERSION=$(grep 'CLUSTER_AGENT_VERSION=' ebpf/Dockerfile | head -1 | sed 's/.*=//')
+          git clone --depth 1 --branch ${CLUSTER_AGENT_VERSION} \
+            https://github.com/coroot/coroot-cluster-agent.git /tmp/cluster-agent
+          cd /tmp/cluster-agent
+          git apply ${{ github.workspace }}/ebpf/patches/cluster-agent/*.patch
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.9"
+          cache: false
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: cluster-agent-go-${{ hashFiles('/tmp/cluster-agent/go.sum') }}
+          restore-keys: cluster-agent-go-
+
+      - name: go mod download
+        working-directory: /tmp/cluster-agent
+        run: go mod download
+
+      - name: gofmt -l .
+        working-directory: /tmp/cluster-agent
+        run: files=$(gofmt -l .); if [[ -n "$files" ]]; then echo "$files"; exit 1; fi
+
+      - name: goimports -l .
+        working-directory: /tmp/cluster-agent
+        run: |
+          go install golang.org/x/tools/cmd/goimports@latest
+          files=$(goimports -l .); if [[ -n "$files" ]]; then echo "$files"; exit 1; fi
+
+      - name: go vet
+        working-directory: /tmp/cluster-agent
+        run: go vet ./...
+
+      - name: go test
+        working-directory: /tmp/cluster-agent
+        run: go test ./...
