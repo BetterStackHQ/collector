@@ -87,6 +87,14 @@ if [ -n "$SWARM_CONTAINER" ]; then
     exit 1
 fi
 
+# Warn about existing data directory
+COLLECTOR_DATA_DIR="/var/lib/better-stack"
+if [ -d "$COLLECTOR_DATA_DIR" ]; then
+    echo "WARNING: $COLLECTOR_DATA_DIR already exists from a previous installation."
+    echo "This is expected during upgrades. If you're fully reinstalling the collector, delete the directory first:"
+    echo "  rm -rf $COLLECTOR_DATA_DIR"
+fi
+
 # Create temporary directory and cd into it
 TEMP_DIR=$(mktemp -d)
 cd "$TEMP_DIR"

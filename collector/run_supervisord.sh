@@ -6,8 +6,24 @@ set -e
 SUPERVISORD_CONF="/var/lib/better-stack/collector/supervisord.conf"
 BOOTSTRAP_CONF="/bootstrap/supervisord.conf"
 
+NEEDS_BOOTSTRAP=false
+COLLECTOR_DIR="/var/lib/better-stack/collector"
+
 if [ ! -f "$SUPERVISORD_CONF" ]; then
-  echo "Supervisord config not found at $SUPERVISORD_CONF, copying from bootstrap..."
+  echo "Supervisord config not found at $SUPERVISORD_CONF"
+  NEEDS_BOOTSTRAP=true
+else
+  for required_file in "$COLLECTOR_DIR/vector.sh" "$COLLECTOR_DIR/updater.rb" "$COLLECTOR_DIR/proxy.rb"; do
+    if [ ! -f "$required_file" ]; then
+      echo "Incomplete install detected: $required_file is missing"
+      NEEDS_BOOTSTRAP=true
+      break
+    fi
+  done
+fi
+
+if [ "$NEEDS_BOOTSTRAP" = true ]; then
+  echo "Copying bootstrap supervisord config to $SUPERVISORD_CONF..."
   mkdir -p "$(dirname "$SUPERVISORD_CONF")"
   cp "$BOOTSTRAP_CONF" "$SUPERVISORD_CONF"
   echo "Copied bootstrap supervisord config to $SUPERVISORD_CONF"
