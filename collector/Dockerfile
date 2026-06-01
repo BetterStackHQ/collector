@@ -5,7 +5,7 @@ FROM timberio/vector:0.47.0-debian AS vector
 FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
 
 # Final stage
-FROM debian:12.11-slim
+FROM debian:13.5-slim
 
 # Install required packages
 RUN apt-get update && apt-get install -y \

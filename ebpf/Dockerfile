@@ -53,7 +53,7 @@ ADD https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/release
 RUN tar -xzf /tmp/obi.tar.gz -C /tmp
 
 # Final stage - Using Debian 12.11-slim for glibc compatibility with node-agent
-FROM debian:12.11-slim
+FROM debian:13.5-slim
 
 # Install supervisor, ca-certificates, curl, procps, and Ruby
 RUN apt-get update && \
