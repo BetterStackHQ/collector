@@ -45,6 +45,9 @@ FROM danielqsj/kafka-exporter:v1.9.0 AS kafka-exporter
 # Add elasticsearch exporter to the image
 FROM quay.io/prometheuscommunity/elasticsearch-exporter:v1.10.0 AS elasticsearch-exporter
 
+# Add pgbouncer exporter to the image
+FROM prometheuscommunity/pgbouncer-exporter:v0.12.0 AS pgbouncer-exporter
+
 # Download OBI binary from GitHub release (Docker image otel/ebpf-instrument:v0.5.0 exists but is amd64-only)
 FROM debian:12.11-slim AS obi-source
 ARG TARGETARCH
@@ -97,6 +100,9 @@ COPY --from=kafka-exporter --chmod=755 /bin/kafka_exporter /usr/local/bin/kafka_
 
 # Copy Elasticsearch exporter
 COPY --from=elasticsearch-exporter --chmod=755 /bin/elasticsearch_exporter /usr/local/bin/elasticsearch_exporter
+
+# Copy PgBouncer exporter
+COPY --from=pgbouncer-exporter --chmod=755 /bin/pgbouncer_exporter /usr/local/bin/pgbouncer_exporter
 
 COPY ebpf/bootstrap_supervisord.conf /bootstrap/supervisord.conf
 COPY --chmod=755 ebpf/run_supervisord.sh /run_supervisord.sh
