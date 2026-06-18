@@ -1,5 +1,5 @@
 # Build Node Agent from source with patches
-FROM debian:bullseye AS node-agent-builder
+FROM debian:trixie AS node-agent-builder
 RUN apt-get update && apt-get install -y \
     curl git build-essential pkg-config libsystemd-dev
 ARG GO_VERSION=1.24.9
@@ -18,7 +18,7 @@ RUN CGO_ENABLED=1 go build -mod=readonly \
     -o /usr/bin/coroot-node-agent .
 
 # Build Cluster Agent from source with patches
-FROM debian:bullseye AS cluster-agent-builder
+FROM debian:trixie AS cluster-agent-builder
 RUN apt-get update && apt-get install -y curl git
 ARG GO_VERSION=1.24.9
 RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz -o go.tar.gz && \
