@@ -1,0 +1,80 @@
+name: Check version sync
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "collector/Dockerfile"
+      - "ebpf/Dockerfile"
+      - "CLAUDE.md"
+      - ".github/workflows/version-sync.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "collector/Dockerfile"
+      - "ebpf/Dockerfile"
+      - "CLAUDE.md"
+      - ".github/workflows/version-sync.yml"
+
+jobs:
+  version-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify component versions match across Dockerfiles, ENV, and CLAUDE.md
+        run: |
+          set +e
+          fail=0
+          norm() { printf '%s' "$1" | tr -d '"' | sed 's/^v//'; }
+          check() {
+            if [ "$2" != "$3" ]; then
+              echo "::error::$1 mismatch: '$2' != '$3' (source of truth: '$3')"
+              fail=1
+            else
+              echo "✓ $1: $2"
+            fi
+          }
+
+          COL=collector/Dockerfile
+          EBPF=ebpf/Dockerfile
+          DOC=CLAUDE.md
+
+          # Source of truth: the Dockerfile pins that actually get built/pulled.
+          vec=$(grep -oP '^FROM timberio/vector:\K[^- ]+' "$COL" | head -1)
+          obi=$(norm "$(grep -oP '^ARG OBI_VERSION=\K.*' "$EBPF" | head -1)")
+          na=$(norm "$(grep -oP '^ARG NODE_AGENT_VERSION=\K.*' "$EBPF" | head -1)")
+          ca=$(norm "$(grep -oP '^ARG CLUSTER_AGENT_VERSION=\K.*' "$EBPF" | head -1)")
+
+          # collector's reported ENV block must match the pins.
+          check "collector ENV VECTOR_VERSION"        "$(grep -oP '^ENV VECTOR_VERSION=\K.*' "$COL" | head -1)"                   "$vec"
+          check "collector ENV OBI_VERSION"           "$(norm "$(grep -oP '^ENV OBI_VERSION=\K.*' "$COL" | head -1)")"            "$obi"
+          check "collector ENV CLUSTER_AGENT_VERSION" "$(norm "$(grep -oP '^ENV CLUSTER_AGENT_VERSION=\K.*' "$COL" | head -1)")"  "$ca"
+
+          # collector builds the same cluster-agent it declares (and that ebpf ships).
+          check "collector build ARG CLUSTER_AGENT_VERSION" "$(norm "$(grep -oP '^ARG CLUSTER_AGENT_VERSION=\K.*' "$COL" | head -1)")" "$ca"
+
+          # CLAUDE.md summary must match the pins.
+          check "CLAUDE.md Vector"        "$(grep -oP 'Vector \K[0-9][0-9.]*' "$DOC" | head -1)"        "$vec"
+          check "CLAUDE.md OBI"           "$(grep -oP 'OBI \K[0-9][0-9.]*' "$DOC" | head -1)"           "$obi"
+          check "CLAUDE.md Node Agent"    "$(grep -oP 'Node Agent \K[0-9][0-9.]*' "$DOC" | head -1)"    "$na"
+          check "CLAUDE.md Cluster Agent" "$(grep -oP 'Cluster Agent \K[0-9][0-9.]*' "$DOC" | head -1)" "$ca"
+
+          # All debian bases must be one pinned point release, matching CLAUDE.md.
+          deb_pins=$(grep -hoP '^FROM debian:\K[^ ]+' "$COL" "$EBPF" | sed 's/-slim$//' | sort -u)
+          if [ "$(printf '%s\n' "$deb_pins" | grep -c .)" -ne 1 ] || ! printf '%s' "$deb_pins" | grep -qxP '[0-9]+\.[0-9]+'; then
+            echo "::error::Debian bases must be one pinned point release (e.g. 13.5); found: $(echo $deb_pins)"
+            fail=1
+          else
+            doc_deb=$(grep -oP 'Debian \K[0-9][0-9.]*' "$DOC" | sort -u)
+            if [ "$(printf '%s\n' "$doc_deb" | grep -c .)" -ne 1 ]; then
+              echo "::error::CLAUDE.md has inconsistent Debian versions: $(echo $doc_deb)"
+              fail=1
+            else
+              check "Debian (pins vs CLAUDE.md)" "$doc_deb" "$deb_pins"
+            fi
+          fi
+
+          exit $fail

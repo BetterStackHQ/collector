@@ -20,20 +20,22 @@ docker-compose.yml          # Standard compose: collector + ebpf services
 docker-compose.seccomp.yml  # Same with seccomp for Docker < 20.10.10
 collector-seccomp.json      # Seccomp profile allowing clone3 for Tokio/Vector
 collector/
-  Dockerfile                # Multi-stage: Vector 0.47.0 + Cluster Agent 1.2.4 + Debian 12.11-slim
+  Dockerfile                # Multi-stage: Vector 0.47.0 + Cluster Agent 1.6.1 + Debian 13.5-slim
   bootstrap.sh              # Downloads manifest from API, provisions both containers
   bootstrap_supervisord.conf
   run_supervisord.sh
   versions/0-default/       # Default Vector config + empty databases.json
   kubernetes-discovery/0-default/
 ebpf/
-  Dockerfile                # Multi-stage: OBI 0.4.1 + Node Agent 1.27.0 + exporters + Debian 12.11-slim
+  Dockerfile                # Multi-stage: OBI 0.10.0 + Node Agent 1.30.0 + exporters + Debian 13.5-slim
   bootstrap_supervisord.conf
   run_supervisord.sh
 swarm/
   docker-compose.swarm-collector.yml  # Swarm global service for collector
   docker-compose.swarm-ebpf.yml      # Regular docker-compose for eBPF (needs host network)
 ```
+
+> **These version numbers are duplicated in several places — keep them in sync.** The source of truth is the `FROM`/`ARG` pins in `collector/Dockerfile` and `ebpf/Dockerfile`. When you bump one, also update its `ENV *_VERSION` line in `collector/Dockerfile` (if it has one) and the summary above.
 
 ## Development Commands
 

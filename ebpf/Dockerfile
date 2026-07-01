@@ -1,5 +1,5 @@
 # Build Node Agent from source with patches
-FROM debian:trixie AS node-agent-builder
+FROM debian:13.5 AS node-agent-builder
 RUN apt-get update && apt-get install -y \
     curl git build-essential pkg-config libsystemd-dev
 ARG GO_VERSION=1.24.9
@@ -18,7 +18,7 @@ RUN CGO_ENABLED=1 go build -mod=readonly \
     -o /usr/bin/coroot-node-agent .
 
 # Build Cluster Agent from source with patches
-FROM debian:trixie AS cluster-agent-builder
+FROM debian:13.5 AS cluster-agent-builder
 RUN apt-get update && apt-get install -y curl git
 ARG GO_VERSION=1.24.9
 RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz -o go.tar.gz && \
@@ -49,13 +49,13 @@ FROM quay.io/prometheuscommunity/elasticsearch-exporter:v1.10.0 AS elasticsearch
 FROM prometheuscommunity/pgbouncer-exporter:v0.12.0 AS pgbouncer-exporter
 
 # Download OBI binary from GitHub release (Docker image otel/ebpf-instrument:v0.5.0 exists but is amd64-only)
-FROM debian:12.11-slim AS obi-source
+FROM debian:13.5-slim AS obi-source
 ARG TARGETARCH
-ARG OBI_VERSION="v0.7.1"
+ARG OBI_VERSION="v0.10.0"
 ADD https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/releases/download/${OBI_VERSION}/obi-${OBI_VERSION}-linux-${TARGETARCH}.tar.gz /tmp/obi.tar.gz
 RUN tar -xzf /tmp/obi.tar.gz -C /tmp
 
-# Final stage - Using Debian 12.11-slim for glibc compatibility with node-agent
+# Final stage - Debian slim for glibc compatibility with node-agent
 FROM debian:13.5-slim
 
 # Install supervisor, ca-certificates, curl, procps, and Ruby
