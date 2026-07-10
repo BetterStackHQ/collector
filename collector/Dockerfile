@@ -1,8 +1,21 @@
 # Use Vector as the base image
 FROM timberio/vector:0.47.0-debian AS vector
 
-# Add Cluster Agent to the image
-FROM ghcr.io/coroot/coroot-cluster-agent:1.2.4 AS cluster-agent
+# Build Cluster Agent from source with patches
+FROM debian:13.5 AS cluster-agent-builder
+RUN apt-get update && apt-get install -y curl git
+ARG GO_VERSION=1.24.9
+RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz -o go.tar.gz && \
+    tar -C /usr/local -xzf go.tar.gz && rm go.tar.gz
+ENV PATH="/usr/local/go/bin:${PATH}"
+ARG CLUSTER_AGENT_VERSION=v1.6.1
+RUN git clone --depth 1 --branch ${CLUSTER_AGENT_VERSION} \
+    https://github.com/coroot/coroot-cluster-agent.git /tmp/cluster-agent
+WORKDIR /tmp/cluster-agent
+COPY ebpf/patches/cluster-agent/*.patch ./
+RUN git apply *.patch
+RUN CGO_ENABLED=0 go build -mod=readonly \
+    -o /usr/bin/coroot-cluster-agent .
 
 # Final stage
 FROM debian:13.5-slim
@@ -31,7 +44,7 @@ COPY --from=vector --chmod=755 /usr/bin/vector /usr/local/bin/vector
 COPY --from=vector /etc/vector /etc/vector
 
 # Copy Cluster Agent
-COPY --from=cluster-agent --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent
+COPY --from=cluster-agent-builder --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent
 
 # Create necessary directories
 RUN mkdir -p /versions/0-default \
@@ -46,10 +59,10 @@ RUN mkdir -p /versions/0-default \
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
 ENV CLUSTER_COLLECTOR=false
-ENV COLLECTOR_VERSION=1.1.27
+ENV COLLECTOR_VERSION=1.1.28
 ENV VECTOR_VERSION=0.47.0
-ENV OBI_VERSION=0.4.1
-ENV CLUSTER_AGENT_VERSION=1.2.4
+ENV OBI_VERSION=0.10.0
+ENV CLUSTER_AGENT_VERSION=1.6.1
 
 # The environment variable TINI_SUBREAPER=true is related to Tini, which is the init system being used in this Docker container.
 # When TINI_SUBREAPER is set to true, it enables Tini's "subreaper" functionality. Here's what that means:
