@@ -43,7 +43,7 @@ FROM prometheuscommunity/postgres-exporter:v0.18.1 AS postgres-exporter
 FROM danielqsj/kafka-exporter:v1.9.0 AS kafka-exporter
 
 # Add elasticsearch exporter to the image
-FROM quay.io/prometheuscommunity/elasticsearch-exporter:v1.10.0 AS elasticsearch-exporter
+FROM quay.io/prometheuscommunity/elasticsearch-exporter:v1.11.0 AS elasticsearch-exporter
 
 # Add pgbouncer exporter to the image
 FROM prometheuscommunity/pgbouncer-exporter:v0.12.0 AS pgbouncer-exporter
