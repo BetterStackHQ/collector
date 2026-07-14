@@ -1,0 +1,67 @@
+name: OBI Patch CI
+
+on:
+  pull_request:
+    paths:
+      - "ebpf/patches/obi/**"
+      - "ebpf/Dockerfile"
+      - ".github/workflows/obi-patch-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "ebpf/patches/obi/**"
+      - "ebpf/Dockerfile"
+      - ".github/workflows/obi-patch-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: obi-patch-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-obi-patches:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read OBI build pins
+        run: |
+          {
+            echo "OBI_VERSION=$(grep -oP '^ARG OBI_VERSION=\K.*' ebpf/Dockerfile | head -1 | tr -d '\"')"
+            echo "OBI_REVISION=$(grep -oP '^ARG OBI_REVISION=\K.*' ebpf/Dockerfile | head -1 | tr -d '\"')"
+            echo "OBI_GENERATOR=$(grep -oP '^FROM \Kghcr.io/open-telemetry/obi-generator:[^ ]+' ebpf/Dockerfile | head -1)"
+          } >> "$GITHUB_ENV"
+
+      - name: Clone OBI and apply patches
+        run: |
+          git clone --depth 1 --branch "$OBI_VERSION" \
+            https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation.git "$RUNNER_TEMP/obi"
+          test "$(git -C "$RUNNER_TEMP/obi" rev-parse HEAD)" = "$OBI_REVISION"
+          git -C "$RUNNER_TEMP/obi" apply "$GITHUB_WORKSPACE"/ebpf/patches/obi/*.patch
+
+      - name: Generate eBPF sources
+        run: |
+          docker run --rm \
+            -v "$RUNNER_TEMP/obi:/src" \
+            -w /src \
+            "$OBI_GENERATOR"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ runner.temp }}/obi/go.mod
+          cache: false
+
+      - name: Download Go modules
+        working-directory: ${{ runner.temp }}/obi
+        run: go mod download
+
+      - name: Test patched packages
+        working-directory: ${{ runner.temp }}/obi
+        run: go test -race ./pkg/appolly/discover ./pkg/internal/goexec
+
+      - name: Build production OBI stage
+        run: docker build --target obi-builder --file ebpf/Dockerfile .
