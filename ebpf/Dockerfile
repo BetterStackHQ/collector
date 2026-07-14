@@ -1,21 +1,5 @@
-# Build Node Agent from source with patches
-FROM debian:13.5 AS node-agent-builder
-RUN apt-get update && apt-get install -y \
-    curl git build-essential pkg-config libsystemd-dev
-ARG GO_VERSION=1.24.9
-RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz -o go.tar.gz && \
-    tar -C /usr/local -xzf go.tar.gz && rm go.tar.gz
-ENV PATH="/usr/local/go/bin:${PATH}"
-ARG CUSTOMIZATION_TAG="betterstack"
-ARG NODE_AGENT_VERSION=v1.30.0
-RUN git clone --depth 1 --branch ${NODE_AGENT_VERSION} \
-    https://github.com/coroot/coroot-node-agent.git /tmp/node-agent
-WORKDIR /tmp/node-agent
-COPY ebpf/patches/node-agent/*.patch ./
-RUN git apply *.patch
-RUN CGO_ENABLED=1 go build -mod=readonly \
-    -ldflags "-extldflags='-Wl,-z,lazy' -X 'github.com/coroot/coroot-node-agent/flags.Version=${NODE_AGENT_VERSION}-${CUSTOMIZATION_TAG}'" \
-    -o /usr/bin/coroot-node-agent .
+ARG EBPF_AGENT_VERSION=0.1.3
+FROM ghcr.io/betterstackhq/ebpf-agent:${EBPF_AGENT_VERSION} AS ebpf-agent-source
 
 # Build Cluster Agent from source with patches
 FROM debian:13.5 AS cluster-agent-builder
@@ -55,7 +39,7 @@ ARG OBI_VERSION="v0.10.0"
 ADD https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/releases/download/${OBI_VERSION}/obi-${OBI_VERSION}-linux-${TARGETARCH}.tar.gz /tmp/obi.tar.gz
 RUN tar -xzf /tmp/obi.tar.gz -C /tmp
 
-# Final stage - Debian slim for glibc compatibility with node-agent
+# Final stage
 FROM debian:13.5-slim
 
 # Install supervisor, ca-certificates, curl, procps, and Ruby
@@ -83,8 +67,8 @@ RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /enrichment /bootstrap
 COPY --from=obi-source --chmod=755 /tmp/obi /usr/local/bin/ebpf-instrument
 COPY --from=obi-source /tmp/LICENSE /tmp/NOTICE /usr/share/doc/ebpf-instrument/
 
-# Copy Node Agent
-COPY --from=node-agent-builder --chmod=755 /usr/bin/coroot-node-agent /usr/local/bin/node-agent
+# Copy Better Stack eBPF Agent
+COPY --from=ebpf-agent-source --chmod=755 /ebpf-agent /usr/local/bin/ebpf-agent
 
 # Copy Cluster Agent
 COPY --from=cluster-agent-builder --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent

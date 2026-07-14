@@ -8,7 +8,7 @@ Better Stack Collector is a Docker-based monitoring solution that collects metri
 
 Two containers are built here:
 - **Collector** (`collector/Dockerfile`) — Vector + Cluster Agent on Debian, bootstrapped via manifest API
-- **eBPF** (`ebpf/Dockerfile`) — OBI + Node Agent + Cluster Agent + Node Exporter + Postgres Exporter on Debian, provisioned by the collector's bootstrap
+- **eBPF** (`ebpf/Dockerfile`) — OBI + Better Stack eBPF Agent + Cluster Agent + Node Exporter + Postgres Exporter on Debian, provisioned by the collector's bootstrap
 
 ## Repository Structure
 
@@ -27,7 +27,7 @@ collector/
   versions/0-default/       # Default Vector config + empty databases.json
   kubernetes-discovery/0-default/
 ebpf/
-  Dockerfile                # Multi-stage: OBI 0.10.0 + Node Agent 1.30.0 + exporters + Debian 13.5-slim
+  Dockerfile                # Multi-stage: OBI 0.10.0 + eBPF Agent 0.1.3 + exporters + Debian 13.5-slim
   bootstrap_supervisord.conf
   run_supervisord.sh
 swarm/
@@ -78,8 +78,8 @@ On container start:
 - **eBPF → Collector**: Via host network mode
   - Cluster Agent polls `http://localhost:33000/v1/cluster-agent-enabled`
   - Cluster Agent fetches database config from `http://localhost:33000/v1/config`
-  - Node Agent sends metrics to `http://localhost:33000`
-  - eBPF agent sends traces on port 34320 (localhost only)
+  - Better Stack eBPF Agent serves Prometheus metrics at `http://localhost:39100/metrics`
+  - OBI sends traces on port 34320 (localhost only)
 - **Shared Volume**: `/var/lib/better-stack` for bootstrap provisioning and supervisor socket
 - **Shared Volume**: `docker-metadata` for container enrichment tables
 
