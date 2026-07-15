@@ -48,12 +48,25 @@ FROM quay.io/prometheuscommunity/elasticsearch-exporter:v1.11.0 AS elasticsearch
 # Add pgbouncer exporter to the image
 FROM prometheuscommunity/pgbouncer-exporter:v0.12.0 AS pgbouncer-exporter
 
-# Download OBI binary from GitHub release (Docker image otel/ebpf-instrument:v0.5.0 exists but is amd64-only)
-FROM debian:13.5-slim AS obi-source
+# Build OBI from source with patches
+FROM ghcr.io/open-telemetry/obi-generator:0.2.15@sha256:9cbb1b567377d5779b04e6bcdb87431c77a19e797b4630eba30f5417de96ea33 AS obi-builder
+RUN apk add --no-cache bash git make
 ARG TARGETARCH
+ARG CUSTOMIZATION_TAG="betterstack"
 ARG OBI_VERSION="v0.10.0"
-ADD https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/releases/download/${OBI_VERSION}/obi-${OBI_VERSION}-linux-${TARGETARCH}.tar.gz /tmp/obi.tar.gz
-RUN tar -xzf /tmp/obi.tar.gz -C /tmp
+ARG OBI_REVISION="4a4dc7ecdb2aeba6791d02fbebb5048c0f0c1261"
+RUN git clone --depth 1 --branch ${OBI_VERSION} \
+    https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation.git /tmp/obi && \
+    test "$(git -C /tmp/obi rev-parse HEAD)" = "${OBI_REVISION}"
+WORKDIR /tmp/obi
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY ebpf/patches/obi/*.patch /tmp/obi-patches/
+RUN git apply /tmp/obi-patches/*.patch
+ENV GOARCH=${TARGETARCH}
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    /generate.sh && \
+    make compile RELEASE_VERSION="${OBI_VERSION}-${CUSTOMIZATION_TAG}"
 
 # Final stage - Debian slim for glibc compatibility with node-agent
 FROM debian:13.5-slim
@@ -79,9 +92,9 @@ RUN curl -sS https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
 # Create necessary directories
 RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /enrichment /bootstrap
 
-# Copy OBI binary and license files from extracted tarball
-COPY --from=obi-source --chmod=755 /tmp/obi /usr/local/bin/ebpf-instrument
-COPY --from=obi-source /tmp/LICENSE /tmp/NOTICE /usr/share/doc/ebpf-instrument/
+# Copy OBI binary and license files
+COPY --from=obi-builder --chmod=755 /tmp/obi/bin/obi /usr/local/bin/ebpf-instrument
+COPY --from=obi-builder /tmp/obi/LICENSE /tmp/obi/NOTICE /usr/share/doc/ebpf-instrument/
 
 # Copy Node Agent
 COPY --from=node-agent-builder --chmod=755 /usr/bin/coroot-node-agent /usr/local/bin/node-agent
