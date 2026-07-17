@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Read OBI build pins
         run: |
@@ -50,7 +50,7 @@ jobs:
             -w /src \
             "$OBI_GENERATOR"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: ${{ runner.temp }}/obi/go.mod
           cache: false
