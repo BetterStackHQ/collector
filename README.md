@@ -12,6 +12,15 @@ Better Stack collector is the easiest and recommended way of integrating Better 
 
 [Getting started ⇗](https://betterstack.com/docs/logs/collector/)
 
+## Resource requirements
+
+| Deployment | Soft memory reservation | Hard caps | Host/node guideline |
+| --- | --- | --- | --- |
+| Collector only | 512 MiB | 1.2 vCPU, 1 GiB memory | 2 vCPU, 2 GiB memory |
+| Full tracing (collector + eBPF) | 2 GiB | 2.2 vCPU, 3 GiB memory | 4 vCPU, 4 GiB memory |
+
+The collector-only guideline was validated with eBPF stopped. `mem_reservation` is a soft memory target; `mem_limit` and `cpus` are hard caps, and Docker does not reserve CPU. Host/node guidelines are planning targets: the reservation and enough headroom up to the caps must remain available after the OS and other applications consume their share.
+
 ## Need help?
 Please let us know at [hello@betterstack.com](mailto:hello@betterstack.com). We're happy to help!
 
