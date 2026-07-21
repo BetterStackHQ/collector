@@ -20,7 +20,9 @@ services:
     pid: host
     uts: host
     network_mode: host
-    mem_limit: 3072m
+    cpus: 1.0
+    mem_reservation: 1536m
+    mem_limit: 2048m
     healthcheck:
       test: ["CMD-SHELL", "if [ -x /var/lib/better-stack/ebpf/healthcheck.sh ]; then /var/lib/better-stack/ebpf/healthcheck.sh; else exit 0; fi"]
       interval: 30s
