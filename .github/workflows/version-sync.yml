@@ -22,7 +22,7 @@ jobs:
   version-sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Verify component versions match across Dockerfiles, ENV, and CLAUDE.md
         run: |
