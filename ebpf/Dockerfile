@@ -1,4 +1,4 @@
-ARG EBPF_AGENT_VERSION=0.1.3
+ARG EBPF_AGENT_VERSION=0.1.4
 FROM ghcr.io/betterstackhq/ebpf-agent:${EBPF_AGENT_VERSION} AS ebpf-agent-source
 
 # Build Cluster Agent from source with patches
