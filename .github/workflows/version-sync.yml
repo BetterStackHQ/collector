@@ -45,6 +45,7 @@ jobs:
           # Source of truth: the Dockerfile pins that actually get built/pulled.
           vec=$(grep -oP '^FROM timberio/vector:\K[^- ]+' "$COL" | head -1)
           obi=$(norm "$(grep -oP '^ARG OBI_VERSION=\K.*' "$EBPF" | head -1)")
+          ebpf_agent=$(norm "$(grep -oP '^ARG EBPF_AGENT_VERSION=\K.*' "$EBPF" | head -1)")
           na=$(norm "$(grep -oP '^ARG NODE_AGENT_VERSION=\K.*' "$EBPF" | head -1)")
           ca=$(norm "$(grep -oP '^ARG CLUSTER_AGENT_VERSION=\K.*' "$EBPF" | head -1)")
 
@@ -60,6 +61,7 @@ jobs:
           check "CLAUDE.md Vector"        "$(grep -oP 'Vector \K[0-9][0-9.]*' "$DOC" | head -1)"        "$vec"
           check "CLAUDE.md OBI"           "$(grep -oP 'OBI \K[0-9][0-9.]*' "$DOC" | head -1)"           "$obi"
           check "CLAUDE.md Node Agent"    "$(grep -oP 'Node Agent \K[0-9][0-9.]*' "$DOC" | head -1)"    "$na"
+          check "CLAUDE.md eBPF Agent"     "$(grep -oP 'eBPF Agent \K[0-9][0-9.]*' "$DOC" | head -1)"     "$ebpf_agent"
           check "CLAUDE.md Cluster Agent" "$(grep -oP 'Cluster Agent \K[0-9][0-9.]*' "$DOC" | head -1)" "$ca"
 
           # All debian bases must be one pinned point release, matching CLAUDE.md.

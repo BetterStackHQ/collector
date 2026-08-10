@@ -1,3 +1,6 @@
+ARG EBPF_AGENT_VERSION=0.1.6
+FROM ghcr.io/betterstackhq/ebpf-agent:${EBPF_AGENT_VERSION} AS ebpf-agent-source
+
 # Build Node Agent from source with patches
 FROM debian:13.5 AS node-agent-builder
 RUN apt-get update && apt-get install -y \
@@ -95,6 +98,9 @@ RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /enrichment /bootstrap
 # Copy OBI binary and license files
 COPY --from=obi-builder --chmod=755 /tmp/obi/bin/obi /usr/local/bin/ebpf-instrument
 COPY --from=obi-builder /tmp/obi/LICENSE /tmp/obi/NOTICE /usr/share/doc/ebpf-instrument/
+
+# Copy Better Stack eBPF Agent
+COPY --from=ebpf-agent-source --chmod=755 /ebpf-agent /usr/local/bin/ebpf-agent
 
 # Copy Node Agent
 COPY --from=node-agent-builder --chmod=755 /usr/bin/coroot-node-agent /usr/local/bin/node-agent
