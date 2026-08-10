@@ -47,7 +47,8 @@ Tail collector logs:
 ## Topology
 
 - OBI sends traces to the collector via host network on port 34320. Only localhost is allowed to connect to this port.
-- Cluster agent connects to the collector on port 33000. Better Stack eBPF Agent serves Prometheus metrics at `http://localhost:39100/metrics`.
+- Runtime-delivered supervisor configuration selects either Node Agent, which sends metrics to the collector on port 33000, or Better Stack eBPF Agent, which serves Prometheus metrics at `http://localhost:39100/metrics`.
+- Cluster agent connects to the collector on port 33000.
 - Cluster agent obtains configuration from the collector via the /v1/config endpoint.
 - Cluster agent checks if it should run via the /v1/cluster-agent-enabled endpoint.
 

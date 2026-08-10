@@ -1,6 +1,25 @@
 ARG EBPF_AGENT_VERSION=0.1.6
 FROM ghcr.io/betterstackhq/ebpf-agent:${EBPF_AGENT_VERSION} AS ebpf-agent-source
 
+# Build Node Agent from source with patches
+FROM debian:13.5 AS node-agent-builder
+RUN apt-get update && apt-get install -y \
+    curl git build-essential pkg-config libsystemd-dev
+ARG GO_VERSION=1.24.9
+RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz -o go.tar.gz && \
+    tar -C /usr/local -xzf go.tar.gz && rm go.tar.gz
+ENV PATH="/usr/local/go/bin:${PATH}"
+ARG CUSTOMIZATION_TAG="betterstack"
+ARG NODE_AGENT_VERSION=v1.30.0
+RUN git clone --depth 1 --branch ${NODE_AGENT_VERSION} \
+    https://github.com/coroot/coroot-node-agent.git /tmp/node-agent
+WORKDIR /tmp/node-agent
+COPY ebpf/patches/node-agent/*.patch ./
+RUN git apply *.patch
+RUN CGO_ENABLED=1 go build -mod=readonly \
+    -ldflags "-extldflags='-Wl,-z,lazy' -X 'github.com/coroot/coroot-node-agent/flags.Version=${NODE_AGENT_VERSION}-${CUSTOMIZATION_TAG}'" \
+    -o /usr/bin/coroot-node-agent .
+
 # Build Cluster Agent from source with patches
 FROM debian:13.5 AS cluster-agent-builder
 RUN apt-get update && apt-get install -y curl git
@@ -52,7 +71,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     /generate.sh && \
     make compile RELEASE_VERSION="${OBI_VERSION}-${CUSTOMIZATION_TAG}"
 
-# Final stage
+# Final stage - Debian slim for glibc compatibility with node-agent
 FROM debian:13.5-slim
 
 # Install supervisor, ca-certificates, curl, procps, and Ruby
@@ -82,6 +101,9 @@ COPY --from=obi-builder /tmp/obi/LICENSE /tmp/obi/NOTICE /usr/share/doc/ebpf-ins
 
 # Copy Better Stack eBPF Agent
 COPY --from=ebpf-agent-source --chmod=755 /ebpf-agent /usr/local/bin/ebpf-agent
+
+# Copy Node Agent
+COPY --from=node-agent-builder --chmod=755 /usr/bin/coroot-node-agent /usr/local/bin/node-agent
 
 # Copy Cluster Agent
 COPY --from=cluster-agent-builder --chmod=755 /usr/bin/coroot-cluster-agent /usr/local/bin/cluster-agent
