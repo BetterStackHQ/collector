@@ -1,0 +1,107 @@
+diff --git a/pkg/internal/ebpf/tpinjector/tpinjector.go b/pkg/internal/ebpf/tpinjector/tpinjector.go
+index 2ac375f..68936c8 100644
+--- a/pkg/internal/ebpf/tpinjector/tpinjector.go
++++ b/pkg/internal/ebpf/tpinjector/tpinjector.go
+@@ -37,6 +37,7 @@ type Tracer struct {
+ 	fionreadOnce            sync.Once
+ 	fionreadBroken          bool
+ 	fionreadFixupEnabled    bool
++	propagationDisabled     bool
+ }
+ 
+ func New(cfg *obi.Config) *Tracer {
+@@ -53,6 +54,29 @@ func (p *Tracer) AllowPID(app.PID, uint32, *exec.FileInfo) {}
+ func (p *Tracer) BlockPID(app.PID, uint32) {}
+ 
+ func (p *Tracer) LoadSpecs() ([]*ebpfcommon.SpecBundle, error) {
++	// On kernels that misreport FIONREAD for sockets in a sockhash (commit
++	// 929e30f93125), enrolling sockets without the compensation stalls and
++	// truncates transfers for readers that size reads via the ioctl (nginx,
++	// Java NIO, .NET). The compensation needs bpf_probe_write_user, which
++	// kernel lockdown (Ubuntu default under UEFI Secure Boot) rejects at load
++	// time. Trace context is expendable; traffic is not: when the fixup cannot
++	// load, do not enroll sockets at all instead of proceeding broken.
++	var fixupSpec *ebpf.CollectionSpec
++	if p.kernelBreaksFIONREAD() {
++		var err error
++		fixupSpec, err = loadableFIONREADFixup()
++		if err != nil {
++			p.propagationDisabled = true
++			p.log.Warn("kernel misreports FIONREAD for sockets in a sockhash and the BPF "+
++				"compensation cannot be loaded (kernel lockdown?); disabling context "+
++				"propagation so proxied transfers (nginx, Java, .NET) are not stalled "+
++				"or truncated; set context_propagation: disabled "+
++				"(OTEL_EBPF_BPF_CONTEXT_PROPAGATION=disabled) to silence this warning",
++				"error", err)
++			return nil, nil
++		}
++	}
++
+ 	spec, err := LoadBpf()
+ 	if err != nil {
+ 		return nil, err
+@@ -81,23 +105,13 @@ func (p *Tracer) LoadSpecs() ([]*ebpfcommon.SpecBundle, error) {
+ 		})
+ 	}
+ 
+-	// kernel lockdown rejects bpf_probe_write_user at load time
+-	if p.kernelBreaksFIONREAD() {
+-		fixupSpec, err := loadableFIONREADFixup()
+-		if err != nil {
+-			p.log.Error("kernel misreports FIONREAD for sockets in a sockhash and the BPF "+
+-				"compensation cannot be loaded (kernel lockdown?); applications sizing reads "+
+-				"via FIONREAD (nginx, Java, .NET) may stall or truncate transfers; "+
+-				"set context_propagation: disabled (OTEL_EBPF_BPF_CONTEXT_PROPAGATION=disabled) "+
+-				"to avoid impact", "error", err)
+-		} else {
+-			bundles = append(bundles, &ebpfcommon.SpecBundle{
+-				Spec:      fixupSpec,
+-				Objects:   &p.bpfFionreadFixupObjects,
+-				Constants: map[string]any{"g_bpf_debug": p.cfg.EBPF.BpfDebug},
+-			})
+-			p.fionreadFixupEnabled = true
+-		}
++	if fixupSpec != nil {
++		bundles = append(bundles, &ebpfcommon.SpecBundle{
++			Spec:      fixupSpec,
++			Objects:   &p.bpfFionreadFixupObjects,
++			Constants: map[string]any{"g_bpf_debug": p.cfg.EBPF.BpfDebug},
++		})
++		p.fionreadFixupEnabled = true
+ 	}
+ 
+ 	return bundles, nil
+@@ -174,6 +188,10 @@ func (p *Tracer) SocketFilters() []*ebpf.Program {
+ }
+ 
+ func (p *Tracer) SockMsgs() []ebpfcommon.SockMsg {
++	if p.propagationDisabled {
++		return nil
++	}
++
+ 	return []ebpfcommon.SockMsg{
+ 		{
+ 			Program:  p.bpfObjects.ObiPacketExtender,
+@@ -184,6 +202,10 @@ func (p *Tracer) SockMsgs() []ebpfcommon.SockMsg {
+ }
+ 
+ func (p *Tracer) SockOps() []ebpfcommon.SockOps {
++	if p.propagationDisabled {
++		return nil
++	}
++
+ 	return []ebpfcommon.SockOps{
+ 		{
+ 			Program:  p.bpfObjects.ObiSockmapTracker,
+@@ -197,6 +219,11 @@ func (p *Tracer) Iters() []*ebpfcommon.Iter {
+ 		return p.iters
+ 	}
+ 
++	if p.propagationDisabled {
++		p.iters = []*ebpfcommon.Iter{}
++		return p.iters
++	}
++
+ 	major, minor := ebpfcommon.KernelVersion()
+ 
+ 	if major < 6 || (major == 6 && minor < 4) {
