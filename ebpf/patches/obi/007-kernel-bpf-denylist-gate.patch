@@ -1,0 +1,138 @@
+diff --git a/cmd/obi/main.go b/cmd/obi/main.go
+index b35f4d3dc..fc0259d02 100644
+--- a/cmd/obi/main.go
++++ b/cmd/obi/main.go
+@@ -91,6 +91,22 @@ func main() {
+ 	// child process isn't found.
+ 	ctx, _ := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+ 
++	// A denylisted kernel executes verifier-accepted BPF programs unsoundly
++	// (kernel oops / host death). Trace telemetry is expendable; the host is
++	// not: load nothing and idle so the supervisor sees a healthy process.
++	major, minor := obi.KernelVersion()
++	if denied, denylist := obi.KernelBPFDenylisted(major, minor); denied {
++		slog.Warn("kernel version is on the eBPF denylist: this kernel line has executed "+
++			"verifier-accepted BPF programs unsoundly (kernel oops / host death); "+
++			"not loading any eBPF program and idling until terminated; set "+
++			obi.KernelDenylistEnv+" to adjust the list, or to an empty value to disable this gate",
++			"kernel", fmt.Sprintf("%d.%d", major, minor),
++			"denylist", denylist)
++		<-ctx.Done()
++		slog.Info("OpenTelemetry eBPF Instrumentation successfully exiting")
++		return
++	}
++
+ 	if err := instrumenter.Run(ctx, config); err != nil {
+ 		slog.Error("OpenTelemetry eBPF Instrumentation ran with errors", "error", err)
+ 		os.Exit(-1)
+diff --git a/pkg/obi/kernel_denylist.go b/pkg/obi/kernel_denylist.go
+new file mode 100644
+index 000000000..96c1366fd
+--- /dev/null
++++ b/pkg/obi/kernel_denylist.go
+@@ -0,0 +1,43 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package obi // import "go.opentelemetry.io/obi/pkg/obi"
++
++import (
++	"os"
++	"strconv"
++	"strings"
++)
++
++// KernelDenylistEnv overrides the default kernel eBPF denylist: a
++// comma-separated list of "major.minor" kernel versions on which OBI must not
++// load any eBPF program. An empty value disables the gate.
++const KernelDenylistEnv = "OTEL_EBPF_KERNEL_DENYLIST"
++
++// The Ubuntu 7.0.0 kernel line executed verifier-accepted OBI programs
++// unsoundly: NULL dereference inside JITed obi_protocol_tcp (CR2=0x5c, the
++// req->lb_req_bytes/lb_res_bytes select on a pointer the verifier proved
++// non-NULL) and an SMAP oops in obi_uprobe_cryptoTlsRead, both delivered via
++// the uprobe path and both fatal to the host. No in-program defense exists
++// below the verifier, so the only safe degradation is not loading eBPF at all.
++// Remove an entry only after the kernel line survives an SSL-traffic soak in a
++// disposable VM.
++const defaultKernelDenylist = "7.0"
++
++// KernelBPFDenylisted reports whether the given kernel version is denylisted
++// for eBPF use, and returns the effective denylist for logging.
++func KernelBPFDenylisted(major, minor int) (bool, string) {
++	denylist, ok := os.LookupEnv(KernelDenylistEnv)
++	if !ok {
++		denylist = defaultKernelDenylist
++	}
++
++	version := strconv.Itoa(major) + "." + strconv.Itoa(minor)
++	for _, entry := range strings.Split(denylist, ",") {
++		if strings.TrimSpace(entry) == version {
++			return true, denylist
++		}
++	}
++
++	return false, denylist
++}
+diff --git a/pkg/obi/kernel_denylist_test.go b/pkg/obi/kernel_denylist_test.go
+new file mode 100644
+index 000000000..6c8aceea2
+--- /dev/null
++++ b/pkg/obi/kernel_denylist_test.go
+@@ -0,0 +1,40 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package obi
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++)
++
++func TestKernelBPFDenylistedDefault(t *testing.T) {
++	denied, denylist := KernelBPFDenylisted(7, 0)
++	assert.True(t, denied)
++	assert.Equal(t, "7.0", denylist)
++
++	for _, v := range [][2]int{{6, 8}, {6, 12}, {7, 1}, {5, 15}} {
++		denied, _ := KernelBPFDenylisted(v[0], v[1])
++		assert.False(t, denied, "%d.%d must not be denied by default", v[0], v[1])
++	}
++}
++
++func TestKernelBPFDenylistedOverride(t *testing.T) {
++	t.Setenv(KernelDenylistEnv, " 6.12 ,7.0")
++
++	denied, _ := KernelBPFDenylisted(6, 12)
++	assert.True(t, denied)
++	denied, _ = KernelBPFDenylisted(7, 0)
++	assert.True(t, denied)
++	denied, _ = KernelBPFDenylisted(6, 1)
++	assert.False(t, denied)
++}
++
++func TestKernelBPFDenylistedEmptyDisablesGate(t *testing.T) {
++	t.Setenv(KernelDenylistEnv, "")
++
++	denied, denylist := KernelBPFDenylisted(7, 0)
++	assert.False(t, denied)
++	assert.Empty(t, denylist)
++}
+diff --git a/pkg/obi/os.go b/pkg/obi/os.go
+index 0045feedf..5b18eb54d 100644
+--- a/pkg/obi/os.go
++++ b/pkg/obi/os.go
+@@ -27,6 +27,11 @@ const (
+ 
+ var kernelVersion = ebpfcommon.KernelVersion
+ 
++// KernelVersion returns the running kernel's major and minor version.
++func KernelVersion() (major, minor int) {
++	return kernelVersion()
++}
++
+ var rhelIDs = []string{"rhel", "centos", "rocky", "alma"}
+ 
+ func parseOSReleaseIsRHEL(data []byte) bool {
