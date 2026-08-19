@@ -56,8 +56,8 @@ FROM ghcr.io/open-telemetry/obi-generator:0.2.15@sha256:9cbb1b567377d5779b04e6bc
 RUN apk add --no-cache bash git make
 ARG TARGETARCH
 ARG CUSTOMIZATION_TAG="betterstack"
-ARG OBI_VERSION="v0.10.0"
-ARG OBI_REVISION="4a4dc7ecdb2aeba6791d02fbebb5048c0f0c1261"
+ARG OBI_VERSION="v0.11.0"
+ARG OBI_REVISION="2f8603c7232a93e798f3673a15d8077e6a509047"
 RUN git clone --depth 1 --branch ${OBI_VERSION} \
     https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation.git /tmp/obi && \
     test "$(git -C /tmp/obi rev-parse HEAD)" = "${OBI_REVISION}"
