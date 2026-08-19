@@ -43,6 +43,10 @@ jobs:
           test "$(git -C "$RUNNER_TEMP/obi" rev-parse HEAD)" = "$OBI_REVISION"
           git -C "$RUNNER_TEMP/obi" apply "$GITHUB_WORKSPACE"/ebpf/patches/obi/*.patch
 
+      - name: Check preemption guards
+        working-directory: ${{ runner.temp }}/obi
+        run: ./scripts/lint-preempt-guard.sh
+
       - name: Generate eBPF sources
         run: |
           docker run --rm \
