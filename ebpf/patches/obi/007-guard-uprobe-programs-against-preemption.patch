@@ -1,0 +1,2594 @@
+diff --git a/Makefile b/Makefile
+index 706a7ccd..52711952 100644
+--- a/Makefile
++++ b/Makefile
+@@ -150,9 +150,9 @@ lint: lint-run
+ lint-fix: lint-fix-run
+ 
+ .PHONY: lint-run lint-fix-run
+-lint-run: vanity-import-check lint-dependency-policy lint-collectt
++lint-run: vanity-import-check lint-dependency-policy lint-collectt lint-preempt-guard
+ lint-fix-run: LINT_EXTRA_ARGS = --fix
+-lint-fix-run: vanity-import-fix-check lint-dependency-policy lint-collectt-fix
++lint-fix-run: vanity-import-fix-check lint-dependency-policy lint-collectt-fix lint-preempt-guard
+ .NOTPARALLEL: lint-fix-run
+ lint-run lint-fix-run:
+ 	@echo "### Linting code"
+@@ -174,6 +174,11 @@ lint-dependency-policy:
+ 		./scripts/lint-dependency-policy.sh; \
+ 	fi
+ 
++.PHONY: lint-preempt-guard
++lint-preempt-guard:
++	@echo "### Checking uprobe-context BPF programs are preempt-guarded"
++	@./scripts/lint-preempt-guard.sh
++
+ .PHONY: lint-collectt
+ lint-collectt:
+ 	@echo "### Checking EventuallyWithT callbacks use CollectT"
+diff --git a/bpf/common/preempt_guard.h b/bpf/common/preempt_guard.h
+new file mode 100644
+index 00000000..06639916
+--- /dev/null
++++ b/bpf/common/preempt_guard.h
+@@ -0,0 +1,113 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++#pragma once
++
++#include <bpfcore/vmlinux.h>
++#include <bpfcore/bpf_helpers.h>
++
++// Programs attached to uprobes run in task context, where kernels with lazy or
++// full preemption may preempt them mid-execution: since
++// https://github.com/torvalds/linux/commit/8c7dcb84e3b7 (v6.0), uprobe runs
++// take only migrate_disable, having dropped both the explicit preempt_disable
++// and the bpf_prog_active same-CPU exclusion of the old path. Kernels 6.13+
++// also run every kprobe-type program with at least 64 bytes of stack on a
++// per-CPU private stack (the verifier's PRIV_STACK_ADAPTIVE mode, with no
++// opt-out, https://github.com/torvalds/linux/commit/a76ab5731e32), assuming
++// per-CPU exclusivity that only holds while execution cannot interleave. A
++// task preempted inside such a program shares its private stack frame with
++// whichever task runs the same program next on that CPU, and resumes with its
++// spilled registers overwritten: verified-sound pointers reload as garbage and
++// the machine panics inside the program or inside map helpers fed the bad
++// pointers.
++//
++// Every program that can execute in uprobe context disables preemption for its
++// body, which restores the exclusivity the private stack needs. Programs
++// entered from kprobes or tracepoints already run with preemption off, and the
++// pair nests, so sharing tail-call chains between the two is fine. The kfuncs
++// exist since 6.10; on older kernels, which predate private stacks, the calls
++// resolve to nothing and the guard vanishes.
++//
++// The verifier enforces the discipline: a guarded program cannot return or
++// tail-call while preemption is disabled, so a missed exit is a load-time
++// error, never a runtime leak. Tail calls therefore re-enable around the jump
++// (the outgoing frame is dead past that point) and the target re-disables.
++
++extern void bpf_preempt_disable(void) __ksym __weak;
++extern void bpf_preempt_enable(void) __ksym __weak;
++
++static __always_inline void preempt_guard_enter(void) {
++    if (bpf_preempt_disable) {
++        bpf_preempt_disable();
++    }
++}
++
++static __always_inline void preempt_guard_exit(void) {
++    if (bpf_preempt_enable) {
++        bpf_preempt_enable();
++    }
++}
++
++// clang-format off
++#define PREEMPT_GUARDED(expr)                                                                      \
++    ({                                                                                             \
++        preempt_guard_enter();                                                                     \
++        const int __guarded_ret = (expr);                                                          \
++        preempt_guard_exit();                                                                      \
++        __guarded_ret;                                                                             \
++    })
++// clang-format on
++
++// A failed tail call falls through, so the guard must come back on either way;
++// on success the jump target re-enters it
++#define preempt_guarded_tail_call(ctx, table, index)                                               \
++    do {                                                                                           \
++        preempt_guard_exit();                                                                      \
++        bpf_tail_call(ctx, table, index);                                                          \
++        preempt_guard_enter();                                                                     \
++    } while (0)
++
++#define preempt_guarded_tail_call_static(ctx, table, index)                                        \
++    do {                                                                                           \
++        preempt_guard_exit();                                                                      \
++        bpf_tail_call_static(ctx, table, index);                                                   \
++        preempt_guard_enter();                                                                     \
++    } while (0)
++
++// Wraps a plain program definition so its body runs under the guard:
++//   SEC("uprobe/x")
++//   int GUARDED_PROG(name, struct pt_regs *, ctx) { ... }
++#define GUARDED_PROG(name, ctx_type, ctx_arg)                                                      \
++    name(ctx_type ctx_arg);                                                                        \
++    static __always_inline typeof(name(0)) ____##name(ctx_type ctx_arg);                           \
++    typeof(name(0)) name(ctx_type ctx_arg) {                                                       \
++        return PREEMPT_GUARDED(____##name(ctx_arg));                                               \
++    }                                                                                              \
++    static __always_inline typeof(name(0)) ____##name(ctx_type ctx_arg)
++
++// Guarded twins of the bpf_tracing.h program macros: same expansion, with the
++// thin entry wrapper running the body under the guard
++#define BPF_KPROBE_GUARDED(name, args...)                                                          \
++    name(struct pt_regs *ctx);                                                                     \
++    static __attribute__((always_inline)) typeof(name(0)) ____##name(struct pt_regs *ctx, ##args); \
++    typeof(name(0)) name(struct pt_regs *ctx) {                                                    \
++        _Pragma("GCC diagnostic push")                                                             \
++            _Pragma("GCC diagnostic ignored \"-Wint-conversion\"") return PREEMPT_GUARDED(         \
++                ____##name(___bpf_kprobe_args(args)));                                             \
++        _Pragma("GCC diagnostic pop")                                                              \
++    }                                                                                              \
++    static __attribute__((always_inline)) typeof(name(0)) ____##name(struct pt_regs *ctx, ##args)
++
++#define BPF_KRETPROBE_GUARDED(name, args...)                                                       \
++    name(struct pt_regs *ctx);                                                                     \
++    static __attribute__((always_inline)) typeof(name(0)) ____##name(struct pt_regs *ctx, ##args); \
++    typeof(name(0)) name(struct pt_regs *ctx) {                                                    \
++        _Pragma("GCC diagnostic push")                                                             \
++            _Pragma("GCC diagnostic ignored \"-Wint-conversion\"") return PREEMPT_GUARDED(         \
++                ____##name(___bpf_kretprobe_args(args)));                                          \
++        _Pragma("GCC diagnostic pop")                                                              \
++    }                                                                                              \
++    static __attribute__((always_inline)) typeof(name(0)) ____##name(struct pt_regs *ctx, ##args)
++
++#define BPF_UPROBE_GUARDED(name, args...) BPF_KPROBE_GUARDED(name, ##args)
++#define BPF_URETPROBE_GUARDED(name, args...) BPF_KRETPROBE_GUARDED(name, ##args)
+diff --git a/bpf/generictracer/iter_tcp.c b/bpf/generictracer/iter_tcp.c
+index af8b5ba8..a34dedd3 100644
+--- a/bpf/generictracer/iter_tcp.c
++++ b/bpf/generictracer/iter_tcp.c
+@@ -5,12 +5,13 @@
+ #include <bpfcore/bpf_core_read.h>
+ #include <bpfcore/bpf_helpers.h>
+ 
++#include <common/preempt_guard.h>
+ #include <common/sock_port_ns.h>
+ 
+ #include <generictracer/maps/listening_ports.h>
+ 
+ SEC("iter/tcp")
+-int obi_iter_tcp(struct bpf_iter__tcp *ctx) {
++int GUARDED_PROG(obi_iter_tcp, struct bpf_iter__tcp *, ctx) {
+     struct sock_common *skc = ctx->sk_common;
+     if (!skc) {
+         return 0;
+diff --git a/bpf/generictracer/java_tls.c b/bpf/generictracer/java_tls.c
+index b6b76dfc..4a102cbf 100644
+--- a/bpf/generictracer/java_tls.c
++++ b/bpf/generictracer/java_tls.c
+@@ -9,6 +9,7 @@
+ #include <bpfcore/bpf_tracing.h>
+ 
+ #include <common/connection_info.h>
++#include <common/preempt_guard.h>
+ #include <common/protocol_defs.h>
+ #include <common/trace_key.h>
+ #include <common/trace_parent.h>
+@@ -53,7 +54,7 @@ static __always_inline u8 cmd_to_op(u8 cmd) {
+ 
+ SEC("kprobe/sys_ioctl")
+ // unsigned int fd, unsigned int cmd, void *arg
+-int BPF_KPROBE(obi_kprobe_sys_ioctl) {
++int BPF_KPROBE_GUARDED(obi_kprobe_sys_ioctl) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+diff --git a/bpf/generictracer/jvm.c b/bpf/generictracer/jvm.c
+index 591e47ed..9f548cd0 100644
+--- a/bpf/generictracer/jvm.c
++++ b/bpf/generictracer/jvm.c
+@@ -11,6 +11,7 @@
+ 
+ #include <generictracer/jvm.h>
+ #include <common/event_defs.h>
++#include <common/preempt_guard.h>
+ #include <common/ringbuf.h>
+ #include <logger/bpf_dbg.h>
+ #include <pid/pid.h>
+@@ -142,7 +143,7 @@ jvm_read_hotspot_usdt_arg(struct pt_regs *ctx, enum jvm_gc_when_type when, u64 a
+ 
+ // https://github.com/openjdk/jdk/blob/jdk-21%2B35/src/hotspot/share/services/memoryManager.cpp#L230
+ SEC("usdt/hotspot_mem_pool_gc_begin")
+-int obi_usdt_hotspot_mem_pool_gc_begin(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_usdt_hotspot_mem_pool_gc_begin, struct pt_regs *, ctx) {
+     if (!jvm_runtime_metrics_are_enabled()) {
+         return 0;
+     }
+@@ -188,7 +189,7 @@ int obi_usdt_hotspot_mem_pool_gc_begin(struct pt_regs *ctx) {
+ 
+ // https://github.com/openjdk/jdk/blob/jdk-21%2B35/src/hotspot/share/services/memoryManager.cpp#L263
+ SEC("usdt/hotspot_mem_pool_gc_end")
+-int obi_usdt_hotspot_mem_pool_gc_end(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_usdt_hotspot_mem_pool_gc_end, struct pt_regs *, ctx) {
+     if (!jvm_runtime_metrics_are_enabled()) {
+         return 0;
+     }
+diff --git a/bpf/generictracer/k_tracer.c b/bpf/generictracer/k_tracer.c
+index e1b83170..7ac1fff7 100644
+--- a/bpf/generictracer/k_tracer.c
++++ b/bpf/generictracer/k_tracer.c
+@@ -14,6 +14,7 @@
+ #include <common/iov_iter.h>
+ #include <common/lw_thread.h>
+ #include <common/msg_buffer.h>
++#include <common/preempt_guard.h>
+ #include <common/protocol_defs.h>
+ #include <common/sock_port_ns.h>
+ #include <common/sockaddr.h>
+@@ -60,7 +61,9 @@ SCRATCH_MEM_TYPED(backup_buffer, backup_buffer_t)
+ 
+ // Used by accept to grab the sock details
+ SEC("kprobe/security_socket_accept")
+-int BPF_KPROBE(obi_kprobe_security_socket_accept, struct socket *sock, struct socket *newsock) {
++int BPF_KPROBE_GUARDED(obi_kprobe_security_socket_accept,
++                       struct socket *sock,
++                       struct socket *newsock) {
+     (void)ctx;
+     (void)sock;
+ 
+@@ -93,7 +96,7 @@ int BPF_KPROBE(obi_kprobe_security_socket_accept, struct socket *sock, struct so
+ // Note: A current limitation is that likely we won't capture the first accept request. The
+ // process may have already reached accept, before the instrumenter has launched.
+ SEC("kretprobe/sys_accept4")
+-int BPF_KRETPROBE(obi_kretprobe_sys_accept4, s32 fd) {
++int BPF_KRETPROBE_GUARDED(obi_kretprobe_sys_accept4, s32 fd) {
+     (void)ctx;
+ 
+     const u64 id = bpf_get_current_pid_tgid();
+@@ -163,7 +166,7 @@ cleanup:
+ }
+ 
+ SEC("kprobe/sys_connect")
+-int BPF_KPROBE(obi_kprobe_sys_connect) {
++int BPF_KPROBE_GUARDED(obi_kprobe_sys_connect) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -204,7 +207,7 @@ static __always_inline void store_sock_pid(struct sock *sk) {
+ 
+ // Used by connect so that we can grab the sock details
+ SEC("kprobe/tcp_connect")
+-int BPF_KPROBE(obi_kprobe_tcp_connect, struct sock *sk) {
++int BPF_KPROBE_GUARDED(obi_kprobe_tcp_connect, struct sock *sk) {
+     (void)ctx;
+ 
+     const u64 id = bpf_get_current_pid_tgid();
+@@ -235,7 +238,7 @@ int BPF_KPROBE(obi_kprobe_tcp_connect, struct sock *sk) {
+ }
+ 
+ SEC("kprobe/udp_sendmsg")
+-int BPF_KPROBE(obi_kprobe_udp_sendmsg, struct sock *sk, struct msghdr *msg, size_t len) {
++int BPF_KPROBE_GUARDED(obi_kprobe_udp_sendmsg, struct sock *sk, struct msghdr *msg, size_t len) {
+     (void)ctx;
+ 
+     const u64 id = bpf_get_current_pid_tgid();
+@@ -317,7 +320,7 @@ static __always_inline void setup_cp_support_conn_info(pid_connection_info_t *p_
+ // We tap into sys_connect so we can track properly the processes doing
+ // HTTP client calls
+ SEC("kretprobe/sys_connect")
+-int BPF_KRETPROBE(obi_kretprobe_sys_connect, int res) {
++int BPF_KRETPROBE_GUARDED(obi_kretprobe_sys_connect, int res) {
+     (void)ctx;
+ 
+     const u64 id = bpf_get_current_pid_tgid();
+@@ -422,7 +425,7 @@ setup_connection_to_pid_mapping(u64 id, pid_connection_info_t *p_conn, u16 orig_
+ // finish the request on the return of tcp_sendmsg. Therefore for any request less
+ // than 1MB we just finish the request on the kprobe path.
+ SEC("kprobe/tcp_sendmsg")
+-int BPF_KPROBE(obi_kprobe_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size) {
++int BPF_KPROBE_GUARDED(obi_kprobe_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -545,7 +548,7 @@ int BPF_KPROBE(obi_kprobe_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size
+ // This is a backup path kprobe in case tcp_sendmsg doesn't fire, which
+ // happens on certain kernels if sk_msg is attached.
+ SEC("kprobe/tcp_rate_check_app_limited")
+-int BPF_KPROBE(obi_kprobe_tcp_rate_check_app_limited, struct sock *sk) {
++int BPF_KPROBE_GUARDED(obi_kprobe_tcp_rate_check_app_limited, struct sock *sk) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -628,7 +631,7 @@ int BPF_KPROBE(obi_kprobe_tcp_rate_check_app_limited, struct sock *sk) {
+ // delayed. The code under the `if (size < KPROBES_LARGE_RESPONSE_LEN) {` block should do it
+ // but it's possible that the kernel sends the data in smaller chunks.
+ SEC("kretprobe/tcp_sendmsg")
+-int BPF_KRETPROBE(obi_kretprobe_tcp_sendmsg, int sent_len) {
++int BPF_KRETPROBE_GUARDED(obi_kretprobe_tcp_sendmsg, int sent_len) {
+     (void)ctx;
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+@@ -687,7 +690,7 @@ static __always_inline bool is_conn_unreadable(const connection_info_t *conn) {
+ }
+ 
+ SEC("kprobe/tcp_close")
+-int BPF_KPROBE(obi_kprobe_tcp_close, struct sock *sk, long timeout) {
++int BPF_KPROBE_GUARDED(obi_kprobe_tcp_close, struct sock *sk, long timeout) {
+     (void)ctx;
+     (void)timeout;
+ 
+@@ -752,7 +755,7 @@ int BPF_KPROBE(obi_kprobe_tcp_close, struct sock *sk, long timeout) {
+ }
+ 
+ SEC("kprobe/sock_def_error_report")
+-int BPF_KPROBE(obi_kprobe_sock_def_error_report, struct sock *sk) {
++int BPF_KPROBE_GUARDED(obi_kprobe_sock_def_error_report, struct sock *sk) {
+     (void)ctx;
+ 
+     const u64 id = bpf_get_current_pid_tgid();
+@@ -815,12 +818,12 @@ static __always_inline void setup_recvmsg(u64 id, struct sock *sk, struct msghdr
+ 
+ //int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags, int *addr_len)
+ SEC("kprobe/tcp_recvmsg")
+-int BPF_KPROBE(obi_kprobe_tcp_recvmsg,
+-               struct sock *sk,
+-               struct msghdr *msg,
+-               size_t len,
+-               int flags,
+-               int *addr_len) { //NOLINT(readability-non-const-parameter)
++int BPF_KPROBE_GUARDED(obi_kprobe_tcp_recvmsg,
++                       struct sock *sk,
++                       struct msghdr *msg,
++                       size_t len,
++                       int flags,
++                       int *addr_len) { //NOLINT(readability-non-const-parameter)
+     (void)ctx;
+     (void)len;
+     (void)flags;
+@@ -845,7 +848,10 @@ int BPF_KPROBE(obi_kprobe_tcp_recvmsg,
+ // the context propagation. This probe happens before tcp_recvmsg and wraps it
+ // so if tcp_recvmsg happens, it will overwrite the data in the args.
+ SEC("kprobe/sock_recvmsg")
+-int BPF_KPROBE(obi_kprobe_sock_recvmsg, struct socket *sock, struct msghdr *msg, int flags) {
++int BPF_KPROBE_GUARDED(obi_kprobe_sock_recvmsg,
++                       struct socket *sock,
++                       struct msghdr *msg,
++                       int flags) {
+     (void)ctx;
+     (void)flags;
+ 
+@@ -872,7 +878,7 @@ int BPF_KPROBE(obi_kprobe_sock_recvmsg, struct socket *sock, struct msghdr *msg,
+ // the context propagation. When tcp_recvmsg happened, the args would be
+ // cleaned up by that probe and this kprobe won't do anything.
+ SEC("kretprobe/sock_recvmsg")
+-int BPF_KRETPROBE(obi_kretprobe_sock_recvmsg, int copied_len) {
++int BPF_KRETPROBE_GUARDED(obi_kretprobe_sock_recvmsg, int copied_len) {
+     (void)ctx;
+ 
+     const u64 id = bpf_get_current_pid_tgid();
+@@ -1061,7 +1067,7 @@ done:
+ 
+ // backup path for the retprobe of recv msg not firing
+ SEC("kprobe/tcp_cleanup_rbuf")
+-int BPF_KPROBE(obi_kprobe_tcp_cleanup_rbuf, struct sock *sk, int copied) {
++int BPF_KPROBE_GUARDED(obi_kprobe_tcp_cleanup_rbuf, struct sock *sk, int copied) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -1083,7 +1089,7 @@ int BPF_KPROBE(obi_kprobe_tcp_cleanup_rbuf, struct sock *sk, int copied) {
+ }
+ 
+ SEC("kretprobe/tcp_recvmsg")
+-int BPF_KRETPROBE(obi_kretprobe_tcp_recvmsg, int copied_len) {
++int BPF_KRETPROBE_GUARDED(obi_kretprobe_tcp_recvmsg, int copied_len) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -1153,7 +1159,7 @@ typedef struct sock_tailcall_ctx {
+ SCRATCH_MEM(sock_tailcall_ctx);
+ 
+ SEC("socket/http_filter")
+-int obi_socket_flt_buf(struct __sk_buff *skb) {
++int GUARDED_PROG(obi_socket_flt_buf, struct __sk_buff *, skb) {
+     (void)skb;
+ 
+     sock_tailcall_ctx *t_ctx = sock_tailcall_ctx_mem();
+@@ -1285,14 +1291,14 @@ int obi_socket_flt_buf(struct __sk_buff *skb) {
+     return 0;
+ }
+ SEC("socket/http_filter")
+-int obi_socket__http_filter(struct __sk_buff *skb) {
++int GUARDED_PROG(obi_socket__http_filter, struct __sk_buff *, skb) {
+     protocol_info_t tcp = {};
+     connection_info_t conn = {};
+ 
+     const u8 success = read_sk_buff(skb, &tcp, &conn);
+ 
+     if (is_dns(&conn)) {
+-        bpf_tail_call_static(skb, &jump_table_skb, k_tail_socket_filter_dns);
++        preempt_guarded_tail_call_static(skb, &jump_table_skb, k_tail_socket_filter_dns);
+         return 0;
+     }
+ 
+@@ -1314,14 +1320,14 @@ int obi_socket__http_filter(struct __sk_buff *skb) {
+     t_ctx->conn = conn;
+     t_ctx->tcp = tcp;
+ 
+-    bpf_tail_call_static(skb, &sock_jump_table, k_tail_capture_sock_buf);
++    preempt_guarded_tail_call_static(skb, &sock_jump_table, k_tail_capture_sock_buf);
+ 
+     return 0;
+ }
+ 
+ // k_tail_socket_filter_dns
+ SEC("socket/http_dns_filter")
+-int obi_socket__http_dns_filter(struct __sk_buff *skb) {
++int GUARDED_PROG(obi_socket__http_dns_filter, struct __sk_buff *, skb) {
+     protocol_info_t tcp = {};
+     connection_info_t conn = {};
+ 
+@@ -1337,7 +1343,7 @@ int obi_socket__http_dns_filter(struct __sk_buff *skb) {
+     and server_traces are keyed off the namespace:pid.
+ */
+ SEC("kretprobe/sys_clone")
+-int BPF_KRETPROBE(obi_kretprobe_sys_clone, int tid) {
++int BPF_KRETPROBE_GUARDED(obi_kretprobe_sys_clone, int tid) {
+     (void)ctx;
+ 
+     const u64 id = bpf_get_current_pid_tgid();
+@@ -1362,7 +1368,7 @@ int BPF_KRETPROBE(obi_kretprobe_sys_clone, int tid) {
+ }
+ 
+ SEC("kprobe/sys_exit")
+-int BPF_KPROBE(obi_kprobe_sys_exit, int status) {
++int BPF_KPROBE_GUARDED(obi_kprobe_sys_exit, int status) {
+     (void)ctx;
+     (void)status;
+ 
+@@ -1397,7 +1403,7 @@ int BPF_KPROBE(obi_kprobe_sys_exit, int status) {
+ }
+ 
+ SEC("kprobe/inet_csk_listen_stop")
+-int BPF_KPROBE(obi_kprobe_inet_csk_listen_stop, struct sock *sk) {
++int BPF_KPROBE_GUARDED(obi_kprobe_inet_csk_listen_stop, struct sock *sk) {
+     (void)ctx;
+ 
+     const u64 id = bpf_get_current_pid_tgid();
+diff --git a/bpf/generictracer/k_tracer_defs.h b/bpf/generictracer/k_tracer_defs.h
+index b7ee3064..139acd89 100644
+--- a/bpf/generictracer/k_tracer_defs.h
++++ b/bpf/generictracer/k_tracer_defs.h
+@@ -9,6 +9,7 @@
+ #include <common/connection_info.h>
+ #include <common/http_types.h>
+ #include <common/lw_thread.h>
++#include <common/preempt_guard.h>
+ #include <common/protocol_http_helpers.h>
+ 
+ #include <generictracer/k_tracer_tailcall.h>
+@@ -90,7 +91,7 @@ static __always_inline void handle_buf_with_connection(void *ctx,
+         return;
+     }
+ 
+-    bpf_tail_call(ctx, &jump_table, k_tail_handle_buf_with_args);
++    preempt_guarded_tail_call(ctx, &jump_table, k_tail_handle_buf_with_args);
+ }
+ 
+ static __always_inline void handle_light_weight_thread_buf(void *ctx,
+@@ -108,7 +109,7 @@ static __always_inline void handle_light_weight_thread_buf(void *ctx,
+         return;
+     }
+ 
+-    bpf_tail_call(ctx, &jump_table, k_tail_handle_buf_with_args);
++    preempt_guarded_tail_call(ctx, &jump_table, k_tail_handle_buf_with_args);
+ }
+ 
+ #define BUF_COPY_BLOCK_SIZE 16
+diff --git a/bpf/generictracer/k_unix_sock.h b/bpf/generictracer/k_unix_sock.h
+index b27dd58d..635694c8 100644
+--- a/bpf/generictracer/k_unix_sock.h
++++ b/bpf/generictracer/k_unix_sock.h
+@@ -8,6 +8,7 @@
+ 
+ #include <common/iov_iter.h>
+ #include <common/http_types.h>
++#include <common/preempt_guard.h>
+ #include <common/tracing.h>
+ 
+ #include <generictracer/k_send_receive.h>
+@@ -53,11 +54,11 @@ pid_connection_info_for_inode(u64 id, pid_connection_info_t *p_conn, u32 inode,
+ }
+ 
+ SEC("kprobe/unix_stream_recvmsg")
+-int BPF_KPROBE(obi_kprobe_unix_stream_recvmsg,
+-               struct socket *sock,
+-               struct msghdr *msg,
+-               size_t size,
+-               int flags) {
++int BPF_KPROBE_GUARDED(obi_kprobe_unix_stream_recvmsg,
++                       struct socket *sock,
++                       struct msghdr *msg,
++                       size_t size,
++                       int flags) {
+     (void)ctx;
+     (void)size;
+     (void)flags;
+@@ -213,7 +214,7 @@ static __always_inline int return_unix_recvmsg(void *ctx, u64 id, int copied_len
+ }
+ 
+ SEC("kretprobe/unix_stream_recvmsg")
+-int BPF_KRETPROBE(obi_kretprobe_unix_stream_recvmsg, size_t copied) {
++int BPF_KRETPROBE_GUARDED(obi_kretprobe_unix_stream_recvmsg, size_t copied) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -226,10 +227,10 @@ int BPF_KRETPROBE(obi_kretprobe_unix_stream_recvmsg, size_t copied) {
+ }
+ 
+ SEC("kprobe/unix_stream_sendmsg")
+-int BPF_KPROBE(obi_kprobe_unix_stream_sendmsg,
+-               struct socket *sock,
+-               struct msghdr *msg,
+-               size_t size) {
++int BPF_KPROBE_GUARDED(obi_kprobe_unix_stream_sendmsg,
++                       struct socket *sock,
++                       struct msghdr *msg,
++                       size_t size) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -277,7 +278,7 @@ int BPF_KPROBE(obi_kprobe_unix_stream_sendmsg,
+ }
+ 
+ SEC("kretprobe/unix_stream_sendmsg")
+-int BPF_KRETPROBE(obi_kretprobe_unix_stream_sendmsg, int sent_len) {
++int BPF_KRETPROBE_GUARDED(obi_kretprobe_unix_stream_sendmsg, int sent_len) {
+     (void)ctx;
+ 
+     const u64 id = bpf_get_current_pid_tgid();
+diff --git a/bpf/generictracer/libssl.c b/bpf/generictracer/libssl.c
+index 12040831..954ab40f 100644
+--- a/bpf/generictracer/libssl.c
++++ b/bpf/generictracer/libssl.c
+@@ -7,6 +7,7 @@
+ #include <bpfcore/bpf_helpers.h>
+ 
+ #include <common/algorithm.h>
++#include <common/preempt_guard.h>
+ 
+ #include <generictracer/ssl_defs.h>
+ 
+@@ -25,7 +26,7 @@ static __always_inline int ssl_size_to_int(size_t size) {
+ // SSL_read_ex sets an argument pointer with the number of bytes read, while SSL_read returns
+ // the number of bytes read.
+ SEC("uprobe/libssl.so:SSL_read")
+-int BPF_UPROBE(obi_uprobe_ssl_read, void *ssl, const void *buf, int num) {
++int BPF_UPROBE_GUARDED(obi_uprobe_ssl_read, void *ssl, const void *buf, int num) {
+     (void)ctx;
+     (void)num;
+ 
+@@ -57,7 +58,7 @@ int BPF_UPROBE(obi_uprobe_ssl_read, void *ssl, const void *buf, int num) {
+ }
+ 
+ SEC("uretprobe/libssl.so:SSL_read")
+-int BPF_URETPROBE(obi_uretprobe_ssl_read, int ret) {
++int BPF_URETPROBE_GUARDED(obi_uretprobe_ssl_read, int ret) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -76,11 +77,11 @@ int BPF_URETPROBE(obi_uretprobe_ssl_read, int ret) {
+ }
+ 
+ SEC("uprobe/libssl.so:SSL_read_ex")
+-int BPF_UPROBE(obi_uprobe_ssl_read_ex,
+-               void *ssl,
+-               const void *buf,
+-               int num,
+-               size_t *readbytes) { //NOLINT(readability-non-const-parameter)
++int BPF_UPROBE_GUARDED(obi_uprobe_ssl_read_ex,
++                       void *ssl,
++                       const void *buf,
++                       int num,
++                       size_t *readbytes) { //NOLINT(readability-non-const-parameter)
+     (void)ctx;
+     (void)num;
+ 
+@@ -113,7 +114,7 @@ int BPF_UPROBE(obi_uprobe_ssl_read_ex,
+ }
+ 
+ SEC("uretprobe/libssl.so:SSL_read_ex")
+-int BPF_URETPROBE(obi_uretprobe_ssl_read_ex, int ret) {
++int BPF_URETPROBE_GUARDED(obi_uretprobe_ssl_read_ex, int ret) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -149,7 +150,7 @@ int BPF_URETPROBE(obi_uretprobe_ssl_read_ex, int ret) {
+ // SSL_write_ex sets an argument pointer with the number of bytes written, while SSL_write returns
+ // the number of bytes written.
+ SEC("uprobe/libssl.so:SSL_write")
+-int BPF_UPROBE(obi_uprobe_ssl_write, void *ssl, const void *buf, int num) {
++int BPF_UPROBE_GUARDED(obi_uprobe_ssl_write, void *ssl, const void *buf, int num) {
+     (void)ctx;
+     (void)num;
+ 
+@@ -172,7 +173,7 @@ int BPF_UPROBE(obi_uprobe_ssl_write, void *ssl, const void *buf, int num) {
+ }
+ 
+ SEC("uretprobe/libssl.so:SSL_write")
+-int BPF_URETPROBE(obi_uretprobe_ssl_write, int ret) {
++int BPF_URETPROBE_GUARDED(obi_uretprobe_ssl_write, int ret) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -195,11 +196,11 @@ int BPF_URETPROBE(obi_uretprobe_ssl_write, int ret) {
+ }
+ 
+ SEC("uprobe/libssl.so:SSL_write_ex")
+-int BPF_UPROBE(obi_uprobe_ssl_write_ex,
+-               void *ssl,
+-               const void *buf,
+-               size_t num,
+-               size_t *written) { //NOLINT(readability-non-const-parameter)
++int BPF_UPROBE_GUARDED(obi_uprobe_ssl_write_ex,
++                       void *ssl,
++                       const void *buf,
++                       size_t num,
++                       size_t *written) { //NOLINT(readability-non-const-parameter)
+     (void)ctx;
+     (void)num;
+ 
+@@ -223,12 +224,12 @@ int BPF_UPROBE(obi_uprobe_ssl_write_ex,
+ }
+ 
+ SEC("uprobe/libssl.so:SSL_write_ex2")
+-int BPF_UPROBE(obi_uprobe_ssl_write_ex2,
+-               void *ssl,
+-               const void *buf,
+-               size_t num,
+-               u64 flags,
+-               size_t *written) { //NOLINT(readability-non-const-parameter)
++int BPF_UPROBE_GUARDED(obi_uprobe_ssl_write_ex2,
++                       void *ssl,
++                       const void *buf,
++                       size_t num,
++                       u64 flags,
++                       size_t *written) { //NOLINT(readability-non-const-parameter)
+     (void)ctx;
+     (void)num;
+     (void)flags;
+@@ -253,7 +254,7 @@ int BPF_UPROBE(obi_uprobe_ssl_write_ex2,
+ }
+ 
+ SEC("uretprobe/libssl.so:SSL_write_ex")
+-int BPF_URETPROBE(obi_uretprobe_ssl_write_ex, int ret) {
++int BPF_URETPROBE_GUARDED(obi_uretprobe_ssl_write_ex, int ret) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -282,7 +283,7 @@ int BPF_URETPROBE(obi_uretprobe_ssl_write_ex, int ret) {
+ }
+ 
+ SEC("uretprobe/libssl.so:SSL_write_ex2")
+-int BPF_URETPROBE(obi_uretprobe_ssl_write_ex2, int ret) {
++int BPF_URETPROBE_GUARDED(obi_uretprobe_ssl_write_ex2, int ret) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -311,7 +312,7 @@ int BPF_URETPROBE(obi_uretprobe_ssl_write_ex2, int ret) {
+ }
+ 
+ SEC("uprobe/libssl.so:SSL_shutdown")
+-int BPF_UPROBE(obi_uprobe_ssl_shutdown, void *s) {
++int BPF_UPROBE_GUARDED(obi_uprobe_ssl_shutdown, void *s) {
+     (void)ctx;
+ 
+     const u64 id = bpf_get_current_pid_tgid();
+diff --git a/bpf/generictracer/nginx.c b/bpf/generictracer/nginx.c
+index 09c454ee..f99447aa 100644
+--- a/bpf/generictracer/nginx.c
++++ b/bpf/generictracer/nginx.c
+@@ -8,6 +8,7 @@
+ 
+ #include <common/fd_info.h>
+ #include <common/connection_info.h>
++#include <common/preempt_guard.h>
+ #include <common/sockaddr.h>
+ 
+ #include <generictracer/maps/upstream_init_args.h>
+@@ -26,7 +27,7 @@ volatile const s32 ngx_http_rev_s_conn = 0x8;
+ volatile const s32 ngx_connection_s_sockaddr = 0x68;
+ 
+ SEC("uprobe/nginx:ngx_http_upstream_init")
+-int obi_ngx_http_upstream_init(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_ngx_http_upstream_init, struct pt_regs *, ctx) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -56,7 +57,7 @@ static __always_inline void get_sock_info(u64 id, void *conn_ptr, connection_inf
+ }
+ 
+ SEC("uprobe/nginx:ngx_event_connect_peer_ret")
+-int obi_ngx_event_connect_peer_ret(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_ngx_event_connect_peer_ret, struct pt_regs *, ctx) {
+     (void)ctx;
+ 
+     const u64 id = bpf_get_current_pid_tgid();
+diff --git a/bpf/generictracer/nodejs.c b/bpf/generictracer/nodejs.c
+index dde84a53..62311a8d 100644
+--- a/bpf/generictracer/nodejs.c
++++ b/bpf/generictracer/nodejs.c
+@@ -7,6 +7,7 @@
+ #include <bpfcore/bpf_helpers.h>
+ #include <bpfcore/bpf_tracing.h>
+ 
++#include <common/preempt_guard.h>
+ #include <common/strings.h>
+ #include <common/tracing.h>
+ 
+@@ -72,7 +73,7 @@ static __always_inline int handle_fd_correlation(char *buf, const u64 pid_tgid)
+ }
+ 
+ SEC("uprobe/node:uv_fs_access")
+-int BPF_KPROBE(obi_uv_fs_access, void *loop, void *req, const char *path) {
++int BPF_KPROBE_GUARDED(obi_uv_fs_access, void *loop, void *req, const char *path) {
+     (void)ctx;
+     (void)loop;
+     (void)req;
+diff --git a/bpf/generictracer/protocol_handler.c b/bpf/generictracer/protocol_handler.c
+index 37100295..6337766f 100644
+--- a/bpf/generictracer/protocol_handler.c
++++ b/bpf/generictracer/protocol_handler.c
+@@ -7,6 +7,7 @@
+ #include <bpfcore/bpf_helpers.h>
+ #include <bpfcore/bpf_tracing.h>
+ 
++#include <common/preempt_guard.h>
+ #include <common/protocol_http2_helpers.h>
+ #include <common/tc_common.h>
+ 
+@@ -23,7 +24,7 @@
+ 
+ // k_tail_handle_buf_with_args
+ SEC("kprobe")
+-int obi_handle_buf_with_args(void *ctx) {
++int GUARDED_PROG(obi_handle_buf_with_args, void *, ctx) {
+     call_protocol_args_t *args = protocol_args();
+     if (!args) {
+         return 0;
+@@ -35,7 +36,7 @@ int obi_handle_buf_with_args(void *ctx) {
+                    args->bytes_len);
+ 
+     if (args->protocols.http && is_http(args->small_buf, MIN_HTTP_SIZE, &args->packet_type)) {
+-        bpf_tail_call(ctx, &jump_table, k_tail_protocol_http);
++        preempt_guarded_tail_call(ctx, &jump_table, k_tail_protocol_http);
+     } else if ((args->protocol_type != k_protocol_type_http) &&
+                (is_http2_or_grpc(args->small_buf, MIN_HTTP2_SIZE) ||
+                 (!already_tracked_http2(&args->pid_conn) &&
+@@ -63,44 +64,44 @@ int obi_handle_buf_with_args(void *ctx) {
+         if (!args->protocols.http2) {
+             return 0;
+         }
+-        bpf_tail_call(ctx, &jump_table, k_tail_protocol_http2);
++        preempt_guarded_tail_call(ctx, &jump_table, k_tail_protocol_http2);
+     } else if (args->protocols.tcp && is_mysql(&args->pid_conn.conn,
+                                                (const unsigned char *)args->u_buf,
+                                                args->bytes_len,
+                                                &args->protocol_type)) {
+         bpf_dbg_printk("Found mysql connection");
+-        bpf_tail_call(ctx, &jump_table, k_tail_protocol_tcp);
++        preempt_guarded_tail_call(ctx, &jump_table, k_tail_protocol_tcp);
+     } else if (args->protocols.tcp && is_postgres(&args->pid_conn.conn,
+                                                   (const unsigned char *)args->u_buf,
+                                                   args->bytes_len,
+                                                   &args->protocol_type)) {
+         bpf_dbg_printk("Found postgres connection");
+-        bpf_tail_call(ctx, &jump_table, k_tail_protocol_tcp);
++        preempt_guarded_tail_call(ctx, &jump_table, k_tail_protocol_tcp);
+     } else if (args->protocols.tcp && is_mssql(&args->pid_conn.conn,
+                                                (const unsigned char *)args->u_buf,
+                                                args->bytes_len,
+                                                &args->protocol_type)) {
+         bpf_dbg_printk("Found mssql connection");
+-        bpf_tail_call(ctx, &jump_table, k_tail_protocol_tcp);
++        preempt_guarded_tail_call(ctx, &jump_table, k_tail_protocol_tcp);
+     } else if (args->protocols.tcp && is_kafka(&args->pid_conn.conn,
+                                                (const unsigned char *)args->u_buf,
+                                                args->bytes_len,
+                                                &args->protocol_type,
+                                                args->direction)) {
+         bpf_dbg_printk("Found kafka connection");
+-        bpf_tail_call(ctx, &jump_table, k_tail_protocol_tcp);
++        preempt_guarded_tail_call(ctx, &jump_table, k_tail_protocol_tcp);
+     } else if (args->protocols.tcp && is_sunrpc(&args->pid_conn.conn,
+                                                 (const unsigned char *)args->u_buf,
+                                                 args->bytes_len,
+                                                 &args->protocol_type)) {
+         bpf_dbg_printk("Found SunRPC connection");
+-        bpf_tail_call(ctx, &jump_table, k_tail_protocol_tcp);
++        preempt_guarded_tail_call(ctx, &jump_table, k_tail_protocol_tcp);
+     } else if (args->protocols.tcp && is_aerospike(&args->pid_conn.conn,
+                                                    (const unsigned char *)args->u_buf,
+                                                    args->bytes_len,
+                                                    &args->protocol_type)) {
+         bpf_dbg_printk("Found Aerospike connection");
+-        bpf_tail_call(ctx, &jump_table, k_tail_protocol_tcp);
++        preempt_guarded_tail_call(ctx, &jump_table, k_tail_protocol_tcp);
+     } else { // large request tracking and generic TCP
+         http_info_t *info = bpf_map_lookup_elem(&ongoing_http, &args->pid_conn);
+ 
+@@ -124,7 +125,7 @@ int obi_handle_buf_with_args(void *ctx) {
+                 // Essentially, when a packet is extended by our sock_msg program and
+                 // passed down another service, the receiving side may reassemble the
+                 // packets into one buffer or not. If they are reassembled, then the
+-                // call to bpf_tail_call(ctx, &jump_table, k_tail_protocol_http); will
++                // call to preempt_guarded_tail_call(ctx, &jump_table, k_tail_protocol_http); will
+                 // scan for the incoming 'Traceparent' header. If they are not reassembled
+                 // we'll see something like this:
+                 // [before the injected header],[70 bytes for 'Traceparent...'],[the rest].
+@@ -180,7 +181,7 @@ int obi_handle_buf_with_args(void *ctx) {
+         } else if (args->protocols.tcp && !info) {
+             // SSL requests will see both TCP traffic and text traffic, ignore the TCP if
+             // we are processing SSL request. HTTP2 is already checked in handle_buf_with_connection.
+-            bpf_tail_call(ctx, &jump_table, k_tail_protocol_tcp);
++            preempt_guarded_tail_call(ctx, &jump_table, k_tail_protocol_tcp);
+         }
+     }
+ 
+diff --git a/bpf/generictracer/protocol_http.h b/bpf/generictracer/protocol_http.h
+index 524bd732..8e800019 100644
+--- a/bpf/generictracer/protocol_http.h
++++ b/bpf/generictracer/protocol_http.h
+@@ -15,6 +15,7 @@
+ #include <common/http_types.h>
+ #include <common/large_buffers.h>
+ #include <common/lw_thread.h>
++#include <common/preempt_guard.h>
+ #include <common/ringbuf.h>
+ #include <common/runtime.h>
+ #include <common/scratch_mem.h>
+@@ -444,7 +445,7 @@ static __always_inline int http_send_large_buffer(void *ctx,
+     state->direction = direction;
+     state->action = action;
+ 
+-    bpf_tail_call_static(ctx, &jump_table, k_tail_large_buf_emit_continue);
++    preempt_guarded_tail_call_static(ctx, &jump_table, k_tail_large_buf_emit_continue);
+     return 0;
+ }
+ 
+@@ -490,7 +491,7 @@ static __always_inline int __obi_continue2_protocol_http(struct pt_regs *ctx,
+ 
+ // k_tail_continue2_protocol_http
+ SEC("kprobe/http")
+-int obi_continue2_protocol_http(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_continue2_protocol_http, struct pt_regs *, ctx) {
+     call_protocol_args_t *args = protocol_args();
+     if (!args) {
+         return 0;
+@@ -612,14 +613,14 @@ done:
+     if (tp_loop_fn == bpf_strstr_tp_loop) {
+         return __obi_continue2_protocol_http(ctx, args, info, meta);
+     } else {
+-        bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
++        preempt_guarded_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
+         return 0;
+     }
+ }
+ 
+ // k_tail_continue_protocol_http_tp
+ SEC("kprobe/http")
+-int obi_continue_protocol_http_tp(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_continue_protocol_http_tp, struct pt_regs *, ctx) {
+     call_protocol_args_t *args = protocol_args();
+     if (!args) {
+         return 0;
+@@ -729,7 +730,7 @@ __obi_continue_protocol_http(struct pt_regs *ctx,
+     if (tp_loop_fn == bpf_strstr_tp_loop) {
+         return __obi_continue_protocol_http_tp(ctx, args, info, meta, tp_loop_fn);
+     } else {
+-        bpf_tail_call(ctx, &jump_table, k_tail_continue_protocol_http_tp);
++        preempt_guarded_tail_call(ctx, &jump_table, k_tail_continue_protocol_http_tp);
+         return 0;
+     }
+ 
+@@ -737,14 +738,14 @@ skip_tp:
+     if (tp_loop_fn == bpf_strstr_tp_loop) {
+         return __obi_continue2_protocol_http(ctx, args, info, meta);
+     } else {
+-        bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
++        preempt_guarded_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
+         return 0;
+     }
+ }
+ 
+ // k_tail_continue_protocol_http (legacy)
+ SEC("kprobe/http")
+-int obi_continue_protocol_http_legacy(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_continue_protocol_http_legacy, struct pt_regs *, ctx) {
+     call_protocol_args_t *args = protocol_args();
+     if (!args) {
+         return 0;
+@@ -760,7 +761,7 @@ int obi_continue_protocol_http_legacy(struct pt_regs *ctx) {
+ 
+ // k_tail_continue_protocol_http (new kernels)
+ SEC("kprobe/http")
+-int obi_continue_protocol_http(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_continue_protocol_http, struct pt_regs *, ctx) {
+     call_protocol_args_t *args = protocol_args();
+     if (!args) {
+         return 0;
+@@ -826,7 +827,7 @@ __obi_protocol_http(struct pt_regs *ctx, unsigned char *(*tp_loop_fn)(unsigned c
+         (info->start_monotime_ns == 0)) {
+ 
+         args->use_bpf_loop = tp_loop_fn == bpf_strstr_tp_loop;
+-        bpf_tail_call(ctx, &jump_table, k_tail_continue_protocol_http);
++        preempt_guarded_tail_call(ctx, &jump_table, k_tail_continue_protocol_http);
+ 
+         return 0;
+     } else if ((args->packet_type == PACKET_TYPE_RESPONSE) && (info->status == 0)) {
+@@ -869,19 +870,19 @@ __obi_protocol_http(struct pt_regs *ctx, unsigned char *(*tp_loop_fn)(unsigned c
+ 
+ // k_tail_protocol_http
+ SEC("kprobe/http")
+-int obi_protocol_http(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_protocol_http, struct pt_regs *, ctx) {
+     return __obi_protocol_http(ctx, bpf_strstr_tp_loop);
+ }
+ 
+ // k_tail_protocol_http
+ SEC("kprobe/http")
+-int obi_protocol_http_legacy(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_protocol_http_legacy, struct pt_regs *, ctx) {
+     return __obi_protocol_http(ctx, bpf_strstr_tp_loop__legacy);
+ }
+ 
+ // k_tail_large_buf_emit_continue
+ SEC("kprobe/http")
+-int obi_large_buf_emit_continue(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_large_buf_emit_continue, struct pt_regs *, ctx) {
+     large_buf_emit_state_t *state = (large_buf_emit_state_t *)large_buf_emit_state_mem();
+     if (!state || state->remaining_bytes == 0) {
+         return 0;
+@@ -924,7 +925,7 @@ int obi_large_buf_emit_continue(struct pt_regs *ctx) {
+ 
+     if (state->remaining_bytes > 0 && consumed_bytes > 0 &&
+         state->batch_iter < k_large_buf_max_batches) {
+-        bpf_tail_call_static(ctx, &jump_table, k_tail_large_buf_emit_continue);
++        preempt_guarded_tail_call_static(ctx, &jump_table, k_tail_large_buf_emit_continue);
+     }
+ 
+     return 0;
+diff --git a/bpf/generictracer/protocol_http2.h b/bpf/generictracer/protocol_http2.h
+index de13b397..dbf1331c 100644
+--- a/bpf/generictracer/protocol_http2.h
++++ b/bpf/generictracer/protocol_http2.h
+@@ -9,6 +9,7 @@
+ #include <common/globals.h>
+ #include <common/h2_defs.h>
+ #include <common/iov_iter.h>
++#include <common/preempt_guard.h>
+ #include <common/scratch_mem.h>
+ #include <common/http_buf_size.h>
+ #include <common/ringbuf.h>
+@@ -247,7 +248,8 @@ static __always_inline void http2_grpc_start(void *ctx,
+ 
+     if (!is_client) {
+         // Server finalize tail-called to stay under verifier insn limit on 5.15
+-        bpf_tail_call(ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server);
++        preempt_guarded_tail_call(
++            ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server);
+         return;
+     }
+ 
+@@ -371,14 +373,16 @@ handle_headers_frame(void *ctx, grpc_frames_ctx_t *g_ctx, const frame_header_t *
+         g_ctx->saved_buf_pos = g_ctx->pos;
+ 
+         if (http_grpc_stream_ended(frame)) {
+-            bpf_tail_call(ctx, &jump_table, k_tail_protocol_http2_grpc_handle_end_frame);
++            preempt_guarded_tail_call(
++                ctx, &jump_table, k_tail_protocol_http2_grpc_handle_end_frame);
+             return 0; // normally unreachable
+         }
+     } else {
+         // Not starting new grpc request, found end frame in a start, likely
+         // just terminating prev connection
+         if (!(is_flags_only_frame(frame) && http_grpc_stream_ended(frame))) {
+-            bpf_tail_call(ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame);
++            preempt_guarded_tail_call(
++                ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame);
+             return 0; // normally unreachable
+         }
+     }
+@@ -401,13 +405,13 @@ static __always_inline void handle_data_frame(void *ctx, grpc_frames_ctx_t *g_ct
+         g_ctx->stream.pid_conn = g_ctx->args.pid_conn;
+         g_ctx->stream.stream_id = g_ctx->saved_stream_id;
+ 
+-        bpf_tail_call(ctx, &jump_table, k_tail_protocol_http2_grpc_handle_end_frame);
++        preempt_guarded_tail_call(ctx, &jump_table, k_tail_protocol_http2_grpc_handle_end_frame);
+     }
+ }
+ 
+ // k_tail_protocol_http2_grpc_handle_start_frame
+ SEC("kprobe/http2")
+-int obi_protocol_http2_grpc_handle_start_frame(void *ctx) {
++int GUARDED_PROG(obi_protocol_http2_grpc_handle_start_frame, void *, ctx) {
+     (void)ctx;
+ 
+     grpc_frames_ctx_t *g_ctx = grpc_ctx();
+@@ -429,7 +433,7 @@ int obi_protocol_http2_grpc_handle_start_frame(void *ctx) {
+ // SERVER tail call: HPACK parse first (per-stream, no trace_map race), per-conn
+ // fallback if missed. Skips optional PADDED/PRIORITY prefix + trailing pad
+ SEC("kprobe/http2")
+-int obi_protocol_http2_grpc_handle_start_frame_server(void *ctx) {
++int GUARDED_PROG(obi_protocol_http2_grpc_handle_start_frame_server, void *, ctx) {
+     grpc_frames_ctx_t *g_ctx = grpc_ctx();
+     if (!g_ctx) {
+         return 0;
+@@ -448,7 +452,7 @@ int obi_protocol_http2_grpc_handle_start_frame_server(void *ctx) {
+     g_ctx->huff.next = k_h2_huff_then_finalize;
+ 
+     if (parse_hpack_traceparent(h2g_info->data + hpack_off, hpack_len, &tp_p->tp, &g_ctx->huff)) {
+-        bpf_tail_call(
++        preempt_guarded_tail_call(
+             ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server_finalize);
+         return 0;
+     }
+@@ -457,24 +461,25 @@ int obi_protocol_http2_grpc_handle_start_frame_server(void *ctx) {
+     if (g_bpf_loop_enabled) {
+         // name matched, value compressed: decoding needs its own program
+         if (g_ctx->huff.len) {
+-            bpf_tail_call(
++            preempt_guarded_tail_call(
+                 ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server_huffman);
+             return 0;
+         }
+ 
+-        bpf_tail_call(
++        preempt_guarded_tail_call(
+             ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server_huffscan);
+         return 0;
+     }
+ 
+-    bpf_tail_call(ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server_finalize);
++    preempt_guarded_tail_call(
++        ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server_finalize);
+     return 0;
+ }
+ 
+ // SERVER huffscan: an indexed name leaves nothing to fingerprint, so locate the compressed
+ // value alone; ranked above the connection heuristic, unlike the weak fingerprint in finalize
+ SEC("kprobe/http2")
+-int obi_protocol_http2_grpc_handle_start_frame_server_huffscan(void *ctx) {
++int GUARDED_PROG(obi_protocol_http2_grpc_handle_start_frame_server_huffscan, void *, ctx) {
+     grpc_frames_ctx_t *g_ctx = grpc_ctx();
+     if (!g_ctx) {
+         return 0;
+@@ -496,21 +501,22 @@ int obi_protocol_http2_grpc_handle_start_frame_server_huffscan(void *ctx) {
+     if (find_hpack_traceparent_huffman(h2g_info->data, hpack_off, hpack_len, &g_ctx->huff_scan)) {
+         g_ctx->huff.at = g_ctx->huff_scan.at[0];
+         g_ctx->huff.len = g_ctx->huff_scan.len[0];
+-        bpf_tail_call(
++        preempt_guarded_tail_call(
+             ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server_huffman);
+         return 0;
+     }
+ 
+-    bpf_tail_call(ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server_finalize);
++    preempt_guarded_tail_call(
++        ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server_finalize);
+     return 0;
+ }
+ 
+ // SERVER huffman: decodes the value the scan located, in its own tail-call program
+ SEC("kprobe/http2")
+-int obi_protocol_http2_grpc_handle_start_frame_server_huffman(void *ctx) {
++int GUARDED_PROG(obi_protocol_http2_grpc_handle_start_frame_server_huffman, void *, ctx) {
+     // needs bpf_loop; without it the block keeps its existing fallback
+     if (!g_bpf_loop_enabled) {
+-        bpf_tail_call(
++        preempt_guarded_tail_call(
+             ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server_finalize);
+         return 0;
+     }
+@@ -540,14 +546,14 @@ int obi_protocol_http2_grpc_handle_start_frame_server_huffman(void *ctx) {
+         h2g_info->data + hpack_off, hpack_len, &g_ctx->huff, w, out, &tp_p->tp);
+ 
+     if (g_ctx->huff.next == k_h2_huff_then_commit) {
+-        bpf_tail_call(
++        preempt_guarded_tail_call(
+             ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server_commit);
+         return 0;
+     }
+ 
+     // rejected candidate: name-matched falls back to the scan, scan advances
+     if (!g_ctx->huff_scan.done) {
+-        bpf_tail_call(
++        preempt_guarded_tail_call(
+             ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server_huffscan);
+         return 0;
+     }
+@@ -560,7 +566,7 @@ int obi_protocol_http2_grpc_handle_start_frame_server_huffman(void *ctx) {
+         g_ctx->huff.len = g_ctx->huff_scan.len[next_idx];
+         g_ctx->huff.next = k_h2_huff_then_finalize;
+         g_ctx->huff_scan.idx = next_idx;
+-        bpf_tail_call(
++        preempt_guarded_tail_call(
+             ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server_huffman);
+         return 0;
+     }
+@@ -569,17 +575,18 @@ int obi_protocol_http2_grpc_handle_start_frame_server_huffman(void *ctx) {
+     // falls through to finalize when the tail call budget runs out
+     if (g_ctx->huff_scan.count == k_h2_tp_huff_max_candidates) {
+         g_ctx->huff_scan.resume = g_ctx->huff_scan.at[k_h2_tp_huff_max_candidates - 1];
+-        bpf_tail_call(
++        preempt_guarded_tail_call(
+             ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server_huffscan);
+     }
+ 
+-    bpf_tail_call(ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server_finalize);
++    preempt_guarded_tail_call(
++        ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server_finalize);
+     return 0;
+ }
+ 
+ // SERVER finalize: dyn-table traceparent scan, then tail-calls commit
+ SEC("kprobe/http2")
+-int obi_protocol_http2_grpc_handle_start_frame_server_finalize(void *ctx) {
++int GUARDED_PROG(obi_protocol_http2_grpc_handle_start_frame_server_finalize, void *, ctx) {
+     grpc_frames_ctx_t *g_ctx = grpc_ctx();
+     if (!g_ctx) {
+         return 0;
+@@ -604,7 +611,8 @@ int obi_protocol_http2_grpc_handle_start_frame_server_finalize(void *ctx) {
+         (void)find_hpack_traceparent_value(h2g_info->data + hpack_off, hpack_len, &tp_p->tp);
+     }
+ 
+-    bpf_tail_call(ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server_commit);
++    preempt_guarded_tail_call(
++        ctx, &jump_table, k_tail_protocol_http2_grpc_handle_start_frame_server_commit);
+     return 0;
+ }
+ 
+@@ -612,7 +620,7 @@ int obi_protocol_http2_grpc_handle_start_frame_server_finalize(void *ctx) {
+ // set_trace_info_for_connection, server_or_client_trace, server_traces,
+ // ongoing_http2_grpc.
+ SEC("kprobe/http2")
+-int obi_protocol_http2_grpc_handle_start_frame_server_commit(void *ctx) {
++int GUARDED_PROG(obi_protocol_http2_grpc_handle_start_frame_server_commit, void *, ctx) {
+     (void)ctx;
+     grpc_frames_ctx_t *g_ctx = grpc_ctx();
+     if (!g_ctx) {
+@@ -636,7 +644,7 @@ int obi_protocol_http2_grpc_handle_start_frame_server_commit(void *ctx) {
+ 
+ // k_tail_protocol_http2_grpc_handle_end_frame
+ SEC("kprobe/http2")
+-int obi_protocol_http2_grpc_handle_end_frame(void *ctx) {
++int GUARDED_PROG(obi_protocol_http2_grpc_handle_end_frame, void *, ctx) {
+     (void)ctx;
+ 
+     grpc_frames_ctx_t *g_ctx = grpc_ctx();
+@@ -678,7 +686,7 @@ int obi_protocol_http2_grpc_handle_end_frame(void *ctx) {
+ // information to evaluate whether the parsed data is potentially a GRPC
+ // frame, and if so, we ship it to userspace for further processing.
+ SEC("kprobe/http2")
+-int obi_protocol_http2_grpc_frames(void *ctx) {
++int GUARDED_PROG(obi_protocol_http2_grpc_frames, void *, ctx) {
+     const u8 k_max_loop_iterations = 4; // the maximum number of the for loop iterations
+     const u8 k_loop_count = 3;          // the number of times we will retry the loop
+     const u8 k_iterations = k_max_loop_iterations * k_loop_count;
+@@ -735,7 +743,7 @@ int obi_protocol_http2_grpc_frames(void *ctx) {
+     // want to abuse bpf_tail_call as things can get slow (and limited), so we
+     // use this mirror-cracking hybrid approach
+     if (!g_ctx->terminate_search && g_ctx->iterations < k_iterations) {
+-        bpf_tail_call(ctx, &jump_table, k_tail_protocol_http2_grpc_frames);
++        preempt_guarded_tail_call(ctx, &jump_table, k_tail_protocol_http2_grpc_frames);
+         return 0; // unreachable, but bail safely if bpf_tail_call fails
+     }
+ 
+@@ -749,7 +757,7 @@ int obi_protocol_http2_grpc_frames(void *ctx) {
+ 
+ // k_tail_protocol_http2
+ SEC("kprobe/http2")
+-int obi_protocol_http2(void *ctx) {
++int GUARDED_PROG(obi_protocol_http2, void *, ctx) {
+     call_protocol_args_t *args = protocol_args();
+ 
+     if (!args) {
+@@ -770,7 +778,7 @@ int obi_protocol_http2(void *ctx) {
+     g_ctx->args = *args;
+     g_ctx->stream.pid_conn = args->pid_conn;
+ 
+-    bpf_tail_call(ctx, &jump_table, k_tail_protocol_http2_grpc_frames);
++    preempt_guarded_tail_call(ctx, &jump_table, k_tail_protocol_http2_grpc_frames);
+ 
+     return 0;
+ }
+diff --git a/bpf/generictracer/protocol_tcp.h b/bpf/generictracer/protocol_tcp.h
+index f22568cd..4ede611e 100644
+--- a/bpf/generictracer/protocol_tcp.h
++++ b/bpf/generictracer/protocol_tcp.h
+@@ -11,6 +11,7 @@
+ #include <common/http_types.h>
+ #include <common/large_buffers.h>
+ #include <common/lw_thread.h>
++#include <common/preempt_guard.h>
+ #include <common/protocol_defs.h>
+ #include <common/ringbuf.h>
+ #include <common/trace_helpers.h>
+@@ -426,7 +427,7 @@ static __always_inline void handle_unknown_tcp_connection(pid_connection_info_t
+ 
+ // k_tail_protocol_tcp
+ SEC("kprobe/tcp")
+-int obi_protocol_tcp(void *ctx) {
++int GUARDED_PROG(obi_protocol_tcp, void *, ctx) {
+     (void)ctx;
+ 
+     // it assumes that the actual protocol_args have been previously set
+diff --git a/bpf/generictracer/python.c b/bpf/generictracer/python.c
+index ca917fe3..87670ca3 100644
+--- a/bpf/generictracer/python.c
++++ b/bpf/generictracer/python.c
+@@ -14,6 +14,7 @@
+ #include <maps/python_thread_state.h>
+ 
+ #include <common/connection_info.h>
++#include <common/preempt_guard.h>
+ #include <common/python_task.h>
+ 
+ #include <generictracer/maps/pid_tid_to_conn.h>
+@@ -81,7 +82,7 @@ static __always_inline int update_current_task(u64 id, u64 task) {
+ }
+ 
+ SEC("uprobe/_asyncio.so:task_step_legacy")
+-int obi_uprobe_task_step_legacy(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_task_step_legacy, struct pt_regs *, ctx) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -93,7 +94,7 @@ int obi_uprobe_task_step_legacy(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/_asyncio.so:task_step")
+-int obi_uprobe_task_step(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_task_step, struct pt_regs *, ctx) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -105,7 +106,7 @@ int obi_uprobe_task_step(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/_asyncio.so:task_step_ret")
+-int obi_uprobe_task_step_ret(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_task_step_ret, struct pt_regs *, ctx) {
+     (void)ctx;
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+@@ -131,7 +132,7 @@ int obi_uprobe_task_step_ret(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/libpython3.:context_run")
+-int obi_uprobe_context_run(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_context_run, struct pt_regs *, ctx) {
+     const u64 id = bpf_get_current_pid_tgid();
+     if (!valid_pid(id)) {
+         return 0;
+@@ -166,7 +167,7 @@ int obi_uprobe_context_run(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uretprobe/libpython3.:context_run")
+-int obi_uretprobe_context_run(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uretprobe_context_run, struct pt_regs *, ctx) {
+     (void)ctx;
+     const u64 id = bpf_get_current_pid_tgid();
+     if (!valid_pid(id)) {
+@@ -199,7 +200,7 @@ int obi_uretprobe_context_run(struct pt_regs *ctx) {
+ //   1. Inside _asyncio_Task___init___impl when context=Py_None (task creation)
+ //   2. In asyncio.to_thread via contextvars.copy_context() (thread dispatch)
+ SEC("uprobe/libpython3.:PyContext_CopyCurrent")
+-int obi_uprobe_copy_context(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_copy_context, struct pt_regs *, ctx) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -234,7 +235,7 @@ int obi_uprobe_copy_context(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/_asyncio.so:_asyncio_Task___init__")
+-int obi_uprobe_task_init(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_task_init, struct pt_regs *, ctx) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -292,7 +293,7 @@ int obi_uprobe_task_init(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/_asyncio.so:_asyncio_Task___init___ret")
+-int obi_uprobe_task_init_ret(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_task_init_ret, struct pt_regs *, ctx) {
+     (void)ctx;
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+diff --git a/bpf/generictracer/ruby.c b/bpf/generictracer/ruby.c
+index b8486cf7..2017e772 100644
+--- a/bpf/generictracer/ruby.c
++++ b/bpf/generictracer/ruby.c
+@@ -8,6 +8,7 @@
+ #include <bpfcore/bpf_tracing.h>
+ 
+ #include <common/connection_info.h>
++#include <common/preempt_guard.h>
+ #include <common/puma_task_id.h>
+ #include <common/strings.h>
+ 
+@@ -83,7 +84,7 @@ the array:item pair for the work, rather than the file descriptors.
+  */
+ 
+ SEC("uprobe/ruby:rb_obj_call_init_kw")
+-int obi_rb_obj_call_init_kw(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_rb_obj_call_init_kw, struct pt_regs *, ctx) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+@@ -128,7 +129,7 @@ int obi_rb_obj_call_init_kw(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/ruby:rb_ary_shift")
+-int obi_rb_ary_shift(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_rb_ary_shift, struct pt_regs *, ctx) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     if (!valid_pid(id)) {
+diff --git a/bpf/gotracer/go_grpc.c b/bpf/gotracer/go_grpc.c
+index 7e6398d9..6c4728eb 100644
+--- a/bpf/gotracer/go_grpc.c
++++ b/bpf/gotracer/go_grpc.c
+@@ -21,6 +21,7 @@
+ #include <common/globals.h>
+ #include <common/go_grpc_client_conn.h>
+ #include <common/h2_defs.h>
++#include <common/preempt_guard.h>
+ #include <common/ringbuf.h>
+ #include <common/trace_helpers.h>
+ 
+@@ -64,7 +65,7 @@ static __always_inline void grpc_server_conn_info(void *tr, connection_info_t *c
+ }
+ 
+ SEC("uprobe/server_handleStream")
+-int obi_uprobe_server_handleStream(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_server_handleStream, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/server_handleStream ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("goroutine_addr=%lx", goroutine_addr);
+@@ -145,7 +146,7 @@ int obi_uprobe_server_handleStream(struct pt_regs *ctx) {
+ 
+ // Handles finding the connection information for http2 servers in grpc
+ SEC("uprobe/http2Server_operateHeaders")
+-int obi_uprobe_http2Server_operateHeaders(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_http2Server_operateHeaders, struct pt_regs *, ctx) {
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     void *tr = GO_PARAM1(ctx);
+     void *frame = GO_PARAM2(ctx);
+@@ -197,7 +198,7 @@ int obi_uprobe_http2Server_operateHeaders(struct pt_regs *ctx) {
+ 
+ // Handles finding the connection information for grpc ServeHTTP
+ SEC("uprobe/serverHandlerTransport_HandleStreams")
+-int obi_uprobe_server_handler_transport_handle_streams(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_server_handler_transport_handle_streams, struct pt_regs *, ctx) {
+     void *tr = GO_PARAM1(ctx);
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("=== uprobe/serverHandlerTransport_HandleStreams ===");
+@@ -227,7 +228,7 @@ int obi_uprobe_server_handler_transport_handle_streams(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/server_handleStream")
+-int obi_uprobe_server_handleStream_return(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_server_handleStream_return, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/server_handleStream ===");
+ 
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+@@ -325,7 +326,7 @@ done:
+ }
+ 
+ SEC("uprobe/transport_writeStatus")
+-int obi_uprobe_transport_writeStatus(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_transport_writeStatus, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/transport_writeStatus ===");
+ 
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+@@ -400,7 +401,7 @@ static __always_inline void clientConnStart(
+ }
+ 
+ SEC("uprobe/ClientConn_Invoke")
+-int obi_uprobe_ClientConn_Invoke(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_ClientConn_Invoke, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/ClientConn_Invoke ===");
+ 
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+@@ -418,7 +419,7 @@ int obi_uprobe_ClientConn_Invoke(struct pt_regs *ctx) {
+ 
+ // Same as ClientConn_Invoke, registers for the method are offset by one
+ SEC("uprobe/ClientConn_NewStream")
+-int obi_uprobe_ClientConn_NewStream(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_ClientConn_NewStream, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/ClientConn_NewStream ===");
+ 
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+@@ -508,7 +509,7 @@ done:
+ 
+ // Same as ClientConn_Invoke, registers for the method are offset by one
+ SEC("uprobe/ClientConn_NewStream")
+-int obi_uprobe_ClientConn_NewStream_return(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_ClientConn_NewStream_return, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/ClientConn_NewStream ===");
+ 
+     void *stream = GO_PARAM1(ctx);
+@@ -521,7 +522,7 @@ int obi_uprobe_ClientConn_NewStream_return(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/ClientConn_Close")
+-int obi_uprobe_ClientConn_Close(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_ClientConn_Close, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/ClientConn_Close ===");
+ 
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+@@ -536,7 +537,7 @@ int obi_uprobe_ClientConn_Close(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/ClientConn_Invoke")
+-int obi_uprobe_ClientConn_Invoke_return(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_ClientConn_Invoke_return, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/ClientConn_Invoke ===");
+ 
+     void *err = GO_PARAM1(ctx);
+@@ -550,7 +551,7 @@ int obi_uprobe_ClientConn_Invoke_return(struct pt_regs *ctx) {
+ 
+ // google.golang.org/grpc.(*clientStream).RecvMsg
+ SEC("uprobe/clientStream_RecvMsg")
+-int obi_uprobe_clientStream_RecvMsg_return(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_clientStream_RecvMsg_return, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/clientStream_RecvMsg ===");
+     void *err = (void *)GO_PARAM1(ctx);
+     return grpc_connect_done(ctx, err);
+@@ -559,7 +560,7 @@ int obi_uprobe_clientStream_RecvMsg_return(struct pt_regs *ctx) {
+ // The gRPC client stream is written on another goroutine in transport loopyWriter (controlbuf.go).
+ // We extract the stream ID when it's just created and make a mapping of it to our goroutine that's executing ClientConn.Invoke.
+ SEC("uprobe/transport_http2Client_NewStream")
+-int obi_uprobe_transport_http2Client_NewStream(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_transport_http2Client_NewStream, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/transport_http2Client_NewStream ===");
+ 
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+@@ -669,7 +670,7 @@ int obi_uprobe_transport_http2Client_NewStream(struct pt_regs *ctx) {
+ // can hit the uprobe at the same time on different CPUs and both will grab the same stream_id, i.e
+ // the nextID. We read what's the right stream id on exit.
+ SEC("uprobe/transport_http2Client_NewStream_ret")
+-int obi_uprobe_transport_http2Client_NewStream_Returns(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_transport_http2Client_NewStream_Returns, struct pt_regs *, ctx) {
+     if (!g_bpf_header_propagation) {
+         return 0;
+     }
+@@ -731,7 +732,7 @@ int obi_uprobe_transport_http2Client_NewStream_Returns(struct pt_regs *ctx) {
+ #define MAX_W_PTR_OFFSET 65535
+ 
+ SEC("uprobe/grpcFramerWriteHeaders")
+-int obi_uprobe_grpcFramerWriteHeaders(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_grpcFramerWriteHeaders, struct pt_regs *, ctx) {
+     if (!g_bpf_header_propagation) {
+         return 0;
+     }
+@@ -851,7 +852,7 @@ int obi_uprobe_grpcFramerWriteHeaders(struct pt_regs *ctx) {
+     66 // 1 + 1 + 8 + 1 + 55 = type byte + hpack_len_as_byte("traceparent") + strlen(hpack("traceparent")) + len_as_byte(55) + generated traceparent id
+ 
+ SEC("uprobe/grpcFramerWriteHeaders_returns")
+-int obi_uprobe_grpcFramerWriteHeaders_returns(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_grpcFramerWriteHeaders_returns, struct pt_regs *, ctx) {
+     if (!g_bpf_header_propagation || !g_bpf_probe_write_user_enabled) {
+         return 0;
+     }
+@@ -1007,7 +1008,7 @@ int obi_uprobe_grpcFramerWriteHeaders_returns(struct pt_regs *ctx) {
+ // the way out.
+ 
+ SEC("uprobe/controlBuffer_executeAndPut")
+-int obi_uprobe_grpc_controlBuffer_executeAndPut(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_grpc_controlBuffer_executeAndPut, struct pt_regs *, ctx) {
+     if (!g_bpf_header_propagation) {
+         return 0;
+     }
+@@ -1039,7 +1040,7 @@ int obi_uprobe_grpc_controlBuffer_executeAndPut(struct pt_regs *ctx) {
+ // Signature: (l *loopyWriter) originateStream(str *outStream, hdr *headerFrame)
+ // PARAM1=l, PARAM2=str, PARAM3=hdr. outStream.id is uint32 at offset 0.
+ SEC("uprobe/loopyWriter_originateStream")
+-int obi_uprobe_grpc_loopyWriter_originateStream(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_grpc_loopyWriter_originateStream, struct pt_regs *, ctx) {
+     if (!g_bpf_header_propagation) {
+         return 0;
+     }
+diff --git a/bpf/gotracer/go_kafka_go.c b/bpf/gotracer/go_kafka_go.c
+index df1ab66a..64302b82 100644
+--- a/bpf/gotracer/go_kafka_go.c
++++ b/bpf/gotracer/go_kafka_go.c
+@@ -18,6 +18,7 @@
+ #include <bpfcore/utils.h>
+ 
+ #include <common/common.h>
++#include <common/preempt_guard.h>
+ #include <common/ringbuf.h>
+ 
+ #include <gotracer/go_common.h>
+@@ -34,7 +35,7 @@
+ 
+ // Code for the produce messages path
+ SEC("uprobe/writer_write_messages")
+-int obi_uprobe_writer_write_messages(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_writer_write_messages, struct pt_regs *, ctx) {
+     void *goroutine_addr = (void *)GOROUTINE_PTR(ctx);
+     void *w_ptr = (void *)GO_PARAM1(ctx);
+     bpf_dbg_printk("=== uprobe/writer_write_messages ===");
+@@ -58,7 +59,7 @@ int obi_uprobe_writer_write_messages(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/writer_write_messages_ret")
+-int obi_uprobe_writer_write_messages_ret(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_writer_write_messages_ret, struct pt_regs *, ctx) {
+     void *goroutine_addr = (void *)GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("=== uprobe/writer_write_messages_ret ===");
+     bpf_dbg_printk("goroutine_addr=%llx", goroutine_addr);
+@@ -75,7 +76,7 @@ int obi_uprobe_writer_write_messages_ret(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/writer_produce")
+-int obi_uprobe_writer_produce(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_writer_produce, struct pt_regs *, ctx) {
+     void *goroutine_addr = (void *)GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("=== uprobe/writer_produce ===");
+     bpf_dbg_printk("goroutine_addr=%llx", goroutine_addr);
+@@ -124,7 +125,7 @@ int obi_uprobe_writer_produce(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/client_roundTrip")
+-int obi_uprobe_client_roundTrip(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_client_roundTrip, struct pt_regs *, ctx) {
+     void *goroutine_addr = (void *)GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("=== uprobe/client_roundTrip  ===");
+     bpf_dbg_printk("goroutine_addr=%llx", goroutine_addr);
+@@ -151,7 +152,7 @@ int obi_uprobe_client_roundTrip(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/protocol_RoundTrip")
+-int obi_uprobe_protocol_roundtrip(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_protocol_roundtrip, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/protocol_RoundTrip ===");
+     void *goroutine_addr = (void *)GOROUTINE_PTR(ctx);
+     void *rw_ptr = (void *)GO_PARAM2(ctx);
+@@ -184,7 +185,7 @@ int obi_uprobe_protocol_roundtrip(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/protocol_RoundTrip_ret")
+-int obi_uprobe_protocol_roundtrip_ret(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_protocol_roundtrip_ret, struct pt_regs *, ctx) {
+     void *goroutine_addr = (void *)GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("=== uprobe/protocol_RoundTrip_ret ===");
+     bpf_dbg_printk("goroutine_addr=%llx", goroutine_addr);
+@@ -241,7 +242,7 @@ int obi_uprobe_protocol_roundtrip_ret(struct pt_regs *ctx) {
+ 
+ // Code for the fetch messages path
+ SEC("uprobe/reader_read")
+-int obi_uprobe_reader_read(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_reader_read, struct pt_regs *, ctx) {
+     void *goroutine_addr = (void *)GOROUTINE_PTR(ctx);
+     void *r_ptr = (void *)GO_PARAM1(ctx);
+     void *conn = (void *)GO_PARAM5(ctx);
+@@ -290,7 +291,7 @@ int obi_uprobe_reader_read(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/reader_send_message")
+-int obi_uprobe_reader_send_message(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_reader_send_message, struct pt_regs *, ctx) {
+     void *goroutine_addr = (void *)GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("=== uprobe/reader_send_message ===");
+     bpf_dbg_printk("goroutine_addr=%llx", goroutine_addr);
+@@ -309,7 +310,7 @@ int obi_uprobe_reader_send_message(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/reader_read")
+-int obi_uprobe_reader_read_ret(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_reader_read_ret, struct pt_regs *, ctx) {
+     void *goroutine_addr = (void *)GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("=== uprobe/reader_read goroutine_addr=%llx ===", goroutine_addr);
+     go_addr_key_t g_key = {};
+diff --git a/bpf/gotracer/go_mongo.c b/bpf/gotracer/go_mongo.c
+index 6d298327..2c17aa74 100644
+--- a/bpf/gotracer/go_mongo.c
++++ b/bpf/gotracer/go_mongo.c
+@@ -18,6 +18,7 @@
+ #include <bpfcore/utils.h>
+ 
+ #include <common/common.h>
++#include <common/preempt_guard.h>
+ #include <common/ringbuf.h>
+ 
+ #include <gotracer/go_common.h>
+@@ -82,59 +83,59 @@ obi_uprobe_mongo_coll_op(struct pt_regs *ctx, const char *op, const u32 op_len)
+ }
+ 
+ SEC("uprobe/op_coll_insert")
+-int obi_uprobe_mongo_op_insert(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_mongo_op_insert, struct pt_regs *, ctx) {
+     return obi_uprobe_mongo_coll_op(ctx, insert, insert_size);
+ }
+ 
+ SEC("uprobe/op_coll_delete")
+-int obi_uprobe_mongo_op_delete(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_mongo_op_delete, struct pt_regs *, ctx) {
+     return obi_uprobe_mongo_coll_op(ctx, delete, delete_size);
+ }
+ 
+ SEC("uprobe/op_coll_find")
+-int obi_uprobe_mongo_op_find(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_mongo_op_find, struct pt_regs *, ctx) {
+     return obi_uprobe_mongo_coll_op(ctx, find, find_size);
+ }
+ 
+ SEC("uprobe/op_coll_drop")
+-int obi_uprobe_mongo_op_drop(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_mongo_op_drop, struct pt_regs *, ctx) {
+     return obi_uprobe_mongo_coll_op(ctx, drop, drop_size);
+ }
+ 
+ SEC("uprobe/op_coll_findAndModify")
+-int obi_uprobe_mongo_op_findAndModify(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_mongo_op_findAndModify, struct pt_regs *, ctx) {
+     return obi_uprobe_mongo_coll_op(ctx, findAndModify, findAndModify_size);
+ }
+ 
+ SEC("uprobe/op_coll_updateOrReplace")
+-int obi_uprobe_mongo_op_updateOrReplace(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_mongo_op_updateOrReplace, struct pt_regs *, ctx) {
+     return obi_uprobe_mongo_coll_op(ctx, updateOrReplace, updateOrReplace_size);
+ }
+ 
+ SEC("uprobe/op_coll_aggregate")
+-int obi_uprobe_mongo_op_aggregate(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_mongo_op_aggregate, struct pt_regs *, ctx) {
+     return obi_uprobe_mongo_coll_op(ctx, aggregate, aggregate_size);
+ }
+ 
+ SEC("uprobe/op_coll_countDocuments")
+-int obi_uprobe_mongo_op_countDocuments(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_mongo_op_countDocuments, struct pt_regs *, ctx) {
+     return obi_uprobe_mongo_coll_op(ctx, countDocuments, countDocuments_size);
+ }
+ 
+ SEC("uprobe/op_coll_estimatedDocumentCount")
+-int obi_uprobe_mongo_op_estimatedDocumentCount(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_mongo_op_estimatedDocumentCount, struct pt_regs *, ctx) {
+     return obi_uprobe_mongo_coll_op(ctx, estimatedDocumentCount, estimatedDocumentCount_size);
+ }
+ 
+ SEC("uprobe/op_coll_distinct")
+-int obi_uprobe_mongo_op_distinct(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_mongo_op_distinct, struct pt_regs *, ctx) {
+     return obi_uprobe_mongo_coll_op(ctx, distinct, distinct_size);
+ }
+ 
+ // go.mongodb.org/mongo-driver/x/mongo/driver.Operation.Execute
+ // func (op Operation) Execute(ctx context.Context) error
+ SEC("uprobe/op_execute")
+-int obi_uprobe_mongo_op_execute(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_mongo_op_execute, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/op_execute ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("goroutine_addr=%lx", goroutine_addr);
+@@ -193,7 +194,7 @@ int obi_uprobe_mongo_op_execute(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/op_execute")
+-int obi_uprobe_mongo_op_execute_ret(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_mongo_op_execute_ret, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/op_execute ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("goroutine_addr=%lx", goroutine_addr);
+diff --git a/bpf/gotracer/go_net.c b/bpf/gotracer/go_net.c
+index 81cd4db8..ac0df9ac 100644
+--- a/bpf/gotracer/go_net.c
++++ b/bpf/gotracer/go_net.c
+@@ -25,6 +25,7 @@
+ #include <common/go_addr_key.h>
+ #include <common/http_types.h>
+ #include <common/lw_thread.h>
++#include <common/preempt_guard.h>
+ #include <common/protocol_defs.h>
+ #include <common/tp_info.h>
+ #include <common/trace_helpers.h>
+@@ -53,7 +54,7 @@
+ #include <shared/obi_ctx.h>
+ 
+ SEC("uprobe/netFdRead")
+-int obi_uprobe_netFdRead(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_netFdRead, struct pt_regs *, ctx) {
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk(
+         "=== uprobe/netFdRead goroutine_addr=%lx, fd=%llx === ", goroutine_addr, GO_PARAM1(ctx));
+@@ -85,13 +86,13 @@ int obi_uprobe_netFdRead(struct pt_regs *ctx) {
+         return 0;
+     }
+ 
+-    bpf_tail_call(ctx, &jump_table, k_tail_continue_netfd_read);
++    preempt_guarded_tail_call(ctx, &jump_table, k_tail_continue_netfd_read);
+     return 0;
+ }
+ 
+ // k_tail_continue_netfd_read
+ SEC("uprobe/netFdRead_cont")
+-int obi_continue_netfd_read(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_continue_netfd_read, struct pt_regs *, ctx) {
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("=== uprobe/netFdRead_cont goroutine_addr=%lx ===", goroutine_addr);
+ 
+@@ -136,7 +137,7 @@ int obi_continue_netfd_read(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/netFdReadRet")
+-int obi_uprobe_netFdReadRet(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_netFdReadRet, struct pt_regs *, ctx) {
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("=== uprobe/proc netFD read returns goroutine %lx === ", goroutine_addr);
+ 
+@@ -190,7 +191,7 @@ int obi_uprobe_netFdReadRet(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/netFdWrite")
+-int obi_uprobe_netFdWrite(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_netFdWrite, struct pt_regs *, ctx) {
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+@@ -254,7 +255,7 @@ int obi_uprobe_netFdWrite(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/netFdClose")
+-int obi_uprobe_netFdClose(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_netFdClose, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/proc netFD close goroutine %lx === ", GOROUTINE_PTR(ctx));
+ 
+     void *fd_ptr = GO_PARAM1(ctx);
+diff --git a/bpf/gotracer/go_net_tls.c b/bpf/gotracer/go_net_tls.c
+index be670d62..a0b0dbee 100644
+--- a/bpf/gotracer/go_net_tls.c
++++ b/bpf/gotracer/go_net_tls.c
+@@ -30,6 +30,7 @@
+ #include <gotracer/go_net_common.h>
+ 
+ #include <logger/bpf_dbg.h>
++#include <common/preempt_guard.h>
+ 
+ static __always_inline void *unwrap_conn(void *conn) {
+     void *conn_conn = 0;
+@@ -40,7 +41,7 @@ static __always_inline void *unwrap_conn(void *conn) {
+ }
+ 
+ SEC("uprobe/cryptoTlsRead")
+-int obi_uprobe_cryptoTlsRead(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_cryptoTlsRead, struct pt_regs *, ctx) {
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     go_addr_key_t g_key = {};
+     go_addr_key_from_id(&g_key, goroutine_addr);
+@@ -108,7 +109,7 @@ int obi_uprobe_cryptoTlsRead(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/cryptoTlsRead")
+-int obi_uprobe_cryptoTlsReadRet(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_cryptoTlsReadRet, struct pt_regs *, ctx) {
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     go_addr_key_t g_key = {};
+     go_addr_key_from_id(&g_key, goroutine_addr);
+@@ -168,7 +169,7 @@ done:
+ }
+ 
+ SEC("uprobe/cryptoTlsWrite")
+-int obi_uprobe_cryptoTlsWrite(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_cryptoTlsWrite, struct pt_regs *, ctx) {
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     go_addr_key_t g_key = {};
+     go_addr_key_from_id(&g_key, goroutine_addr);
+@@ -256,7 +257,7 @@ int obi_uprobe_cryptoTlsWrite(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/cryptoTlsWrite")
+-int obi_uprobe_cryptoTlsWriteRet(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_cryptoTlsWriteRet, struct pt_regs *, ctx) {
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     go_addr_key_t g_key = {};
+     go_addr_key_from_id(&g_key, goroutine_addr);
+diff --git a/bpf/gotracer/go_nethttp.c b/bpf/gotracer/go_nethttp.c
+index c848eeca..c59eb493 100644
+--- a/bpf/gotracer/go_nethttp.c
++++ b/bpf/gotracer/go_nethttp.c
+@@ -24,6 +24,7 @@
+ #include <common/connection_info.h>
+ #include <common/globals.h>
+ #include <common/http_types.h>
++#include <common/preempt_guard.h>
+ #include <common/protocol_defs.h>
+ #include <common/ringbuf.h>
+ #include <common/scratch_mem.h>
+@@ -67,7 +68,7 @@ SCRATCH_MEM_TYPED(round_trip_client_data, http_client_data_t)
+ // func (mux *ServeMux) ServeHTTP(w ResponseWriter, r *Request)
+ // or other functions sharing the same signature (e.g http.Handler.ServeHTTP)
+ SEC("uprobe/ServeHTTP")
+-int obi_uprobe_ServeHTTP(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_ServeHTTP, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/ServeHTTP ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+ 
+@@ -160,7 +161,7 @@ done:
+ }
+ 
+ SEC("uprobe/findHandler")
+-int obi_uprobe_findHandlerRet(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_findHandlerRet, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/findHandler ===");
+ 
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+@@ -185,7 +186,7 @@ int obi_uprobe_findHandlerRet(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/muxSetMatch")
+-int obi_uprobe_muxSetMatch(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_muxSetMatch, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/muxSetMatch ===");
+ 
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+@@ -213,7 +214,7 @@ int obi_uprobe_muxSetMatch(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/ginGetValue")
+-int obi_uprobe_ginGetValueRet(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_ginGetValueRet, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/ginGetValue ===");
+ 
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+@@ -264,7 +265,7 @@ int obi_uprobe_ginGetValueRet(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/readRequest")
+-int obi_uprobe_readRequestStart(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_readRequestStart, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/readRequest ===");
+ 
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+@@ -320,7 +321,7 @@ int obi_uprobe_readRequestStart(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/readRequest")
+-int obi_uprobe_readRequestReturns(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_readRequestReturns, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/readRequest ===");
+ 
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+@@ -350,7 +351,7 @@ int obi_uprobe_readRequestReturns(struct pt_regs *ctx) {
+ 
+ // Handles finding the connection information for http2 servers in grpc
+ SEC("uprobe/http2Server_processHeaders")
+-int obi_uprobe_http2Server_processHeaders(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_http2Server_processHeaders, struct pt_regs *, ctx) {
+     void *sc_ptr = GO_PARAM1(ctx);
+     void *frame = GO_PARAM2(ctx);
+     bpf_dbg_printk("=== uprobe/http2Server_processHeaders sc_ptr=%lx ===", sc_ptr);
+@@ -404,7 +405,7 @@ static __always_inline unsigned char *match_header(
+ }
+ 
+ SEC("uprobe/readMimeHeader")
+-int obi_uprobe_readMimeHeader(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_readMimeHeader, struct pt_regs *, ctx) {
+     if (!g_bpf_loop_enabled) {
+         return 0;
+     }
+@@ -488,7 +489,7 @@ int obi_uprobe_readMimeHeader(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/readContinuedLineSlice")
+-int obi_uprobe_readContinuedLineSliceReturns(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_readContinuedLineSliceReturns, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/readContinuedLineSlice ===");
+ 
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+@@ -625,7 +626,7 @@ done:
+ }
+ 
+ SEC("uprobe/ServeHTTP_ret")
+-int obi_uprobe_ServeHTTPReturns(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_ServeHTTPReturns, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/ServeHTTP_ret ===");
+     return serve_http_returns(ctx);
+ }
+@@ -736,14 +737,14 @@ static __always_inline void roundTripStartHelper(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/roundTrip")
+-int obi_uprobe_roundTrip(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_roundTrip, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/roundTrip ===");
+     roundTripStartHelper(ctx);
+     return 0;
+ }
+ 
+ SEC("uprobe/roundTrip_return")
+-int obi_uprobe_roundTripReturn(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_roundTripReturn, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/roundTrip_return ===");
+ 
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+@@ -875,7 +876,7 @@ struct {
+ } ongoing_write_subsets SEC(".maps");
+ 
+ SEC("uprobe/header_writeSubset")
+-int obi_uprobe_writeSubset(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_writeSubset, struct pt_regs *, ctx) {
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+ 
+     go_addr_key_t gw_key = {};
+@@ -1112,18 +1113,18 @@ done:
+ // out of the program loaded on pre-5.17 kernels, which would otherwise reject it
+ // with "number of funcs in func_info doesn't match number of subprogs".
+ SEC("uprobe/header_writeSubset_returns")
+-int obi_uprobe_writeSubset_returns(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_writeSubset_returns, struct pt_regs *, ctx) {
+     return on_writeSubset_returns(ctx, bpf_strstr_tp_loop);
+ }
+ 
+ SEC("uprobe/header_writeSubset_returns_legacy")
+-int obi_uprobe_writeSubset_returns_legacy(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_writeSubset_returns_legacy, struct pt_regs *, ctx) {
+     return on_writeSubset_returns(ctx, bpf_strstr_tp_loop__legacy);
+ }
+ 
+ // HTTP 2.0 server support
+ SEC("uprobe/http2ResponseWriterStateWriteHeader")
+-int obi_uprobe_http2ResponseWriterStateWriteHeader(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_http2ResponseWriterStateWriteHeader, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/http2ResponseWriterStateWriteHeader ===");
+ 
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+@@ -1163,7 +1164,7 @@ int obi_uprobe_http2ResponseWriterStateWriteHeader(struct pt_regs *ctx) {
+ 
+ // HTTP 2.0 server support
+ SEC("uprobe/http2serverConn_runHandler")
+-int obi_uprobe_http2serverConn_runHandler(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_http2serverConn_runHandler, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/http2serverConn_runHandler ===");
+ 
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+@@ -1286,7 +1287,7 @@ static __always_inline void setup_http2_client_conn(void *goroutine_addr,
+ }
+ 
+ SEC("uprobe/http2RoundTrip")
+-int obi_uprobe_http2RoundTrip(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_http2RoundTrip, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/http2RoundTrip ===");
+     // we use the usual start helper, just like for normal http calls, but we later save
+     // more context, like the streamID
+@@ -1298,7 +1299,7 @@ int obi_uprobe_http2RoundTrip(struct pt_regs *ctx) {
+ // This runs on separate go routine called from the round tripper, but we need it
+ // to establish the correct connection information and stream_id
+ SEC("uprobe/http2WriteHeaders")
+-int obi_uprobe_http2WriteHeaders(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_http2WriteHeaders, struct pt_regs *, ctx) {
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     void *cc_ptr = GO_PARAM1(ctx);
+     const u64 stream_id = (u64)GO_PARAM2(ctx);
+@@ -1314,7 +1315,7 @@ int obi_uprobe_http2WriteHeaders(struct pt_regs *ctx) {
+ // to establish the correct connection information and stream_id. The Go vendored
+ // version has its own offsets.
+ SEC("uprobe/http2WriteHeadersVendored")
+-int obi_uprobe_http2WriteHeaders_vendored(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_http2WriteHeaders_vendored, struct pt_regs *, ctx) {
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     void *cc_ptr = GO_PARAM1(ctx);
+     const u64 stream_id = (u64)GO_PARAM2(ctx);
+@@ -1405,7 +1406,7 @@ on_http2FramerWriteHeaders(struct pt_regs *ctx, off_table_t *ot, u64 stream_id)
+ }
+ 
+ SEC("uprobe/golang_http2FramerWriteHeaders")
+-int obi_uprobe_golang_http2FramerWriteHeaders(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_golang_http2FramerWriteHeaders, struct pt_regs *, ctx) {
+     if (!g_bpf_header_propagation) {
+         return 0;
+     }
+@@ -1424,7 +1425,7 @@ int obi_uprobe_golang_http2FramerWriteHeaders(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/net_http2FramerWriteHeaders")
+-int obi_uprobe_net_http2FramerWriteHeaders(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_net_http2FramerWriteHeaders, struct pt_regs *, ctx) {
+     if (!g_bpf_header_propagation) {
+         return 0;
+     }
+@@ -1440,7 +1441,7 @@ int obi_uprobe_net_http2FramerWriteHeaders(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/http2FramerWriteHeaders_returns")
+-int obi_uprobe_http2FramerWriteHeaders_returns(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_http2FramerWriteHeaders_returns, struct pt_regs *, ctx) {
+     if (!g_bpf_header_propagation || !g_bpf_probe_write_user_enabled) {
+         return 0;
+     }
+@@ -1561,7 +1562,7 @@ done:
+ }
+ 
+ SEC("uprobe/connServe")
+-int obi_uprobe_connServe(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_connServe, struct pt_regs *, ctx) {
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("=== uprobe/connServe goroutine_addr=%lx ===", goroutine_addr);
+ 
+@@ -1575,7 +1576,7 @@ int obi_uprobe_connServe(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/jsonrpcReadRequestHeader")
+-int obi_uprobe_jsonrpcReadRequestHeader(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_jsonrpcReadRequestHeader, struct pt_regs *, ctx) {
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("=== uprobe/jsonrpcReadRequestHeader ===");
+     bpf_dbg_printk("goroutine_addr=%lx", goroutine_addr);
+@@ -1596,7 +1597,7 @@ int obi_uprobe_jsonrpcReadRequestHeader(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/jsonrpcReadRequestHeaderRet")
+-int obi_uprobe_jsonrpcReadRequestHeaderReturns(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_jsonrpcReadRequestHeaderReturns, struct pt_regs *, ctx) {
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("=== uprobe/jsonrpcReadRequestHeaderRet ===");
+     bpf_dbg_printk("goroutine_addr=%lx", goroutine_addr);
+@@ -1641,7 +1642,7 @@ int obi_uprobe_jsonrpcReadRequestHeaderReturns(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/connServeRet")
+-int obi_uprobe_connServeRet(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_connServeRet, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/connServeRet ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+ 
+@@ -1657,7 +1658,7 @@ int obi_uprobe_connServeRet(struct pt_regs *ctx) {
+ // Its receiver is the persistConn, which the netFD write that follows on this same
+ // goroutine cannot see.
+ SEC("uprobe/persistConnWriterWrite")
+-int obi_uprobe_persistConnWriterWrite(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_persistConnWriterWrite, struct pt_regs *, ctx) {
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     const u64 pc = (u64)GO_PARAM1(ctx);
+ 
+@@ -1676,7 +1677,7 @@ int obi_uprobe_persistConnWriterWrite(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/persistConnRoundTrip")
+-int obi_uprobe_persistConnRoundTrip(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_persistConnRoundTrip, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/persistConnRoundTrip ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     off_table_t *ot = get_offsets_table();
+diff --git a/bpf/gotracer/go_redis.c b/bpf/gotracer/go_redis.c
+index db9ad756..be0932bd 100644
+--- a/bpf/gotracer/go_redis.c
++++ b/bpf/gotracer/go_redis.c
+@@ -17,6 +17,7 @@
+ 
+ #include <bpfcore/utils.h>
+ 
++#include <common/preempt_guard.h>
+ #include <common/ringbuf.h>
+ #include <common/scratch_mem.h>
+ 
+@@ -50,7 +51,7 @@ static __always_inline void setup_request(void *goroutine_addr) {
+ // github.com/redis/go-redis/v9.(*baseClient)._process
+ // func (c *baseClient) _process(ctx context.Context, cmd Cmder, attempt int) (bool, error) {
+ SEC("uprobe/redis_process")
+-int obi_uprobe_redis_process(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_redis_process, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/redis_process ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("goroutine_addr=%lx", goroutine_addr);
+@@ -68,7 +69,7 @@ int obi_uprobe_redis_process(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/redis_process")
+-int obi_uprobe_redis_process_ret(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_redis_process_ret, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/redis_process ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("goroutine_addr=%lx", goroutine_addr);
+@@ -98,7 +99,7 @@ int obi_uprobe_redis_process_ret(struct pt_regs *ctx) {
+ //	ctx context.Context, timeout time.Duration, fn func(wr *proto.Writer) error,
+ // ) error
+ SEC("uprobe/redis_with_writer")
+-int obi_uprobe_redis_with_writer(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_redis_with_writer, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/redis_with_writer ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     void *cn_ptr = GO_PARAM1(ctx);
+@@ -143,7 +144,7 @@ int obi_uprobe_redis_with_writer(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/redis_with_writer")
+-int obi_uprobe_redis_with_writer_ret(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_redis_with_writer_ret, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/redis_with_writer ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     off_table_t *ot = get_offsets_table();
+diff --git a/bpf/gotracer/go_runtime.c b/bpf/gotracer/go_runtime.c
+index d32829dd..11125acf 100644
+--- a/bpf/gotracer/go_runtime.c
++++ b/bpf/gotracer/go_runtime.c
+@@ -18,6 +18,7 @@
+ #include <bpfcore/utils.h>
+ 
+ #include <common/common.h>
++#include <common/preempt_guard.h>
+ #include <common/ringbuf.h>
+ #include <common/trace_helpers.h>
+ 
+@@ -605,7 +606,7 @@ struct {
+ } newproc1 SEC(".maps");
+ 
+ SEC("uprobe/go_runtime_metrics")
+-int obi_uprobe_go_runtime_metrics(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_go_runtime_metrics, struct pt_regs *, ctx) {
+     (void)ctx;
+ 
+     pid_info key = {};
+@@ -674,7 +675,7 @@ int obi_uprobe_go_runtime_metrics(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/go_runtime_gc_goal")
+-int obi_uprobe_go_runtime_gc_goal(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_go_runtime_gc_goal, struct pt_regs *, ctx) {
+     pid_info key = {};
+     task_pid(&key);
+ 
+@@ -689,7 +690,7 @@ int obi_uprobe_go_runtime_gc_goal(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/runtime_newproc1")
+-int obi_uprobe_runtime_newproc1(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_runtime_newproc1, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/runtime_newproc1 ===");
+     void *creator_goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("creator_goroutine_addr=%lx", creator_goroutine_addr);
+@@ -707,7 +708,7 @@ int obi_uprobe_runtime_newproc1(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/runtime_newproc1_return")
+-int obi_uprobe_runtime_newproc1_return(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_runtime_newproc1_return, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/runtime_newproc1_return ===");
+     void *creator_goroutine_addr = GOROUTINE_PTR(ctx);
+     const u64 pid_tid = bpf_get_current_pid_tgid();
+@@ -1178,32 +1179,32 @@ done:
+ }
+ 
+ SEC("uprobe/runtime_chansend1")
+-int obi_uprobe_runtime_chansend1(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_runtime_chansend1, struct pt_regs *, ctx) {
+     return channel_send_start(ctx);
+ }
+ 
+ SEC("uprobe/runtime_chansend1_return")
+-int obi_uprobe_runtime_chansend1_return(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_runtime_chansend1_return, struct pt_regs *, ctx) {
+     return channel_send_return(ctx);
+ }
+ 
+ SEC("uprobe/runtime_chanrecv1")
+-int obi_uprobe_runtime_chanrecv1(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_runtime_chanrecv1, struct pt_regs *, ctx) {
+     return channel_recv_start(ctx);
+ }
+ 
+ SEC("uprobe/runtime_chanrecv1_return")
+-int obi_uprobe_runtime_chanrecv1_return(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_runtime_chanrecv1_return, struct pt_regs *, ctx) {
+     return channel_recv_return(ctx);
+ }
+ 
+ SEC("uprobe/runtime_chanrecv2")
+-int obi_uprobe_runtime_chanrecv2(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_runtime_chanrecv2, struct pt_regs *, ctx) {
+     return channel_recv_start(ctx);
+ }
+ 
+ SEC("uprobe/runtime_chanrecv2_return")
+-int obi_uprobe_runtime_chanrecv2_return(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_runtime_chanrecv2_return, struct pt_regs *, ctx) {
+     return channel_recv_return(ctx);
+ }
+ 
+@@ -1265,7 +1266,7 @@ enum offsets : u8 {
+ };
+ 
+ SEC("uprobe/runtime.mstart1")
+-int obi_uprobe_runtime_mstart1(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_runtime_mstart1, struct pt_regs *, ctx) {
+     const u64 pid_tgid = bpf_get_current_pid_tgid();
+ 
+     void *g = (void *)GOROUTINE_PTR(ctx);
+@@ -1281,7 +1282,7 @@ int obi_uprobe_runtime_mstart1(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/runtime.mexit")
+-int obi_uprobe_runtime_mexit(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_runtime_mexit, struct pt_regs *, ctx) {
+     void *g = (void *)GOROUTINE_PTR(ctx);
+     void *m = NULL;
+ 
+@@ -1296,7 +1297,7 @@ int obi_uprobe_runtime_mexit(struct pt_regs *ctx) {
+ 
+ // gp *g, oldval, newval uint32
+ SEC("uprobe/runtime.casgstatus")
+-int obi_uprobe_runtime_casgstatus(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_runtime_casgstatus, struct pt_regs *, ctx) {
+     const u64 pid_tgid = bpf_get_current_pid_tgid();
+ 
+     void *g = (void *)GO_PARAM1(ctx);
+diff --git a/bpf/gotracer/go_sarama.c b/bpf/gotracer/go_sarama.c
+index 08281a79..c3de713c 100644
+--- a/bpf/gotracer/go_sarama.c
++++ b/bpf/gotracer/go_sarama.c
+@@ -18,6 +18,7 @@
+ #include <bpfcore/utils.h>
+ #include <bpfcore/bpf_builtins.h>
+ 
++#include <common/preempt_guard.h>
+ #include <common/ringbuf.h>
+ 
+ #include <gotracer/go_common.h>
+@@ -29,7 +30,7 @@
+ #include <logger/bpf_dbg.h>
+ 
+ SEC("uprobe/sarama_sendInternal")
+-int obi_uprobe_sarama_sendInternal(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_sarama_sendInternal, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/sarama_sendInternal ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     void *b_ptr = GO_PARAM1(ctx);
+@@ -62,7 +63,7 @@ int obi_uprobe_sarama_sendInternal(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/sarama_broker_write")
+-int obi_uprobe_sarama_broker_write(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_sarama_broker_write, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/sarama_broker_write ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+ 
+@@ -150,7 +151,7 @@ int obi_uprobe_sarama_broker_write(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/sarama_response_promise_handle")
+-int obi_uprobe_sarama_response_promise_handle(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_sarama_response_promise_handle, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/sarama_response_promise_handle ===");
+ 
+     void *p = GO_PARAM1(ctx);
+diff --git a/bpf/gotracer/go_sdk.c b/bpf/gotracer/go_sdk.c
+index 2e065f09..fad8da4b 100644
+--- a/bpf/gotracer/go_sdk.c
++++ b/bpf/gotracer/go_sdk.c
+@@ -26,6 +26,7 @@
+ #include <common/globals.h>
+ #include <common/http_types.h>
+ #include <common/map_sizing.h>
++#include <common/preempt_guard.h>
+ #include <common/ringbuf.h>
+ #include <common/scratch_mem.h>
+ 
+@@ -413,17 +414,17 @@ static __always_inline int tracer_start(struct pt_regs *ctx, u8 check_delegate)
+ }
+ 
+ SEC("uprobe/tracer_Start")
+-int obi_uprobe_tracer_Start(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_tracer_Start, struct pt_regs *, ctx) {
+     return tracer_start(ctx, 0);
+ }
+ 
+ SEC("uprobe/tracer_Start_global")
+-int obi_uprobe_tracer_Start_global(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_tracer_Start_global, struct pt_regs *, ctx) {
+     return tracer_start(ctx, 1);
+ }
+ 
+ SEC("uprobe/tracer_new_span")
+-int obi_uprobe_tracer_NewSpan(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_tracer_NewSpan, struct pt_regs *, ctx) {
+     u64 generation = 0;
+     if (!go_auto_target_generation(&generation) || !g_bpf_probe_write_user_enabled ||
+         !span_context_offsets_available()) {
+@@ -526,7 +527,7 @@ static __always_inline void read_attrs_from_opts(otel_span_t *span, void *opts_p
+ // func (t *tracer) Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span)
+ // https://github.com/open-telemetry/opentelemetry-go/blob/98b32a6c3a87fbee5d34c063b9096f416b250897/internal/global/trace.go#L149
+ SEC("uprobe/tracer_Start_ret")
+-int obi_uprobe_tracer_Start_Returns(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_tracer_Start_Returns, struct pt_regs *, ctx) {
+     void *goroutine_addr = (void *)GOROUTINE_PTR(ctx);
+     void *span_ptr = (void *)GO_PARAM4(ctx);
+     bpf_dbg_printk("=== uprobe/tracer_Start_ret ===");
+@@ -590,7 +591,7 @@ int obi_uprobe_tracer_Start_Returns(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/auto_sdk_tracer_start")
+-int obi_uprobe_auto_sdk_tracer_Start(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_auto_sdk_tracer_Start, struct pt_regs *, ctx) {
+     u64 generation = 0;
+     if (!go_auto_target_generation(&generation) || !g_bpf_probe_write_user_enabled ||
+         !span_context_offsets_available()) {
+@@ -643,7 +644,7 @@ int obi_uprobe_auto_sdk_tracer_Start(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/auto_sdk_context_with_value")
+-int obi_uprobe_auto_sdk_context_WithValue(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_auto_sdk_context_WithValue, struct pt_regs *, ctx) {
+     if (!g_bpf_probe_write_user_enabled) {
+         return 0;
+     }
+@@ -675,7 +676,7 @@ int obi_uprobe_auto_sdk_context_WithValue(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/nonRecordingSpan_End")
+-int obi_uprobe_nonRecordingSpan_End(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_nonRecordingSpan_End, struct pt_regs *, ctx) {
+     void *span_ptr = (void *)GO_PARAM1(ctx);
+     bpf_dbg_printk("=== uprobe/nonRecordingSpan_End ===");
+     bpf_dbg_printk("goroutine_addr=%lx, span_ptr=%lx", (void *)GOROUTINE_PTR(ctx), span_ptr);
+@@ -712,7 +713,7 @@ int obi_uprobe_nonRecordingSpan_End(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/auto_sdk_span_ended")
+-int obi_uprobe_auto_sdk_span_Ended(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_auto_sdk_span_Ended, struct pt_regs *, ctx) {
+     void *span_ptr = GO_PARAM1(ctx);
+ 
+     go_addr_key_t s_key = {};
+@@ -768,7 +769,7 @@ int obi_uprobe_auto_sdk_span_Ended(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/span_SetStatus")
+-int obi_uprobe_SetStatus(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_SetStatus, struct pt_regs *, ctx) {
+     void *span_ptr = (void *)GO_PARAM1(ctx);
+     bpf_dbg_printk("=== uprobe/span_SetStatus ===");
+     bpf_dbg_printk("goroutine_addr=%lx, span_ptr=%lx", (void *)GOROUTINE_PTR(ctx), span_ptr);
+@@ -799,7 +800,7 @@ int obi_uprobe_SetStatus(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/span_SetAttributes")
+-int obi_uprobe_SetAttributes(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_SetAttributes, struct pt_regs *, ctx) {
+     void *span_ptr = (void *)GO_PARAM1(ctx);
+     bpf_dbg_printk("=== uprobe/span_SetAttributes ===");
+     bpf_dbg_printk("goroutine_addr=%lx, span_ptr=%lx", (void *)GOROUTINE_PTR(ctx), span_ptr);
+@@ -820,7 +821,7 @@ int obi_uprobe_SetAttributes(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/span_SetName")
+-int obi_uprobe_SetName(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_SetName, struct pt_regs *, ctx) {
+     void *span_ptr = (void *)GO_PARAM1(ctx);
+     bpf_dbg_printk("=== uprobe/span_SetName ===");
+     bpf_dbg_printk("goroutine_addr=%lx, span_ptr=%lx", (void *)GOROUTINE_PTR(ctx), span_ptr);
+@@ -851,7 +852,7 @@ int obi_uprobe_SetName(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/span_RecordError")
+-int obi_uprobe_RecordError(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_RecordError, struct pt_regs *, ctx) {
+     void *span_ptr = (void *)GO_PARAM1(ctx);
+     bpf_dbg_printk("=== uprobe/span_RecordError ===");
+     bpf_dbg_printk("goroutine_addr=%lx, span_ptr=%lx", (void *)GOROUTINE_PTR(ctx), span_ptr);
+diff --git a/bpf/gotracer/go_sql.c b/bpf/gotracer/go_sql.c
+index 734c4ddf..d8351a6a 100644
+--- a/bpf/gotracer/go_sql.c
++++ b/bpf/gotracer/go_sql.c
+@@ -21,6 +21,7 @@
+ #include <bpfcore/vmlinux.h>
+ #include <bpfcore/bpf_helpers.h>
+ 
++#include <common/preempt_guard.h>
+ #include <common/ringbuf.h>
+ 
+ #include <gotracer/go_common.h>
+@@ -370,7 +371,7 @@ static __always_inline int process_sql_return(void *goroutine_addr, u8 error, u8
+ }
+ 
+ SEC("uprobe/queryDC")
+-int obi_uprobe_queryDC(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_queryDC, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/queryDC ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("goroutine_addr=%lx", goroutine_addr);
+@@ -384,7 +385,7 @@ int obi_uprobe_queryDC(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/pgx_Query")
+-int obi_uprobe_pgx_Query(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_pgx_Query, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/pgx_Query ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("goroutine_add=%lx", goroutine_addr);
+@@ -398,7 +399,7 @@ int obi_uprobe_pgx_Query(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/pgx_Exec")
+-int obi_uprobe_pgx_Exec(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_pgx_Exec, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/pgx_Exec ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("goroutine_addr=%lx", goroutine_addr);
+@@ -412,7 +413,7 @@ int obi_uprobe_pgx_Exec(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/execDC")
+-int obi_uprobe_execDC(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_execDC, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/execDC ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("goroutine_addr=%lx", goroutine_addr);
+@@ -426,7 +427,7 @@ int obi_uprobe_execDC(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/queryDC")
+-int obi_uprobe_queryReturn(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_queryReturn, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/queryDC ret ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("goroutine_addr=%lx", goroutine_addr);
+@@ -437,7 +438,7 @@ int obi_uprobe_queryReturn(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/pgx_Query_return")
+-int obi_uprobe_pgx_Query_return(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_pgx_Query_return, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/pgx_Query_return ===");
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+     bpf_dbg_printk("goroutine_addr=%lx", goroutine_addr);
+@@ -448,7 +449,7 @@ int obi_uprobe_pgx_Query_return(struct pt_regs *ctx) {
+ }
+ 
+ SEC("uprobe/pq_network_return")
+-int obi_uprobe_pq_network_return(struct pt_regs *ctx) {
++int GUARDED_PROG(obi_uprobe_pq_network_return, struct pt_regs *, ctx) {
+     bpf_dbg_printk("=== uprobe/pq_network_return ===");
+ 
+     void *goroutine_addr = GOROUTINE_PTR(ctx);
+diff --git a/bpf/gpuevent/cuda.c b/bpf/gpuevent/cuda.c
+index bd8f7a55..253a26a6 100644
+--- a/bpf/gpuevent/cuda.c
++++ b/bpf/gpuevent/cuda.c
+@@ -18,6 +18,7 @@
+ #include <logger/bpf_dbg.h>
+ 
+ #include <pid/pid.h>
++#include <common/preempt_guard.h>
+ 
+ const cuda_kernel_launch_t *unused_gpu __attribute__((unused));
+ const cuda_malloc_t *unused_gpu1 __attribute__((unused));
+@@ -32,7 +33,8 @@ enum {
+ };
+ 
+ SEC("uprobe/cudaLaunchKernel")
+-int BPF_KPROBE(obi_cuda_launch, u64 func_off, u64 grid_xy, u64 grid_z, u64 block_xy, u64 block_z) {
++int BPF_KPROBE_GUARDED(
++    obi_cuda_launch, u64 func_off, u64 grid_xy, u64 grid_z, u64 block_xy, u64 block_z) {
+     (void)ctx;
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+@@ -64,7 +66,7 @@ int BPF_KPROBE(obi_cuda_launch, u64 func_off, u64 grid_xy, u64 grid_z, u64 block
+ }
+ 
+ SEC("uprobe/cudaMalloc")
+-int BPF_KPROBE(obi_cuda_malloc, void **devPtr, size_t size) {
++int BPF_KPROBE_GUARDED(obi_cuda_malloc, void **devPtr, size_t size) {
+     (void)ctx;
+     (void)devPtr;
+ 
+@@ -91,7 +93,7 @@ int BPF_KPROBE(obi_cuda_malloc, void **devPtr, size_t size) {
+ }
+ 
+ SEC("uprobe/cudaMemcpyAsync")
+-int BPF_KPROBE(obi_cuda_memcpy, void *dst, void *src, size_t size, u8 kind) {
++int BPF_KPROBE_GUARDED(obi_cuda_memcpy, void *dst, void *src, size_t size, u8 kind) {
+     (void)ctx;
+     (void)dst;
+     (void)src;
+@@ -120,7 +122,7 @@ int BPF_KPROBE(obi_cuda_memcpy, void *dst, void *src, size_t size, u8 kind) {
+ }
+ 
+ SEC("uprobe/cudaGraphLaunch")
+-int BPF_KPROBE(obi_graph_launch) {
++int BPF_KPROBE_GUARDED(obi_graph_launch) {
+     (void)ctx;
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+diff --git a/scripts/lint-preempt-guard.sh b/scripts/lint-preempt-guard.sh
+new file mode 100755
+index 00000000..e5ee2e8c
+--- /dev/null
++++ b/scripts/lint-preempt-guard.sh
+@@ -0,0 +1,80 @@
++#!/usr/bin/env bash
++# Copyright The OpenTelemetry Authors
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++#
++# Programs that can execute in uprobe context must disable preemption for
++# their body (see bpf/common/preempt_guard.h). This lint enforces, for every
++# bpf/ subsystem that attaches at least one uprobe:
++#
++#   1. every kprobe/kretprobe/uprobe/uretprobe/usdt program is defined
++#      through one of the guarded wrappers (GUARDED_PROG or
++#      BPF_[KU](RET)PROBE_GUARDED), and
++#   2. tail calls go through preempt_guarded_tail_call(_static), never
++#      through bpf_tail_call(_static) directly.
++#
++# Kprobe-only subsystems are skipped: those contexts already run with
++# preemption disabled and share no stack frames with uprobe programs.
++set -euo pipefail
++
++ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++readonly ROOT_DIR
++
++readonly UPROBE_SEC='^SEC\("u(ret)?probe(/|")|^SEC\("usdt/'
++
++errors=0
++
++check_file() {
++    local file="$1"
++
++    local out
++    out="$(awk '
++        pending && NF && $1 !~ /^(\/\/|\/?\*)/ {
++            if ($0 !~ /(GUARDED_PROG|BPF_[KU](RET)?PROBE_GUARDED)\(/)
++                printf "%s:%d: program after %s is not guarded\n", FILENAME, NR, sec
++            pending = 0
++        }
++        /^SEC\("(k|u)(ret)?probe(\/|")/ || /^SEC\("usdt\// { pending = 1; sec = $0 }
++        /bpf_tail_call(_static)?\(/ && $1 !~ /^(\/\/|\*)/ && !/preempt_guarded_tail_call/ {
++            printf "%s:%d: raw tail call, use preempt_guarded_tail_call(_static)\n", FILENAME, NR
++        }
++    ' "${file}")"
++
++    if [ -n "${out}" ]; then
++        echo "${out}"
++        errors=1
++    fi
++}
++
++cd "${ROOT_DIR}"
++
++for dir in bpf/*/; do
++    case "${dir}" in
++    bpf/bpfcore/ | bpf/NOTICES/ | bpf/tests/) continue ;;
++    esac
++
++    if ! grep -rlqE "${UPROBE_SEC}" "${dir}" --include='*.c' --include='*.h' 2>/dev/null; then
++        continue
++    fi
++
++    while IFS= read -r file; do
++        check_file "${file}"
++    done < <(find "${dir}" -type f \( -name '*.c' -o -name '*.h' \))
++done
++
++if [ "${errors}" -ne 0 ]; then
++    echo ""
++    echo "Unguarded programs can corrupt per-CPU BPF private stacks on kernels"
++    echo "6.13+ with preemption enabled. See bpf/common/preempt_guard.h."
++    exit 1
++fi

@@ -1,16 +1,16 @@
 diff --git a/pkg/internal/ebpf/tpinjector/tpinjector.go b/pkg/internal/ebpf/tpinjector/tpinjector.go
-index 2ac375f..68936c8 100644
+index ed85ca9..14c0e41 100644
 --- a/pkg/internal/ebpf/tpinjector/tpinjector.go
 +++ b/pkg/internal/ebpf/tpinjector/tpinjector.go
-@@ -37,6 +37,7 @@ type Tracer struct {
+@@ -45,6 +45,7 @@ type Tracer struct {
  	fionreadOnce            sync.Once
  	fionreadBroken          bool
  	fionreadFixupEnabled    bool
 +	propagationDisabled     bool
- }
- 
- func New(cfg *obi.Config) *Tracer {
-@@ -53,6 +54,29 @@ func (p *Tracer) AllowPID(app.PID, uint32, *exec.FileInfo) {}
+ 	iterMu                  sync.Mutex
+ 	itersOnce               sync.Once
+ 	seenNetns               *expirable.LRU[uint64, struct{}]
+@@ -130,6 +131,29 @@ func (p *Tracer) AllowPID(pid app.PID, _ uint32, _ *exec.FileInfo) {
  func (p *Tracer) BlockPID(app.PID, uint32) {}
  
  func (p *Tracer) LoadSpecs() ([]*ebpfcommon.SpecBundle, error) {
@@ -40,7 +40,7 @@ index 2ac375f..68936c8 100644
  	spec, err := LoadBpf()
  	if err != nil {
  		return nil, err
-@@ -81,23 +105,13 @@ func (p *Tracer) LoadSpecs() ([]*ebpfcommon.SpecBundle, error) {
+@@ -158,23 +182,13 @@ func (p *Tracer) LoadSpecs() ([]*ebpfcommon.SpecBundle, error) {
  		})
  	}
  
@@ -71,7 +71,7 @@ index 2ac375f..68936c8 100644
  	}
  
  	return bundles, nil
-@@ -174,6 +188,10 @@ func (p *Tracer) SocketFilters() []*ebpf.Program {
+@@ -251,6 +265,10 @@ func (p *Tracer) SocketFilters() []*ebpf.Program {
  }
  
  func (p *Tracer) SockMsgs() []ebpfcommon.SockMsg {
@@ -82,7 +82,7 @@ index 2ac375f..68936c8 100644
  	return []ebpfcommon.SockMsg{
  		{
  			Program:  p.bpfObjects.ObiPacketExtender,
-@@ -184,6 +202,10 @@ func (p *Tracer) SockMsgs() []ebpfcommon.SockMsg {
+@@ -261,6 +279,10 @@ func (p *Tracer) SockMsgs() []ebpfcommon.SockMsg {
  }
  
  func (p *Tracer) SockOps() []ebpfcommon.SockOps {
@@ -93,15 +93,34 @@ index 2ac375f..68936c8 100644
  	return []ebpfcommon.SockOps{
  		{
  			Program:  p.bpfObjects.ObiSockmapTracker,
-@@ -197,6 +219,11 @@ func (p *Tracer) Iters() []*ebpfcommon.Iter {
- 		return p.iters
- 	}
- 
-+	if p.propagationDisabled {
-+		p.iters = []*ebpfcommon.Iter{}
-+		return p.iters
-+	}
+@@ -272,6 +294,11 @@ func (p *Tracer) SockOps() []ebpfcommon.SockOps {
+ // Iters is called from both AllowPID (discovery) and Run (pipeline) goroutines
+ func (p *Tracer) Iters() []*ebpfcommon.Iter {
+ 	p.itersOnce.Do(func() {
++		if p.propagationDisabled {
++			p.iters = []*ebpfcommon.Iter{}
++			return
++		}
 +
- 	major, minor := ebpfcommon.KernelVersion()
+ 		major, minor := ebpfcommon.KernelVersion()
  
- 	if major < 6 || (major == 6 && minor < 4) {
+ 		if major < 6 || (major == 6 && minor < 4) {
+diff --git a/pkg/internal/ebpf/tpinjector/tpinjector_test.go b/pkg/internal/ebpf/tpinjector/tpinjector_test.go
+index 8007dde..9864d2c 100644
+--- a/pkg/internal/ebpf/tpinjector/tpinjector_test.go
++++ b/pkg/internal/ebpf/tpinjector/tpinjector_test.go
+@@ -20,6 +20,14 @@ import (
+ // tpinjector has two BPF specs: the main tpinjector (spec 0) and the sock iterator (spec 1).
+ const expectedSpecCount = 2
+ 
++func TestTracer_PropagationDisabled(t *testing.T) {
++	tracer := &Tracer{propagationDisabled: true}
++
++	assert.Empty(t, tracer.SockMsgs())
++	assert.Empty(t, tracer.SockOps())
++	assert.Empty(t, tracer.Iters())
++}
++
+ func TestTracer_Constants(t *testing.T) {
+ 	tests := []struct {
+ 		name                string
