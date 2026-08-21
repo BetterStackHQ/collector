@@ -41,7 +41,10 @@ jobs:
           git clone --depth 1 --branch "$OBI_VERSION" \
             https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation.git "$RUNNER_TEMP/obi"
           test "$(git -C "$RUNNER_TEMP/obi" rev-parse HEAD)" = "$OBI_REVISION"
-          git -C "$RUNNER_TEMP/obi" apply "$GITHUB_WORKSPACE"/ebpf/patches/obi/*.patch
+          for p in "$GITHUB_WORKSPACE"/ebpf/patches/obi/*.patch; do
+            [ -e "$p" ] || break
+            git -C "$RUNNER_TEMP/obi" apply "$p"
+          done
 
       - name: Check preemption guards
         working-directory: ${{ runner.temp }}/obi
@@ -63,7 +66,7 @@ jobs:
         working-directory: ${{ runner.temp }}/obi
         run: go mod download
 
-      - name: Test patched package
+      - name: Test tpinjector package
         working-directory: ${{ runner.temp }}/obi
         run: go test -race ./pkg/internal/ebpf/tpinjector
 

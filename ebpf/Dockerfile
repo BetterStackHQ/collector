@@ -56,15 +56,15 @@ FROM ghcr.io/open-telemetry/obi-generator:0.2.15@sha256:9cbb1b567377d5779b04e6bc
 RUN apk add --no-cache bash git make
 ARG TARGETARCH
 ARG CUSTOMIZATION_TAG="betterstack"
-ARG OBI_VERSION="v0.11.0"
-ARG OBI_REVISION="2f8603c7232a93e798f3673a15d8077e6a509047"
+ARG OBI_VERSION="v0.12.1"
+ARG OBI_REVISION="f0500c2a4407ee15b8c682d0c72d25c6c598b00c"
 RUN git clone --depth 1 --branch ${OBI_VERSION} \
     https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation.git /tmp/obi && \
     test "$(git -C /tmp/obi rev-parse HEAD)" = "${OBI_REVISION}"
 WORKDIR /tmp/obi
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
-COPY ebpf/patches/obi/*.patch /tmp/obi-patches/
-RUN git apply /tmp/obi-patches/*.patch
+COPY ebpf/patches/obi/ /tmp/obi-patches/
+RUN for p in /tmp/obi-patches/*.patch; do [ -e "$p" ] || break; git apply "$p"; done
 ENV GOARCH=${TARGETARCH}
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
