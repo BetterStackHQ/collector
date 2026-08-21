@@ -1,0 +1,120 @@
+diff --git a/bpf/tpinjector/tpinjector.c b/bpf/tpinjector/tpinjector.c
+index e2e4bc6..90323d2 100644
+--- a/bpf/tpinjector/tpinjector.c
++++ b/bpf/tpinjector/tpinjector.c
+@@ -210,11 +210,19 @@ h2_resume_after(struct sk_msg_md *msg, tailcall_ctx *t_ctx, u32 next_pos) {
+ // SETTINGS frame as the next bytes on the raw socket; instead the peer's framing
+ // header follows. Injecting into such a stream shifts the outer framing and
+ // corrupts the connection, so those sockets must be rejected.
++//
++// The same storage also parks sockets that legally leave HTTP/1 through an
++// Upgrade handshake: after "HTTP/1.1 101 Switching Protocols" (kubectl
++// port-forward SPDY/3.1, WebSockets) every byte on the socket belongs to the
++// tunneled protocol, and payload that merely looks like an HTTP request start
++// must not have a traceparent spliced in, that would shift the post-upgrade
++// framing and desync the tunnel.
+ enum {
+     k_h2_sock_none = 0,      // nothing seen yet
+     k_h2_sock_preface = 1,   // preface seen, awaiting the mandatory SETTINGS frame
+     k_h2_sock_confirmed = 2, // SETTINGS seen after preface — genuine HTTP/2, inject
+     k_h2_sock_rejected = 3,  // post-preface bytes were not SETTINGS — never inject
++    k_h2_sock_upgraded = 4,  // 101 Switching Protocols seen: never inject
+ };
+ 
+ static __always_inline u8 h2_sock_state(struct sk_msg_md *msg) {
+@@ -298,13 +306,43 @@ static __always_inline void set_h2_sock_state(struct sk_msg_md *msg, u8 state) {
+ }
+ 
+ // True while the socket is in an HTTP/2 scanning state (preface seen or
+-// confirmed) — i.e. detect_h2 should keep driving its state machine. Rejected
+-// and never-seen sockets are excluded.
++// confirmed) — i.e. detect_h2 should keep driving its state machine. Rejected,
++// upgraded, and never-seen sockets are excluded.
+ static __always_inline bool is_h2_socket(struct sk_msg_md *msg) {
+     const u8 state = h2_sock_state(msg);
+     return state == k_h2_sock_preface || state == k_h2_sock_confirmed;
+ }
+ 
++// Terminal classifications: no payload on this socket may ever be injected into.
++static __always_inline bool sock_is_never_inject(u8 state) {
++    return state == k_h2_sock_rejected || state == k_h2_sock_upgraded;
++}
++
++enum { k_http1_101_check_len = 16 };
++
++// Status line of the server side of an HTTP/1 Upgrade handshake:
++// "HTTP/1.<digit> 101" followed by a space or CR.
++static __always_inline bool is_http1_101_response(const unsigned char *d,
++                                                  const unsigned char *end) {
++    return d && (void *)d + k_http1_101_check_len <= (void *)end && d[0] == 'H' && d[1] == 'T' &&
++           d[2] == 'T' && d[3] == 'P' && d[4] == '/' && d[5] == '1' && d[6] == '.' &&
++           d[7] >= '0' && d[7] <= '9' && d[8] == ' ' && d[9] == '1' && d[10] == '0' &&
++           d[11] == '1' && (d[12] == ' ' || d[12] == '\r');
++}
++
++// One-shot probe for a connection leaving HTTP/1: a 101 is the last HTTP/1
++// message a server ever sends on a connection (RFC 9110 15.2.2), so a single
++// match classifies the socket for good. Mirrors the is_http2_preface pull.
++static __always_inline bool http1_upgrade_completed(struct sk_msg_md *msg) {
++    if (msg->size < k_http1_101_check_len) {
++        return false;
++    }
++    if (bpf_msg_pull_data(msg, 0, k_http1_101_check_len, 0) != 0) {
++        return false;
++    }
++    return is_http1_101_response(msg->data, msg->data_end);
++}
++
+ #ifndef ENOMSG
+ #define ENOMSG 42
+ #endif
+@@ -1014,10 +1052,10 @@ static __always_inline void wrap_http2_traceparent(struct sk_msg_md *msg,
+     if (msg->size < k_h2_frame_header_len) {
+         return;
+     }
+-    // A socket previously classified as non-HTTP/2 (e.g. a yamux-tunneled
+-    // stream) must never be injected into, regardless of what the generic
+-    // tracer thinks.
+-    if (h2_sock_state(msg) == k_h2_sock_rejected) {
++    // A socket previously classified as never-inject (a yamux-tunneled
++    // stream, or a connection upgraded away from HTTP/1) must not be touched,
++    // regardless of what the generic tracer thinks.
++    if (sock_is_never_inject(h2_sock_state(msg))) {
+         return;
+     }
+     if (is_h2_socket(msg)) {
+@@ -1103,6 +1141,25 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+         return SK_PASS;
+     }
+ 
++    // A connection that legally left HTTP/1 via 101 Switching Protocols
++    // (kubectl port-forward SPDY/3.1, WebSockets) carries an opaque tunnel
++    // from then on: injecting into tunneled bytes that merely resemble an
++    // HTTP request start shifts the post-upgrade framing and desyncs the
++    // tunnel. Park the socket when the 101 goes out and never touch it again.
++    // Sibling of the genuine-HTTP/2 preface guard (issue #2706). Caveat: a
++    // 101 upgrading to h2c parks a genuinely HTTP/2 connection too, which
++    // loses propagation but never corrupts, and is rare.
++    const u8 sock_state = h2_sock_state(msg);
++
++    if (sock_is_never_inject(sock_state)) {
++        return SK_PASS;
++    }
++
++    if (sock_state == k_h2_sock_none && http1_upgrade_completed(msg)) {
++        set_h2_sock_state(msg, k_h2_sock_upgraded);
++        return SK_PASS;
++    }
++
+     tailcall_ctx *t_ctx = tailcall_ctx_mem();
+ 
+     if (!t_ctx) {
+@@ -1389,7 +1446,7 @@ int obi_packet_extender_detect_h2(struct sk_msg_md *msg) {
+     u32 pos = t_ctx->h2_scan_pos;
+ 
+     u8 state = h2_sock_state(msg);
+-    if (state == k_h2_sock_rejected) {
++    if (sock_is_never_inject(state)) {
+         return SK_PASS;
+     }
+ 
