@@ -34,12 +34,12 @@ services:
       - /:/host:ro
       - /var/lib/better-stack:/var/lib/better-stack
 
-  ebpf:
+  collector-host:
     build:
       context: .
       dockerfile: ebpf/Dockerfile
     image: ghcr.io/betterstackhq/collector-ebpf:latest
-    container_name: better-stack-ebpf
+    container_name: better-stack-collector-host
     restart: always
     init: true
     stop_signal: SIGTERM

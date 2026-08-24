@@ -30,14 +30,14 @@ jobs:
         fi
         echo "✓ Diff is exactly 3 lines as expected"
 
-    - name: check ebpf section matches between docker-compose.yml and swarm/docker-compose.swarm-ebpf.yml
+    - name: check collector-host section matches between docker-compose.yml and swarm/docker-compose.swarm-ebpf.yml
       run: |
-        # Extract ebpf service from docker-compose.yml, excluding build: and depends_on: sections
+        # Extract collector-host service from docker-compose.yml, excluding build: and depends_on: sections
         # These sections are not applicable in the swarm ebpf file
         # Also exclude INSTALLED_AS= line as it's intentionally different (docker vs swarm)
         awk '
           BEGIN { in_ebpf = 0; skip_block = 0; block_indent = 0 }
-          /^  ebpf:$/ { in_ebpf = 1; next }
+          /^  collector-host:$/ { in_ebpf = 1; next }
           in_ebpf == 1 {
             # Skip build: and depends_on: blocks (4 spaces = service property level)
             if (/^    build:/ || /^    depends_on:/) {
@@ -64,28 +64,28 @@ jobs:
           }
         ' docker-compose.yml > /tmp/ebpf-main.yml
 
-        # Extract ebpf service from swarm file (skip header comments and services: line)
+        # Extract collector-host service from swarm file (skip header comments and services: line)
         # Also exclude INSTALLED_AS= line as it's intentionally different (docker vs swarm)
         awk '
           BEGIN { in_ebpf = 0 }
-          /^  ebpf:$/ { in_ebpf = 1; next }
+          /^  collector-host:$/ { in_ebpf = 1; next }
           /INSTALLED_AS=/ { next }
           in_ebpf == 1 { print }
         ' swarm/docker-compose.swarm-ebpf.yml > /tmp/ebpf-swarm.yml
 
         # Compare the extracted sections
-        echo "=== docker-compose.yml ebpf section (excluding build/depends_on) ==="
+        echo "=== docker-compose.yml collector-host section (excluding build/depends_on) ==="
         cat /tmp/ebpf-main.yml
         echo ""
-        echo "=== swarm/docker-compose.swarm-ebpf.yml ebpf section ==="
+        echo "=== swarm/docker-compose.swarm-ebpf.yml collector-host section ==="
         cat /tmp/ebpf-swarm.yml
         echo ""
 
         if ! diff -q /tmp/ebpf-main.yml /tmp/ebpf-swarm.yml > /dev/null; then
-          echo "ERROR: ebpf sections do not match!"
+          echo "ERROR: collector-host sections do not match!"
           echo ""
           echo "=== Differences ==="
           diff /tmp/ebpf-main.yml /tmp/ebpf-swarm.yml || true
           exit 1
         fi
-        echo "✓ ebpf sections match between docker-compose.yml and swarm/docker-compose.swarm-ebpf.yml"
+        echo "✓ collector-host sections match between docker-compose.yml and swarm/docker-compose.swarm-ebpf.yml"

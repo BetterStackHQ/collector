@@ -1,5 +1,5 @@
 # eBPF container for Docker Swarm nodes
-# Deploy with: docker compose -f docker-compose.swarm-ebpf.yml -p better-stack-ebpf up -d
+# Deploy with: docker compose -f docker-compose.swarm-ebpf.yml -p better-stack-collector-host up -d
 #
 # This runs outside of Docker Swarm as a regular docker-compose service because eBPF agent requires:
 # - network_mode: host (for eBPF network tracing)
@@ -9,9 +9,9 @@
 # These options are not supported in Docker Swarm services.
 
 services:
-  ebpf:
+  collector-host:
     image: ghcr.io/betterstackhq/collector-ebpf:latest
-    container_name: better-stack-ebpf
+    container_name: better-stack-collector-host
     restart: always
     init: true
     stop_signal: SIGTERM

@@ -19,7 +19,7 @@ docker compose up
 Tail collector logs:
 
 - Collector container: `docker exec -it better-stack-collector bash -c "tail -f /var/log/supervisor/*"`
-- eBPF container: `docker logs -f better-stack-ebpf`
+- Host agent container: `docker logs -f better-stack-collector-host`
 
 ## Development troubleshooting
 
