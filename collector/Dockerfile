@@ -59,9 +59,9 @@ RUN mkdir -p /versions/0-default \
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
 ENV CLUSTER_COLLECTOR=false
-ENV COLLECTOR_VERSION=1.1.35
+ENV COLLECTOR_VERSION=1.1.36
 ENV VECTOR_VERSION=0.47.0
-ENV OBI_VERSION=0.12.1
+ENV OBI_VERSION=0.12.2
 ENV CLUSTER_AGENT_VERSION=1.6.1
 
 # The environment variable TINI_SUBREAPER=true is related to Tini, which is the init system being used in this Docker container.
