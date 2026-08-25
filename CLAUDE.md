@@ -87,7 +87,7 @@ On container start:
 
 ### Container Naming Conventions
 
-- **Docker Compose** (install.sh): containers named `better-stack-collector` and `better-stack-ebpf` (hyphens)
+- **Docker Compose** (install.sh): containers named `better-stack-collector` and `better-stack-collector-host` (hyphens); older names `better-stack-ebpf` and `better-stack-beyla` are removed on upgrade
 - **Docker Swarm** (deploy-to-swarm.sh): service appears as `better-stack_collector` (underscore, from stack name `better-stack` + service `collector`)
 
 Both install.sh and deploy-to-swarm.sh check for the other's naming convention to prevent double-installation.

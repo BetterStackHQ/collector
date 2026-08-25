@@ -290,7 +290,10 @@ if [ "$COMPOSE_CMD" = "docker-compose" ]; then
     $COMPOSE_CMD -p better-stack-collector stop -t 90 || true
 fi
 
-# Stop old better-stack-beyla container if it exists (for upgrades from older versions)
+# Stop old container names if they exist (for upgrades from older versions:
+# the privileged sidecar was previously named better-stack-ebpf, and before that better-stack-beyla)
+docker stop better-stack-ebpf 2>/dev/null || true
+docker rm better-stack-ebpf 2>/dev/null || true
 docker stop better-stack-beyla 2>/dev/null || true
 docker rm better-stack-beyla 2>/dev/null || true
 

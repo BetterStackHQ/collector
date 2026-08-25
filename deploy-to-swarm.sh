@@ -424,19 +424,21 @@ deploy_ebpf_to_node() {
         export HOSTNAME=\$(hostname)
         export ENABLE_DOCKERPROBE="$enable_dockerprobe"
 
-        # Stop old better-stack-beyla service if it exists (for upgrades from older versions)
-        echo "Stopping old better-stack-beyla service if present..."
+        # Stop old project names if present (for upgrades from older versions:
+        # the agent was previously deployed as better-stack-ebpf, and before that better-stack-beyla)
+        echo "Stopping old better-stack-ebpf/better-stack-beyla services if present..."
+        \$COMPOSE_CMD -p better-stack-ebpf down 2>/dev/null || true
         \$COMPOSE_CMD -p better-stack-beyla down 2>/dev/null || true
 
         # Pull and start eBPF agent
         echo "Pulling eBPF image..."
-        \$COMPOSE_CMD -f docker-compose.yml -p better-stack-ebpf pull
+        \$COMPOSE_CMD -f docker-compose.yml -p better-stack-collector-host pull
 
         echo "Starting eBPF agent..."
-        \$COMPOSE_CMD -f docker-compose.yml -p better-stack-ebpf up -d
+        \$COMPOSE_CMD -f docker-compose.yml -p better-stack-collector-host up -d
 
         echo "Checking eBPF agent status..."
-        docker ps --filter "name=better-stack-ebpf" --format "table {{.Names}}\t{{.Status}}"
+        docker ps --filter "name=better-stack-collector-host" --format "table {{.Names}}\t{{.Status}}"
 EOF
     then
         print_green "✓ eBPF agent installed on $node"
@@ -457,16 +459,20 @@ uninstall_ebpf_from_node() {
 
         echo "Stopping and removing eBPF agent container..."
 
-        # Try docker-compose first (handle both old and new project names)
+        # Try docker-compose first (handle current and old project names)
         if docker compose version &> /dev/null; then
+            docker compose -p better-stack-collector-host down 2>/dev/null || true
             docker compose -p better-stack-ebpf down 2>/dev/null || true
             docker compose -p better-stack-beyla down 2>/dev/null || true
         elif docker-compose version &> /dev/null; then
+            docker-compose -p better-stack-collector-host down 2>/dev/null || true
             docker-compose -p better-stack-ebpf down 2>/dev/null || true
             docker-compose -p better-stack-beyla down 2>/dev/null || true
         fi
 
-        # Also try direct container removal as fallback (handle both old and new names)
+        # Also try direct container removal as fallback (handle current and old names)
+        docker stop better-stack-collector-host 2>/dev/null || true
+        docker rm better-stack-collector-host 2>/dev/null || true
         docker stop better-stack-ebpf 2>/dev/null || true
         docker rm better-stack-ebpf 2>/dev/null || true
         docker stop better-stack-beyla 2>/dev/null || true
