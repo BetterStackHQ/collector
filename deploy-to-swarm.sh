@@ -509,7 +509,9 @@ if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" ]]; then
     COMPOSE_NODES=""
     for NODE in $NODES; do
         node_target=$(get_node_target "$NODE")
-        COMPOSE_CONTAINER=$(${SSH_CMD} "$node_target" "docker ps --filter 'name=better-stack-collector' --format '{{.Names}}'" </dev/null 2>/dev/null || true)
+        # Match the container name exactly: the docker ps name filter is a substring match,
+        # and swarm nodes run the better-stack-collector-host container which would trip it.
+        COMPOSE_CONTAINER=$(${SSH_CMD} "$node_target" "docker ps --format '{{.Names}}' | grep -x better-stack-collector" </dev/null 2>/dev/null || true)
         if [[ -n "$COMPOSE_CONTAINER" ]]; then
             COMPOSE_NODES="${COMPOSE_NODES:+$COMPOSE_NODES, }$NODE"
         fi
