@@ -51,6 +51,9 @@ FROM quay.io/prometheuscommunity/elasticsearch-exporter:v1.11.0 AS elasticsearch
 # Add pgbouncer exporter to the image
 FROM prometheuscommunity/pgbouncer-exporter:v0.12.0 AS pgbouncer-exporter
 
+# Add mysqld exporter to the image
+FROM prom/mysqld-exporter:v0.20.0 AS mysqld-exporter
+
 # Build OBI from source with patches
 FROM ghcr.io/open-telemetry/obi-generator:0.2.15@sha256:9cbb1b567377d5779b04e6bcdb87431c77a19e797b4630eba30f5417de96ea33 AS obi-builder
 RUN apk add --no-cache bash git make
@@ -122,6 +125,9 @@ COPY --from=elasticsearch-exporter --chmod=755 /bin/elasticsearch_exporter /usr/
 
 # Copy PgBouncer exporter
 COPY --from=pgbouncer-exporter --chmod=755 /bin/pgbouncer_exporter /usr/local/bin/pgbouncer_exporter
+
+# Copy MySQL exporter
+COPY --from=mysqld-exporter --chmod=755 /bin/mysqld_exporter /usr/local/bin/mysqld_exporter
 
 COPY ebpf/bootstrap_supervisord.conf /bootstrap/supervisord.conf
 COPY --chmod=755 ebpf/run_supervisord.sh /run_supervisord.sh
