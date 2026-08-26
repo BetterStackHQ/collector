@@ -1,0 +1,53 @@
+name: Create GitHub release
+
+on:
+  workflow_run:
+    workflows:
+      - Build and Push Docker Image
+      - Check scripts from docs
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.workflow_run.head_sha }}
+
+jobs:
+  release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Create release after tag CI succeeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+
+          [[ "$(git rev-list -n 1 "$TAG" 2>/dev/null)" == "$SHA" ]] || exit 0
+          git merge-base --is-ancestor "$SHA" HEAD || exit 0
+
+          for workflow in "Build and Push Docker Image" "Check scripts from docs"; do
+            result=$(gh run list \
+              --workflow "$workflow" \
+              --branch "$TAG" \
+              --commit "$SHA" \
+              --event push \
+              --limit 1 \
+              --json status,conclusion \
+              --jq '.[0] | "\(.status) \(.conclusion)"')
+            [[ "$result" == "completed success" ]] || exit 0
+          done
+
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --verify-tag --generate-notes
