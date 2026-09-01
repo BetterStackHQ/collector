@@ -137,3 +137,114 @@ Currently contains patches:
   bystander's, both at establishment and after the bystander's one request —
   which must also arrive byte-identical and without a Traceparent, while the
   harness's identical request gets one.
+* 013-deny-before-parent-fallback.patch
+  Make discovery's exclusions real in the kernel. `valid_pid()` (bpf/pid/pid.h)
+  looks the calling process up in the allow bitmap and, on a miss, retries with
+  its namespaced parent pid. That fallback is deliberate — it is how OBI follows
+  an instrumented process into its workers, and 012's scenario depends on it
+  staying intact — but userspace only ever *declined to add* an excluded process
+  to the allow-list; nothing ever told BPF what had been excluded. So with
+  `open_ports` discovery, where pid 1 is routinely instrumented and every
+  process on the machine descends from pid 1, `exclude_instrument` meant nothing
+  below the userspace pipeline. Observed live before this patch: an excluded
+  `tailscaled` enrolled 2/2 into the sockhash, because systemd was discovered
+  through open_ports.
+
+  Semantics. A new `denied_pids` hash, keyed exactly like the allow-list
+  (`pid_data_t` = namespaced pid + pid-namespace inode), is consulted in
+  `valid_pid` ahead of both the allow bitmap and the parent fallback. Only the
+  caller's *own* identity is looked up: a denied parent does not taint its
+  children, because a supervisor the user excluded may legitimately fork the
+  workload they asked for, and that workload has its own allow-list entry.
+  Allowed processes and their non-excluded children are unaffected — the
+  fork-following fallback is untouched, and the per-event hot path is unchanged
+  because a `pid_cache` hit still returns before any of this.
+
+  An exact hash rather than a second copy of the bitmap: `valid_pids` hashes
+  (ns, pid) into 192053 bits with no collision resolution, which upstream can
+  afford because a collision there fails *open* and merely lets an extra process
+  through. The same collision in a deny structure fails closed and would
+  silently stop instrumenting a process the user did select.
+
+  Who publishes it. The criteria matcher (`filterCreated` in
+  pkg/appolly/discover/matcher.go) is the only component that evaluates
+  `exclude_instrument`, and the only one that ever sees the processes it drops:
+  an excluded process never becomes an Instrumentable, so it never reaches the
+  attacher and `BlockPID` could not carry this. It publishes when a process
+  matches an exclusion and retracts when the same pid matches the criteria
+  instead; `filterDeleted` retracts on exit, because pids are reused and a
+  denial that outlived its process would silently stop instrumenting the next
+  owner. The keys are every NSpid level of the process under its pid-namespace
+  inode, exactly as `PIDsFilter.addPID()` records the allow side, so the two
+  sides agree whichever level the kernel derives. The map is reached by name
+  through `EBPFEventContext.EBPFMaps` — the agent-wide store of
+  OBI_PIN_INTERNAL maps that `ResolveMaps()` fills — which is one map object
+  shared by every collection that includes pid.h, with a lifetime independent of
+  any single ProcessTracer.
+
+  Each denial also evicts the pid from `pid_cache`, and that is not
+  housekeeping. `pid_cache` is a positive memo of a `valid_pid` pass, consulted
+  before anything else; an excluded process that made egress before discovery
+  reached it was accepted on its parent's ticket and cached, so publishing the
+  denial alone would change nothing for that process for as long as the entry
+  lives. The eviction is what makes the cheap check order safe.
+
+  Residual staleness, all of it fail-open, and none of it removable without
+  matching executables inside BPF:
+  - Discovery lag. The watcher polls every `discovery.poll_interval` (5s by
+    default; its only BPF accelerator is a `sys_bind` kprobe that forces a port
+    refetch) and holds back processes younger than `discovery.min_process_age`
+    (5s), so a just-`exec`ed excluded process still passes on an ancestor's
+    ticket until it is seen. Measured in the harness: 4.3s for a process that
+    predates OBI, 10.1s for one started mid-run.
+  - Pid reuse within one poll interval. If an excluded pid dies and the number
+    is taken by another process before the next poll, the watcher reports
+    neither the exit nor the creation and the denial stands for the new owner.
+    That direction loses instrumentation rather than corrupting bytes, the
+    reverse case (an allowed pid reused by an excluded process) is upstream's
+    existing behaviour, and the retraction on any later match closes it as soon
+    as the pipeline sees the pid again.
+  - A process that exits between the poll and the publish has no
+    `/proc/<pid>/{status,ns/pid}` left to read, so nothing is published — and it
+    generates no more egress either.
+  - A full `denied_pids` (3001 entries, sized like `valid_pids`) refuses new
+    denials and logs a warning. It is a plain hash, not an LRU, so an existing
+    denial can never quietly lapse.
+
+  Kernel floor: the only thing new anywhere is one `bpf_map_lookup_elem` on a
+  `BPF_MAP_TYPE_HASH`. The helper is in the unconditional part of
+  `bpf_base_func_proto()` and the map type is as old as BPF maps, so every
+  program type that already compiles `valid_pid` keeps loading; nothing here is
+  younger than the 5.15 support floor. No new program, no new attachment, no new
+  helper, and the per-program map count is unchanged in kind (one more shared
+  map, far below MAX_USED_MAPS). The programs that consult `valid_pid` are
+  generictracer's kprobes/uprobes and tpinjector's sk_msg entry; the Go uprobes
+  are scoped by being attached per discovered executable and their objects come
+  out byte-identical.
+
+  Verifier cost vs 012: `obi_packet_extender` 851 -> 860, every tail-called
+  sk_msg program unchanged, `obi_sockmap_tracker` and `obi_sk_iter_tcp`
+  unchanged. generictracer's programs move by +8..+82 where `valid_pid` is
+  inlined (its largest, `obi_kprobe_tcp_close`, 29506 -> 29516) and a handful
+  shrink by up to 139 as LLVM re-lays them out; the collection's total falls by
+  58 instructions.
+
+  `ebpf/tests/egress-integrity` grows a `deny-child` scenario, with a control on
+  both sides. The instrumented harness spawns a *direct* child — no reparenting,
+  unlike 012's bystander, so its parent is genuinely allowed — running a copy of
+  the payload at `/tmp/deny-child`, which run-under-obi.sh excludes in the OBI
+  config it composes. The child announces its pid and waits before opening any
+  socket, because `valid_pid` is consulted at `connect()` time in
+  `obi_kprobe_tcp_connect`: it is released only once its exclusion is visible in
+  `denied_pids`, so the scenario waits on an observable rather than a sleep.
+  Then its one HTTP/1.1 request must arrive byte-identical and without a
+  Traceparent, its socket must be absent from `sock_dir` both at establishment
+  and after that request, while the parent's identical request in the same
+  scenario gets a Traceparent and the parent's socket is enrolled — and the
+  parent must not itself be in `denied_pids`. run-under-obi.sh also starts an
+  excluded process *before* OBI, which is the production shape of the bug and
+  the only way to exercise the publisher's deferral, since the first discovery
+  poll runs before any BPF collection exists; its exclusion must reach the map
+  too. Against pristine+008..012 the scenario reports all four differences from
+  one run: the child's socket enrolled in `sock_dir`, one Traceparent on its
+  request, 61 bytes arriving as 131, and the socket still enrolled afterwards.

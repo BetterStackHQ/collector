@@ -106,12 +106,12 @@ type bpfAttrElem struct {
 	flags   uint64
 }
 
-// sockDirFDs returns a file descriptor for every SOCKHASH named sock_dir that
+// bpfMapFDs returns a file descriptor for every map of this name and type that
 // this process can see. Walking the id space rather than a bpffs pin keeps the
 // harness independent of OBI's pinning configuration, and it is what
 // `bpftool map dump name sock_dir` does — bpftool is not installable in the
 // --network=none container the scenarios run in.
-func sockDirFDs() ([]int, error) {
+func bpfMapFDs(name string, mapType uint32) ([]int, error) {
 	var fds []int
 	id := uint32(0)
 	for {
@@ -151,8 +151,8 @@ func sockDirFDs() ([]int, error) {
 			continue
 		}
 
-		name := string(bytes.TrimRight(info[mapInfoNameAt:mapInfoNameAt+mapInfoNameLen], "\x00"))
-		if name != sockDirMapName || binary.NativeEndian.Uint32(info[0:4]) != bpfMapTypeSockash {
+		got := string(bytes.TrimRight(info[mapInfoNameAt:mapInfoNameAt+mapInfoNameLen], "\x00"))
+		if got != name || binary.NativeEndian.Uint32(info[0:4]) != mapType {
 			_ = syscall.Close(fd)
 			continue
 		}
@@ -160,11 +160,12 @@ func sockDirFDs() ([]int, error) {
 	}
 }
 
-// sockDirCookies returns the set of socket cookies currently enrolled in
-// sock_dir, or ok=false when no such map exists (selfcheck runs, where OBI
-// never loaded).
-func sockDirCookies() (cookies map[uint64]struct{}, ok bool, err error) {
-	fds, err := sockDirFDs()
+// bpfMapKeys returns the key set of every map of this name and type, or
+// ok=false when no such map exists (selfcheck runs, where OBI never loaded).
+// Both maps this harness reads have 8-byte keys: sock_dir is keyed by socket
+// cookie, denied_pids by pid_data_t (namespaced pid in the low half).
+func bpfMapKeys(name string, mapType uint32) (keys map[uint64]struct{}, ok bool, err error) {
+	fds, err := bpfMapFDs(name, mapType)
 	if err != nil {
 		return nil, false, err
 	}
@@ -177,12 +178,12 @@ func sockDirCookies() (cookies map[uint64]struct{}, ok bool, err error) {
 		}
 	}()
 
-	cookies = map[uint64]struct{}{}
+	keys = map[uint64]struct{}{}
 	for _, fd := range fds {
 		var key, next uint64
 		haveKey := false
-		// sock_dir holds at most 65535 entries; the bound only guards against a
-		// map being mutated underneath the walk.
+		// sock_dir holds at most 65535 entries and denied_pids 3001; the bound
+		// only guards against a map being mutated underneath the walk.
 		for range 1 << 17 {
 			attr := bpfAttrElem{
 				mapFD:   uint32(fd),
@@ -200,12 +201,18 @@ func sockDirCookies() (cookies map[uint64]struct{}, ok bool, err error) {
 			if errno != 0 {
 				return nil, false, fmt.Errorf("BPF_MAP_GET_NEXT_KEY: %w", errno)
 			}
-			cookies[next] = struct{}{}
+			keys[next] = struct{}{}
 			key = next
 			haveKey = true
 		}
 	}
-	return cookies, true, nil
+	return keys, true, nil
+}
+
+// sockDirCookies returns the set of socket cookies currently enrolled in
+// sock_dir.
+func sockDirCookies() (map[uint64]struct{}, bool, error) {
+	return bpfMapKeys(sockDirMapName, bpfMapTypeSockash)
 }
 
 // respawnBystander re-executes the bystander with its pipes and exits, so the

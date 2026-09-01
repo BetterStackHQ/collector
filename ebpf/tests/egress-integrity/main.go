@@ -560,6 +560,7 @@ func main() {
 	startFile := flag.String("start-file", "", "wait for this file before opening sockets")
 	bystanderPort := flag.Int("bystander", 0, "internal: run as the non-discovered client of sockhash-scoping")
 	bystanderSpawner := flag.Int("bystander-spawner", 0, "internal: pid of the process that reparented us")
+	denyChildPort := flag.Int("deny-child", 0, "internal: run as the excluded direct child of deny-child")
 	flag.Parse()
 
 	// The sockhash-scoping scenario re-executes this binary from a path OBI's
@@ -573,6 +574,16 @@ func main() {
 		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "bystander:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// The deny-child scenario spawns this binary from an excluded path as a
+	// plain child of the instrumented harness; that copy takes this branch.
+	if *denyChildPort != 0 {
+		if err := denyChild(*denyChildPort); err != nil {
+			fmt.Fprintln(os.Stderr, "deny-child:", err)
 			os.Exit(1)
 		}
 		return
@@ -599,6 +610,7 @@ func main() {
 		{"raw-binary", rawBinary},
 		{"positive-control", func() error { return positiveControl(*selfcheck) }},
 		{"sockhash-scoping", func() error { return sockhashScoping(*selfcheck) }},
+		{"deny-child", func() error { return denyChildScenario(*selfcheck) }},
 	}
 	for _, scenario := range scenarios {
 		progressScenario.Store(scenario.name)
