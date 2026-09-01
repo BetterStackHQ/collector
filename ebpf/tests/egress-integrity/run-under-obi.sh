@@ -41,6 +41,12 @@ mkdir -p /sys/fs/bpf
 if ! grep -q ' /sys/fs/bpf bpf ' /proc/mounts; then
   mount -t bpf bpf /sys/fs/bpf
 fi
+# OBI's FIONREAD compensation attaches syscall tracepoints; without tracefs it
+# fails and OBI then disables context propagation entirely, which the
+# positive-control scenario (rightly) reports as zero Traceparents.
+if ! grep -q ' /sys/kernel/tracing tracefs ' /proc/mounts; then
+  mount -t tracefs tracefs /sys/kernel/tracing
+fi
 
 rm -f "$start_file"
 "$obi" -config "$config" >"$obi_log" 2>&1 &
