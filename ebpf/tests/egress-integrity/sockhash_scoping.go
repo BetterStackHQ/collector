@@ -6,9 +6,10 @@ package main
 // whose sendmsg/recvmsg stalls are the reason this patch series exists.
 // Upstream enrolls every outgoing socket in the cgroup, because the sockops
 // callback that enrolls (ACTIVE_ESTABLISHED_CB) fires while the SYN-ACK is
-// processed and cannot see the owning process. Patch 012 moves the discovery
-// check to BPF_SOCK_OPS_TCP_CONNECT_CB, which does run in the connecting task,
-// and enrolls only the sockets it marked.
+// processed and cannot see the owning process. Patch 012 makes it consult
+// `sock_pids`, which OBI's tcp_connect kprobe fills in the connecting task's
+// own context and only for processes that pass discovery, and enrolls only the
+// sockets found there.
 //
 // The check here is a real experiment with a control, not a bare absence
 // assertion. A second copy of this binary, at a path discovery does not match,

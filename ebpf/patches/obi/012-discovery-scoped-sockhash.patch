@@ -30,38 +30,6 @@ index 0000000..39144e5
 +    __type(key, u64);
 +    __type(value, u8);
 +} iter_allowed_socks SEC(".maps");
-diff --git a/bpf/tpinjector/maps/sk_discovery_ok.h b/bpf/tpinjector/maps/sk_discovery_ok.h
-new file mode 100644
-index 0000000..b6737fd
---- /dev/null
-+++ b/bpf/tpinjector/maps/sk_discovery_ok.h
-@@ -0,0 +1,26 @@
-+// Copyright The OpenTelemetry Authors
-+// SPDX-License-Identifier: Apache-2.0
-+
-+#pragma once
-+
-+#include <bpfcore/vmlinux.h>
-+#include <bpfcore/bpf_helpers.h>
-+
-+// "The task that opened this socket passed OBI's discovery filter."
-+//
-+// Written at BPF_SOCK_OPS_TCP_CONNECT_CB, which is the one sock_ops event on
-+// an outgoing connection that runs in the connecting task's own context, and
-+// read at BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB, which does not. Absence means
-+// "not known to be instrumented" and is the deny answer, so a socket whose
-+// connect callback never ran (kernel-internal sockets, MPTCP subflows dialled
-+// from a workqueue, sockets opened before OBI attached) is left alone.
-+//
-+// SK_STORAGE rather than a cookie-keyed hash: the fact is socket-lifetime, the
-+// kernel frees it on close, and neither writer nor reader has to agree on a
-+// key. One byte per outgoing socket in the instrumented cgroup.
-+struct {
-+    __uint(type, BPF_MAP_TYPE_SK_STORAGE);
-+    __uint(map_flags, BPF_F_NO_PREALLOC);
-+    __type(key, u32);
-+    __type(value, u8);
-+} sk_discovery_ok SEC(".maps");
 diff --git a/bpf/tpinjector/sock_iter.c b/bpf/tpinjector/sock_iter.c
 index 5585597..48889d0 100644
 --- a/bpf/tpinjector/sock_iter.c
@@ -102,18 +70,18 @@ index 5585597..48889d0 100644
  
      char src_buf[k_addr_buf_len] = {};
 diff --git a/bpf/tpinjector/tpinjector.c b/bpf/tpinjector/tpinjector.c
-index 078c160..1008e20 100644
+index 078c160..06395ec 100644
 --- a/bpf/tpinjector/tpinjector.c
 +++ b/bpf/tpinjector/tpinjector.c
-@@ -43,6 +43,7 @@
+@@ -36,6 +36,7 @@
+ #include <maps/msg_buffers.h>
+ #include <maps/outgoing_trace_map.h>
+ #include <maps/sock_dir.h>
++#include <maps/sock_pids.h>
+ #include <maps/tp_info_mem.h>
+ #include <maps/tracked_sock_cookies.h>
  
- #include <tpinjector/h2_parse.h>
- #include <tpinjector/inject_policy.h>
-+#include <tpinjector/maps/sk_discovery_ok.h>
- #include <tpinjector/maps/sk_h2_flags.h>
- #include <tpinjector/maps/sk_h2_conn_flag.h>
- #include <tpinjector/maps/sk_inject_gate.h>
-@@ -799,8 +800,83 @@ static __always_inline void bpf_sock_ops_set_flags(struct bpf_sock_ops *skops, u
+@@ -799,8 +800,90 @@ static __always_inline void bpf_sock_ops_set_flags(struct bpf_sock_ops *skops, u
      bpf_sock_ops_cb_flags_set(skops, skops->bpf_sock_ops_cb_flags | flags);
  }
  
@@ -133,20 +101,33 @@ index 078c160..1008e20 100644
 +// BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB is raised by tcp_finish_connect() ->
 +// tcp_init_transfer() (net/ipv4/tcp_input.c) while the SYN-ACK is processed.
 +// Unless the socket happened to be owned by the connecting task at that
-+// moment, that is NET_RX softirq on whichever CPU took the packet, so
-+// bpf_get_current_pid_tgid() returns the interrupted task — an unrelated
-+// process, or 0 for the idle task. Testing valid_pid() there would deny
-+// instrumented processes at random, which is worse than the bug.
-+// BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB is further removed still: it fires for a
-+// child socket that no task has returned from accept() yet.
++// moment, that is NET_RX softirq on whichever CPU took the packet, so the
++// current task is the interrupted one — an unrelated process, or 0 for the
++// idle task. Deciding discovery there would deny instrumented processes at
++// random, which is worse than the bug. BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB is
++// further removed still: it fires for a child socket that no task has returned
++// from accept() yet. sock_ops cannot even ask: bpf_get_current_pid_tgid()
++// reaches BPF_PROG_TYPE_SOCK_OPS only through bpf_base_func_proto(), and it was
++// not added there until v6.10 (Yonghong Song, "bpf: Allow
++// bpf_get_[ns_]current_pid_tgid() in all program types"). On 5.15 the program
++// does not load at all: "unknown func bpf_get_current_pid_tgid#14".
 +//
-+// BPF_SOCK_OPS_TCP_CONNECT_CB does not have that problem. It is raised from
-+// the first line of tcp_connect() (net/ipv4/tcp_output.c), reached only via
-+// sk_prot->connect from the connect(2) syscall — or from
-+// tcp_sendmsg_fastopen() for TFO — so the current task is by construction the
-+// process opening the connection. Every socket that can later reach
-+// ACTIVE_ESTABLISHED sent its SYN from there, so a mark recorded at connect is
-+// available at establishment.
++// So the decision is taken where it is already being taken correctly.
++// obi_kprobe_tcp_connect (bpf/generictracer/k_tracer.c) runs at the first
++// instruction of tcp_connect(), reached only through sk_prot->connect from
++// connect(2) or tcp_sendmsg_fastopen(), so the current task is by construction
++// the process dialling. It tests valid_pid() and, only then, records the
++// connection in `sock_pids` keyed by the sorted connection_info_t. Every socket
++// that can reach ACTIVE_ESTABLISHED sent its SYN from there, and the source
++// port is already final (inet_hash_connect() runs before tcp_connect()), so the
++// entry is present and the key is stable by the time we look.
++//
++// The two key derivations agree by construction and OBI already depends on it
++// in the other direction: bpf_sock_ops_parse_hdr_cb() below writes
++// incoming_trace_map with get_connection_info_ops() + sort_connection_info(),
++// and find_trace_for_server_request() (bpf/common/trace_lifecycle.h) reads it
++// with a key built from parse_sock_info(). Both store IPv4 as v4-in-v6 and both
++// hold host-order ports.
 +//
 +// Why prevention rather than eviction: undoing an enrollment means deleting
 +// from a SOCKHASH, and since v6.10 the verifier only lets the program types
@@ -159,67 +140,51 @@ index 078c160..1008e20 100644
 +// fails outright with "cannot pass map_type 18 into func bpf_map_delete_elem".
 +// Not enrolling in the first place is both permitted everywhere and strictly
 +// better: there is no window during which the socket is on tcp_bpf at all.
++//
++// Helper floor: this adds only bpf_map_lookup_elem to the sock_ops program,
++// which has been in bpf_base_func_proto()'s unconditional set since sockmaps
++// existed.
++static __always_inline bool sock_opened_by_instrumented_pid(struct bpf_sock_ops *skops) {
++    connection_info_t conn = get_connection_info_ops(skops);
++    sort_connection_info(&conn);
 +
-+static __always_inline void bpf_sock_ops_connect_cb(struct bpf_sock_ops *skops) {
-+    struct bpf_sock *sk = skops->sk;
-+
-+    if (!sk) {
-+        return;
-+    }
-+
-+    // The discovery filter, read in the only context where it means anything.
-+    // pid_matches() against the `valid_pids` bitmap, memoised in `pid_cache`
-+    // (bpf/pid/pid.h), both filled by rebuildValidPids() in
-+    // pkg/internal/ebpf/generictracer/generictracer.go. With
-+    // OTEL_EBPF_BPF_PID_FILTER_OFF (`filter_pids == 0`) valid_pid() degrades to
-+    // "return the tgid", so everything is marked and enrollment behaves exactly
-+    // as it did upstream.
-+    if (!valid_pid(bpf_get_current_pid_tgid())) {
-+        return;
-+    }
-+
-+    bpf_sk_storage_get(&sk_discovery_ok, sk, &(u8){1}, BPF_SK_STORAGE_GET_F_CREATE);
++    return bpf_map_lookup_elem(&sock_pids, &conn) != NULL;
 +}
 +
  // Helper that writes in the sock map for a sock_ops program
  static __always_inline void bpf_sock_ops_active_est_cb(struct bpf_sock_ops *skops) {
-+    struct bpf_sock *sk = skops->sk;
-+
-+    // Default-deny. No mark means the connect callback either did not run for
-+    // this socket or ran for a process discovery excluded, and an unenrolled
-+    // socket keeps its original protocol ops: no sk_msg verdict, no TCP option
-+    // callbacks, nothing for tcp_bpf to stall. The passive path below is
-+    // untouched, so inbound TCP-option parsing for server sockets is unchanged.
-+    if (!sk || !bpf_sk_storage_get(&sk_discovery_ok, sk, NULL, 0)) {
++    // Default-deny. No sock_pids entry means no instrumented task dialled this
++    // connection, and an unenrolled socket keeps its original protocol ops: no
++    // sk_msg verdict, no TCP option callbacks, nothing for tcp_bpf to stall.
++    // The passive path below is untouched, so inbound TCP-option parsing for
++    // server sockets is unchanged.
++    //
++    // Fails closed in every uncertain case. A kernel-internal socket, an MPTCP
++    // subflow dialled from a workqueue, a socket opened before OBI attached or
++    // before its process was discovered: no entry, no enrollment, propagation
++    // lost but nothing corrupted. The residual fail-open is a full 4-tuple
++    // reused by an excluded process while the previous owner's LRU entry is
++    // still live, which lands on today's behaviour for that one socket.
++    if (!sock_opened_by_instrumented_pid(skops)) {
 +        return;
 +    }
 +
      const u64 cookie = bpf_get_socket_cookie(skops);
  
      if (bpf_sock_hash_update(skops, &sock_dir, (void *)&cookie, BPF_ANY) == 0) {
-@@ -916,8 +992,10 @@ static __always_inline void bpf_sock_ops_parse_hdr_cb(struct bpf_sock_ops *skops
+@@ -916,8 +999,10 @@ static __always_inline void bpf_sock_ops_parse_hdr_cb(struct bpf_sock_ops *skops
      bpf_map_update_elem(&incoming_trace_map, &conn, &tp, BPF_ANY);
  }
  
 -// Tracks all outgoing sockets (BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB)
 -// We don't track incoming, those would be BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB
-+// Tracks outgoing sockets of instrumented processes
-+// (BPF_SOCK_OPS_TCP_CONNECT_CB marks, BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB
-+// enrolls). We don't track incoming, those would be
++// Tracks outgoing sockets of instrumented processes: only connections
++// obi_kprobe_tcp_connect recorded in sock_pids are enrolled
++// (BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB). We don't track incoming, those would be
 +// BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB
  SEC("sockops")
  int obi_sockmap_tracker(struct bpf_sock_ops *skops) {
      struct bpf_sock *sk = skops->sk;
-@@ -927,6 +1005,9 @@ int obi_sockmap_tracker(struct bpf_sock_ops *skops) {
-     }
- 
-     switch (skops->op) {
-+    case BPF_SOCK_OPS_TCP_CONNECT_CB:
-+        bpf_sock_ops_connect_cb(skops);
-+        break;
-     case BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB:
-         bpf_sock_ops_active_est_cb(skops);
-         break;
 diff --git a/pkg/internal/ebpf/tpinjector/tpinjector.go b/pkg/internal/ebpf/tpinjector/tpinjector.go
 index 72dfdcd..6b7d48e 100644
 --- a/pkg/internal/ebpf/tpinjector/tpinjector.go
