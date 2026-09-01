@@ -47,3 +47,71 @@ Currently contains patches:
   `obi_packet_extender`. Upstream checks it only on the fall-through route, so
   the existing-trace and Go-gRPC coordination routes could mutate messages of
   processes that were never selected for instrumentation.
+* 012-discovery-scoped-sockhash.patch
+  Make discovery exclusions real at the socket layer. Upstream puts *every*
+  outgoing TCP socket in the instrumented cgroup into the `sock_dir` sockhash,
+  which is not passive observation: `sock_hash_update` runs `sk_psock_init` ->
+  `tcp_bpf_update_proto` and replaces the socket's `sk_prot` with the tcp_bpf
+  one. Those paths have now stalled unrelated workloads three times (a GitHub
+  runner's log stream, tailscaled's control-channel long poll; forensics in
+  T-20708). After this patch a socket is enrolled only if the process that
+  opened it passed `valid_pid`.
+
+  Why the enrolling callback could not just test `valid_pid` itself: it does
+  not run in the owner's context. `BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB` is
+  raised by `tcp_finish_connect` -> `tcp_init_transfer`
+  (net/ipv4/tcp_input.c:6113), i.e. while the SYN-ACK is processed — normally
+  NET_RX softirq on whichever CPU took the packet, so
+  `bpf_get_current_pid_tgid()` there is the interrupted task, or 0 for the idle
+  task. Testing discovery there would deny instrumented processes at random.
+  `BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB` is further removed still: it fires for
+  a child socket no task has returned from `accept()` yet.
+
+  The decision therefore moves to `BPF_SOCK_OPS_TCP_CONNECT_CB`, raised from
+  the first line of `tcp_connect()` (net/ipv4/tcp_output.c:3952), which is
+  reached only through `sk_prot->connect` from `connect(2)` — or
+  `tcp_sendmsg_fastopen()` for TFO — so the current task is by construction the
+  process dialling. It records a byte in a new `sk_discovery_ok` SK_STORAGE,
+  and the established callback enrolls only marked sockets. No new attachment:
+  the sockops program was already there, this is one more `case`. The passive
+  path is untouched, so inbound TCP-option parsing on server sockets behaves
+  exactly as before.
+
+  Prevention rather than eviction, because eviction is not available. Removing
+  a socket from a sockhash means `bpf_map_delete_elem`, and since v6.10 the
+  verifier only permits that for the program types in `may_update_sockmap()` —
+  kernel commit 98e948fb60d4 ("bpf: Allow delete from sockmap/sockhash only if
+  update is allowed"), which folded delete into the update allow-list after
+  syzkaller hit the lock inversion of ff9105993240. `BPF_PROG_TYPE_SK_MSG` is
+  not on that list, so `obi_packet_extender` — the one program that always runs
+  in the sender's task context — cannot evict the socket it was called for; the
+  program fails to load outright with `cannot pass map_type 18 into func
+  bpf_map_delete_elem`, which would silently disable the injector. Not
+  enrolling is also strictly better than evicting: there is no window at all,
+  rather than "off the tcp_bpf path after the first egress message".
+
+  Exposure window: none for sockets opened while OBI is attached. A socket
+  whose `connect()` predates OBI, or predates the discovery of its process,
+  carries no mark and is simply never enrolled — losing propagation, never
+  corrupting. The `AllowPID` backfill is what recovers those, and it is scoped
+  the same way: `iter/tcp` walks an entire network namespace and `struct sock`
+  records no owner, so `AllowPID` now publishes the discovered pid's own socket
+  inodes — read from its `/proc/<pid>/fd` links, matched in BPF against
+  `sk->sk_socket->file->f_inode->i_ino` — into `iter_allowed_socks` for the
+  duration of the walk. That also makes the walk per-pid rather than per-netns,
+  since the allow-set is per-pid.
+
+  Verifier cost: the whole sk_msg chain is byte-identical to 011
+  (`obi_packet_extender` stays at 851 instructions, every tail-called program
+  unchanged); `obi_sockmap_tracker` goes 1801 -> 2195 and `obi_sk_iter_tcp`
+  428 -> 468.
+
+  `ebpf/tests/egress-integrity` grows a `sockhash-scoping` scenario that proves
+  it with a control: a second copy of the harness binary, at a path discovery
+  does not match and reparented onto init (`valid_pid` deliberately inherits
+  from the parent, so a direct child would be instrumented and rightly so),
+  connects and reports its socket cookie before sending. `sock_dir` is then
+  read through `bpf(2)` and must contain the harness's own socket and not the
+  bystander's, both at establishment and after the bystander's one request —
+  which must also arrive byte-identical and without a Traceparent, while the
+  harness's identical request gets one.

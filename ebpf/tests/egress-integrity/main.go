@@ -558,7 +558,25 @@ func waitForStartFile(path string) error {
 func main() {
 	selfcheck := flag.Bool("selfcheck", false, "verify the userspace harness without OBI")
 	startFile := flag.String("start-file", "", "wait for this file before opening sockets")
+	bystanderPort := flag.Int("bystander", 0, "internal: run as the non-discovered client of sockhash-scoping")
+	bystanderSpawner := flag.Int("bystander-spawner", 0, "internal: pid of the process that reparented us")
 	flag.Parse()
+
+	// The sockhash-scoping scenario re-executes this binary from a path OBI's
+	// discovery filter does not match; that copy takes this branch.
+	if *bystanderPort != 0 {
+		var err error
+		if *bystanderSpawner != 0 {
+			err = bystander(*bystanderPort, *bystanderSpawner)
+		} else {
+			err = respawnBystander(*bystanderPort)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "bystander:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if err := waitForStartFile(*startFile); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -580,6 +598,7 @@ func main() {
 		{"upgrade-then-binary", upgradeThenBinary},
 		{"raw-binary", rawBinary},
 		{"positive-control", func() error { return positiveControl(*selfcheck) }},
+		{"sockhash-scoping", func() error { return sockhashScoping(*selfcheck) }},
 	}
 	for _, scenario := range scenarios {
 		progressScenario.Store(scenario.name)

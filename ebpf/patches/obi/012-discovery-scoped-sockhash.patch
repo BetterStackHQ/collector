@@ -1,0 +1,404 @@
+diff --git a/bpf/tpinjector/maps/iter_allowed_socks.h b/bpf/tpinjector/maps/iter_allowed_socks.h
+new file mode 100644
+index 0000000..39144e5
+--- /dev/null
++++ b/bpf/tpinjector/maps/iter_allowed_socks.h
+@@ -0,0 +1,26 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++#pragma once
++
++#include <bpfcore/vmlinux.h>
++#include <bpfcore/bpf_helpers.h>
++
++// Socket inodes the backfill iterator is allowed to enroll, filled by
++// AllowPID() from /proc/<pid>/fd immediately before it runs the iterators and
++// emptied again afterwards.
++//
++// iter/tcp walks a whole network namespace, so on a host-network deployment it
++// sees every socket on the machine and has no way to attribute one to a
++// process — struct sock has no owner. Userspace does: a socket fd's
++// /proc/<pid>/fd link reads back as "socket:[<inode>]", and the same inode is
++// reachable in BPF as sk->sk_socket->file->f_inode->i_ino.
++//
++// Only ever written while the iterator for a single pid is running, so it
++// holds one process's file descriptors at a time.
++struct {
++    __uint(type, BPF_MAP_TYPE_HASH);
++    __uint(max_entries, 8192);
++    __type(key, u64);
++    __type(value, u8);
++} iter_allowed_socks SEC(".maps");
+diff --git a/bpf/tpinjector/maps/sk_discovery_ok.h b/bpf/tpinjector/maps/sk_discovery_ok.h
+new file mode 100644
+index 0000000..b6737fd
+--- /dev/null
++++ b/bpf/tpinjector/maps/sk_discovery_ok.h
+@@ -0,0 +1,26 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++#pragma once
++
++#include <bpfcore/vmlinux.h>
++#include <bpfcore/bpf_helpers.h>
++
++// "The task that opened this socket passed OBI's discovery filter."
++//
++// Written at BPF_SOCK_OPS_TCP_CONNECT_CB, which is the one sock_ops event on
++// an outgoing connection that runs in the connecting task's own context, and
++// read at BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB, which does not. Absence means
++// "not known to be instrumented" and is the deny answer, so a socket whose
++// connect callback never ran (kernel-internal sockets, MPTCP subflows dialled
++// from a workqueue, sockets opened before OBI attached) is left alone.
++//
++// SK_STORAGE rather than a cookie-keyed hash: the fact is socket-lifetime, the
++// kernel frees it on close, and neither writer nor reader has to agree on a
++// key. One byte per outgoing socket in the instrumented cgroup.
++struct {
++    __uint(type, BPF_MAP_TYPE_SK_STORAGE);
++    __uint(map_flags, BPF_F_NO_PREALLOC);
++    __type(key, u32);
++    __type(value, u8);
++} sk_discovery_ok SEC(".maps");
+diff --git a/bpf/tpinjector/sock_iter.c b/bpf/tpinjector/sock_iter.c
+index 5585597..48889d0 100644
+--- a/bpf/tpinjector/sock_iter.c
++++ b/bpf/tpinjector/sock_iter.c
+@@ -14,6 +14,7 @@
+ #include <maps/sock_dir.h>
+ #include <maps/tracked_sock_cookies.h>
+ 
++#include <tpinjector/maps/iter_allowed_socks.h>
+ #include <tpinjector/maps/iter_listening_ports.h>
+ 
+ char __license[] SEC("license") = "Dual MIT/GPL";
+@@ -132,6 +133,26 @@ int obi_sk_iter_tcp(struct bpf_iter__tcp *ctx) {
+         return 0;
+     }
+ 
++    // Same default-deny as the sockops enrollment in tpinjector.c: a socket
++    // only joins sock_dir, and so only gets its protocol ops swapped for
++    // tcp_bpf, if it belongs to a process discovery selected.
++    //
++    // iter/tcp cannot decide that on its own. It walks a whole network
++    // namespace — on a host-network deployment, every socket on the machine —
++    // and struct sock records no owning process. It also runs from the OBI
++    // agent's own read() of the iterator fd, so bpf_get_current_pid_tgid() is
++    // the agent. AllowPID() therefore resolves ownership in userspace, from
++    // the discovered pid's /proc/<pid>/fd links, and leaves the inodes here.
++    //
++    // sk_socket is NULL for orphaned sockets (the last fd closed, the kernel
++    // still draining them). Those belong to no process and no longer generate
++    // egress worth propagating on, so failing closed on them is correct.
++    const u64 ino = BPF_CORE_READ((struct sock *)skc, sk_socket, file, f_inode, i_ino);
++
++    if (!ino || !bpf_map_lookup_elem(&iter_allowed_socks, &ino)) {
++        return 0;
++    }
++
+     const u64 cookie = bpf_get_socket_cookie(skc);
+ 
+     char src_buf[k_addr_buf_len] = {};
+diff --git a/bpf/tpinjector/tpinjector.c b/bpf/tpinjector/tpinjector.c
+index 078c160..1008e20 100644
+--- a/bpf/tpinjector/tpinjector.c
++++ b/bpf/tpinjector/tpinjector.c
+@@ -43,6 +43,7 @@
+ 
+ #include <tpinjector/h2_parse.h>
+ #include <tpinjector/inject_policy.h>
++#include <tpinjector/maps/sk_discovery_ok.h>
+ #include <tpinjector/maps/sk_h2_flags.h>
+ #include <tpinjector/maps/sk_h2_conn_flag.h>
+ #include <tpinjector/maps/sk_inject_gate.h>
+@@ -799,8 +800,83 @@ static __always_inline void bpf_sock_ops_set_flags(struct bpf_sock_ops *skops, u
+     bpf_sock_ops_cb_flags_set(skops, skops->bpf_sock_ops_cb_flags | flags);
+ }
+ 
++// =============================================================================
++// Discovery-scoped sockhash membership
++// =============================================================================
++//
++// Putting a socket in sock_dir is not free instrumentation. sock_hash_update
++// runs sk_psock_init -> tcp_bpf_update_proto, which replaces the socket's
++// sk_prot with the tcp_bpf one; the tcp_bpf sendmsg/recvmsg paths are what
++// stalled a GitHub runner's log stream and tailscaled's control channel
++// (T-20708). Upstream enrolls unconditionally, so OBI's discovery exclusions
++// mean nothing at the socket layer: every TCP client socket in the cgroup gets
++// converted whether or not its process was selected for instrumentation.
++//
++// The obstacle is that the enrolling callback cannot see the owner.
++// BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB is raised by tcp_finish_connect() ->
++// tcp_init_transfer() (net/ipv4/tcp_input.c) while the SYN-ACK is processed.
++// Unless the socket happened to be owned by the connecting task at that
++// moment, that is NET_RX softirq on whichever CPU took the packet, so
++// bpf_get_current_pid_tgid() returns the interrupted task — an unrelated
++// process, or 0 for the idle task. Testing valid_pid() there would deny
++// instrumented processes at random, which is worse than the bug.
++// BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB is further removed still: it fires for a
++// child socket that no task has returned from accept() yet.
++//
++// BPF_SOCK_OPS_TCP_CONNECT_CB does not have that problem. It is raised from
++// the first line of tcp_connect() (net/ipv4/tcp_output.c), reached only via
++// sk_prot->connect from the connect(2) syscall — or from
++// tcp_sendmsg_fastopen() for TFO — so the current task is by construction the
++// process opening the connection. Every socket that can later reach
++// ACTIVE_ESTABLISHED sent its SYN from there, so a mark recorded at connect is
++// available at establishment.
++//
++// Why prevention rather than eviction: undoing an enrollment means deleting
++// from a SOCKHASH, and since v6.10 the verifier only lets the program types
++// listed in may_update_sockmap() do that — commit 98e948fb60d4 ("bpf: Allow
++// delete from sockmap/sockhash only if update is allowed"), which folded
++// map_delete_elem into the same allow-list after syzkaller found the lock
++// inversion described in ff9105993240. BPF_PROG_TYPE_SK_MSG is not on that
++// list, so obi_packet_extender — the one program that always runs in the
++// sender's task context — cannot evict the socket it was called for; the load
++// fails outright with "cannot pass map_type 18 into func bpf_map_delete_elem".
++// Not enrolling in the first place is both permitted everywhere and strictly
++// better: there is no window during which the socket is on tcp_bpf at all.
++
++static __always_inline void bpf_sock_ops_connect_cb(struct bpf_sock_ops *skops) {
++    struct bpf_sock *sk = skops->sk;
++
++    if (!sk) {
++        return;
++    }
++
++    // The discovery filter, read in the only context where it means anything.
++    // pid_matches() against the `valid_pids` bitmap, memoised in `pid_cache`
++    // (bpf/pid/pid.h), both filled by rebuildValidPids() in
++    // pkg/internal/ebpf/generictracer/generictracer.go. With
++    // OTEL_EBPF_BPF_PID_FILTER_OFF (`filter_pids == 0`) valid_pid() degrades to
++    // "return the tgid", so everything is marked and enrollment behaves exactly
++    // as it did upstream.
++    if (!valid_pid(bpf_get_current_pid_tgid())) {
++        return;
++    }
++
++    bpf_sk_storage_get(&sk_discovery_ok, sk, &(u8){1}, BPF_SK_STORAGE_GET_F_CREATE);
++}
++
+ // Helper that writes in the sock map for a sock_ops program
+ static __always_inline void bpf_sock_ops_active_est_cb(struct bpf_sock_ops *skops) {
++    struct bpf_sock *sk = skops->sk;
++
++    // Default-deny. No mark means the connect callback either did not run for
++    // this socket or ran for a process discovery excluded, and an unenrolled
++    // socket keeps its original protocol ops: no sk_msg verdict, no TCP option
++    // callbacks, nothing for tcp_bpf to stall. The passive path below is
++    // untouched, so inbound TCP-option parsing for server sockets is unchanged.
++    if (!sk || !bpf_sk_storage_get(&sk_discovery_ok, sk, NULL, 0)) {
++        return;
++    }
++
+     const u64 cookie = bpf_get_socket_cookie(skops);
+ 
+     if (bpf_sock_hash_update(skops, &sock_dir, (void *)&cookie, BPF_ANY) == 0) {
+@@ -916,8 +992,10 @@ static __always_inline void bpf_sock_ops_parse_hdr_cb(struct bpf_sock_ops *skops
+     bpf_map_update_elem(&incoming_trace_map, &conn, &tp, BPF_ANY);
+ }
+ 
+-// Tracks all outgoing sockets (BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB)
+-// We don't track incoming, those would be BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB
++// Tracks outgoing sockets of instrumented processes
++// (BPF_SOCK_OPS_TCP_CONNECT_CB marks, BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB
++// enrolls). We don't track incoming, those would be
++// BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB
+ SEC("sockops")
+ int obi_sockmap_tracker(struct bpf_sock_ops *skops) {
+     struct bpf_sock *sk = skops->sk;
+@@ -927,6 +1005,9 @@ int obi_sockmap_tracker(struct bpf_sock_ops *skops) {
+     }
+ 
+     switch (skops->op) {
++    case BPF_SOCK_OPS_TCP_CONNECT_CB:
++        bpf_sock_ops_connect_cb(skops);
++        break;
+     case BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB:
+         bpf_sock_ops_active_est_cb(skops);
+         break;
+diff --git a/pkg/internal/ebpf/tpinjector/tpinjector.go b/pkg/internal/ebpf/tpinjector/tpinjector.go
+index 72dfdcd..6b7d48e 100644
+--- a/pkg/internal/ebpf/tpinjector/tpinjector.go
++++ b/pkg/internal/ebpf/tpinjector/tpinjector.go
+@@ -12,6 +12,9 @@ import (
+ 	"io"
+ 	"log/slog"
+ 	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
+ 	"sync"
+ 	"syscall"
+ 	"time"
+@@ -50,16 +53,17 @@ type Tracer struct {
+ 	sockhashOK              bool
+ 	iterMu                  sync.Mutex
+ 	itersOnce               sync.Once
+-	seenNetns               *expirable.LRU[uint64, struct{}]
++	seenPIDs                *expirable.LRU[app.PID, struct{}]
++	badNetns                *expirable.LRU[uint64, struct{}]
+ 	netnsAttempts           *expirable.LRU[uint64, int]
+ 	backfillDisabled        bool
+ }
+ 
+ const (
+-	seenNetnsCacheLen = 1024
+-	// the kernel reuses netns inodes and a capacity bound never evicts below the cap, so a new
+-	// container landing on a freed inode would look already backfilled
+-	seenNetnsTTL = 5 * time.Minute
++	backfillCacheLen = 1024
++	// pids and netns inodes are both reused, and a capacity bound never evicts below the cap,
++	// so a new process landing on a freed number would look already backfilled
++	backfillTTL = 5 * time.Minute
+ 	// a namespace that keeps failing is dropped, so one broken container cannot stop the
+ 	// backfill for every other namespace on the host
+ 	maxNetnsAttempts = 3
+@@ -71,17 +75,23 @@ func New(cfg *obi.Config) *Tracer {
+ 		log:           log,
+ 		cfg:           cfg,
+ 		fionreadProbe: sockhashFIONREADProbe,
+-		seenNetns:     expirable.NewLRU[uint64, struct{}](seenNetnsCacheLen, nil, seenNetnsTTL),
+-		netnsAttempts: expirable.NewLRU[uint64, int](seenNetnsCacheLen, nil, seenNetnsTTL),
++		seenPIDs:      expirable.NewLRU[app.PID, struct{}](backfillCacheLen, nil, backfillTTL),
++		badNetns:      expirable.NewLRU[uint64, struct{}](backfillCacheLen, nil, backfillTTL),
++		netnsAttempts: expirable.NewLRU[uint64, int](backfillCacheLen, nil, backfillTTL),
+ 	}
+ }
+ 
+-// AllowPID backfills sock_dir with pre-existing sockets: iter/tcp only walks the opener's netns
++// AllowPID backfills sock_dir with this process's pre-existing sockets.
++//
++// The walk is per pid rather than per netns because it is now scoped: iter/tcp
++// sees every socket in the namespace and cannot attribute one to a process, so
++// the discovered pid's own socket inodes are published to iter_allowed_socks
++// first and retracted afterwards. See bpf/tpinjector/maps/iter_allowed_socks.h.
+ func (p *Tracer) AllowPID(pid app.PID, _ uint32, _ *exec.FileInfo) {
+ 	p.iterMu.Lock()
+ 	defer p.iterMu.Unlock()
+ 
+-	if p.backfillDisabled {
++	if p.backfillDisabled || p.seenPIDs.Contains(pid) {
+ 		return
+ 	}
+ 
+@@ -92,11 +102,26 @@ func (p *Tracer) AllowPID(pid app.PID, _ uint32, _ *exec.FileInfo) {
+ 	}
+ 
+ 	inode := info.Sys().(*syscall.Stat_t).Ino
+-	if p.seenNetns.Contains(inode) {
++	if p.badNetns.Contains(inode) {
+ 		return
+ 	}
+ 
+-	for _, it := range p.Iters() {
++	iters := p.Iters()
++	if len(iters) == 0 {
++		return
++	}
++
++	scope := p.publishBackfillScope(pid)
++	defer p.retractBackfillScope(scope)
++
++	// No sockets of its own to enroll; the namespace's other sockets are
++	// deliberately not ours to convert.
++	if len(scope) == 0 {
++		p.seenPIDs.Add(pid, struct{}{})
++		return
++	}
++
++	for _, it := range iters {
+ 		if err := netns.WithNetNS(int(pid), func() error {
+ 			return it.Run(p.log)
+ 		}); err != nil {
+@@ -120,7 +145,7 @@ func (p *Tracer) AllowPID(pid app.PID, _ uint32, _ *exec.FileInfo) {
+ 			if attempts >= maxNetnsAttempts {
+ 				p.log.Warn("giving up on socket backfill for this network namespace",
+ 					"ino", inode, "attempts", attempts)
+-				p.seenNetns.Add(inode, struct{}{})
++				p.badNetns.Add(inode, struct{}{})
+ 			}
+ 			return
+ 		}
+@@ -128,7 +153,77 @@ func (p *Tracer) AllowPID(pid app.PID, _ uint32, _ *exec.FileInfo) {
+ 
+ 	// reached only when every iterator ran; a failure above returns so a later pid retries
+ 	p.netnsAttempts.Remove(inode)
+-	p.seenNetns.Add(inode, struct{}{})
++	p.seenPIDs.Add(pid, struct{}{})
++}
++
++// publishBackfillScope names the sockets obi_sk_iter_tcp may enroll during this
++// process's backfill, and returns them so the caller can retract them again.
++//
++// A socket file descriptor's /proc/<pid>/fd link reads back as
++// "socket:[<inode>]", and the same inode is reachable from a struct sock in
++// BPF, which is the only join between "this process owns it" and "the iterator
++// is looking at it" available without walking /proc/net tables.
++func (p *Tracer) publishBackfillScope(pid app.PID) []uint64 {
++	scope := p.bpfIterObjects.IterAllowedSocks
++	if scope == nil {
++		return nil
++	}
++
++	dir := fmt.Sprintf("/proc/%d/fd", pid)
++	entries, err := os.ReadDir(dir)
++	if err != nil {
++		p.log.Debug("cannot list process file descriptors", "pid", pid, "error", err)
++		return nil
++	}
++
++	var inodes []uint64
++	for _, entry := range entries {
++		// descriptors close under us constantly; an unreadable one is not an error
++		target, err := os.Readlink(filepath.Join(dir, entry.Name()))
++		if err != nil {
++			continue
++		}
++		ino, ok := socketInode(target)
++		if !ok {
++			continue
++		}
++		if err := scope.Put(ino, uint8(1)); err != nil {
++			p.log.Debug("cannot record backfill scope", "pid", pid, "ino", ino, "error", err)
++			continue
++		}
++		inodes = append(inodes, ino)
++	}
++
++	return inodes
++}
++
++func (p *Tracer) retractBackfillScope(inodes []uint64) {
++	scope := p.bpfIterObjects.IterAllowedSocks
++	if scope == nil {
++		return
++	}
++
++	for _, ino := range inodes {
++		if err := scope.Delete(ino); err != nil {
++			p.log.Debug("cannot clear backfill scope", "ino", ino, "error", err)
++		}
++	}
++}
++
++// socketInode reads the inode out of a "socket:[12345]" /proc/<pid>/fd link.
++func socketInode(target string) (uint64, bool) {
++	const prefix, suffix = "socket:[", "]"
++
++	if !strings.HasPrefix(target, prefix) || !strings.HasSuffix(target, suffix) {
++		return 0, false
++	}
++
++	ino, err := strconv.ParseUint(target[len(prefix):len(target)-len(suffix)], 10, 64)
++	if err != nil {
++		return 0, false
++	}
++
++	return ino, true
+ }
+ 
+ func (p *Tracer) BlockPID(app.PID, uint32) {}
