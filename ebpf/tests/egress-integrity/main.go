@@ -453,6 +453,7 @@ func main() {
 		progressScenario.Store(scenario.name)
 		progressSent.Store(0)
 		progressReceived.Store(0)
+		fmt.Printf("RUN %s\n", scenario.name)
 		if err := scenario.run(); err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", scenario.name, err)
 			os.Exit(1)
