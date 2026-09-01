@@ -13,27 +13,44 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
-const traceparentSize = 70
+const (
+	traceparentSize = 70
+	ioTimeout       = 10 * time.Second
+	watchdogTimeout = 120 * time.Second
+)
 
-var traceparentLine = regexp.MustCompile(`^Traceparent: 00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]\r\n$`)
+var (
+	traceparentLine  = regexp.MustCompile(`^Traceparent: 00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]\r\n$`)
+	progressScenario atomic.Value
+	progressSent     atomic.Int64
+	progressReceived atomic.Int64
+)
 
 type recordingConn struct {
 	net.Conn
+	clientSide   bool
 	read, written bytes.Buffer
 }
 
 func (c *recordingConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	c.read.Write(p[:n])
+	if !c.clientSide {
+		progressReceived.Add(int64(n))
+	}
 	return n, err
 }
 
 func (c *recordingConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
 	c.written.Write(p[:n])
+	if c.clientSide {
+		progressSent.Add(int64(n))
+	}
 	return n, err
 }
 
@@ -46,10 +63,26 @@ type exchange struct {
 	serverValue   any
 }
 
-func runExchange(server func(*recordingConn) (any, error), client func(*recordingConn) error) (exchange, error) {
+func setConnDeadlines(c net.Conn) error {
+	deadline := time.Now().Add(ioTimeout)
+	if err := c.SetReadDeadline(deadline); err != nil {
+		return fmt.Errorf("set read deadline: %w", err)
+	}
+	if err := c.SetWriteDeadline(deadline); err != nil {
+		return fmt.Errorf("set write deadline: %w", err)
+	}
+	return nil
+}
+
+func exchangeError(name, side string, expected int, err error) error {
+	return fmt.Errorf("%s %s failed: client wrote %d bytes; server received %d/%d expected bytes: %w",
+		name, side, progressSent.Load(), progressReceived.Load(), expected, err)
+}
+
+func runExchange(name string, expected int, server func(*recordingConn) (any, error), client func(*recordingConn) error) (exchange, error) {
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
-		return exchange{}, err
+		return exchange{}, exchangeError(name, "listen", expected, err)
 	}
 	defer ln.Close()
 
@@ -66,7 +99,11 @@ func runExchange(server func(*recordingConn) (any, error), client func(*recordin
 			return
 		}
 		rc := &recordingConn{Conn: conn}
-		_ = rc.SetDeadline(time.Now().Add(15 * time.Second))
+		if err := setConnDeadlines(rc); err != nil {
+			_ = rc.Close()
+			serverDone <- serverResult{err: err}
+			return
+		}
 		value, err := server(rc)
 		_ = rc.Close()
 		serverDone <- serverResult{value: value, received: bytes.Clone(rc.read.Bytes()), err: err}
@@ -74,18 +111,21 @@ func runExchange(server func(*recordingConn) (any, error), client func(*recordin
 
 	conn, err := net.DialTimeout("tcp4", ln.Addr().String(), 5*time.Second)
 	if err != nil {
-		return exchange{}, err
+		return exchange{}, exchangeError(name, "dial", expected, err)
 	}
-	rc := &recordingConn{Conn: conn}
-	_ = rc.SetDeadline(time.Now().Add(15 * time.Second))
+	rc := &recordingConn{Conn: conn, clientSide: true}
+	if err := setConnDeadlines(rc); err != nil {
+		_ = rc.Close()
+		return exchange{}, exchangeError(name, "client", expected, err)
+	}
 	clientErr := client(rc)
 	_ = rc.Close()
 	result := <-serverDone
 	if clientErr != nil {
-		return exchange{}, clientErr
+		return exchange{}, exchangeError(name, "client", expected, clientErr)
 	}
 	if result.err != nil {
-		return exchange{}, result.err
+		return exchange{}, exchangeError(name, "server", expected, result.err)
 	}
 	return exchange{sent: bytes.Clone(rc.written.Bytes()), received: result.received, serverValue: result.value}, nil
 }
@@ -143,8 +183,12 @@ func upgradeThenBinary() error {
 		[]byte("GET / HTTP/1.1\r\nopaque DERP payload"),
 		[]byte("POST /h HTTP/1.1\r\nmore opaque payload"),
 	}
+	expected := len(request)
+	for _, payload := range payloads {
+		expected += 5 + len(payload)
+	}
 
-	ex, err := runExchange(func(c *recordingConn) (any, error) {
+	ex, err := runExchange("upgrade-then-binary", expected, func(c *recordingConn) (any, error) {
 		reader := bufio.NewReader(c)
 		if err := readHeader(reader); err != nil {
 			return nil, err
@@ -213,7 +257,7 @@ func rawBinary() error {
 		}
 	}
 
-	ex, err := runExchange(func(c *recordingConn) (any, error) {
+	ex, err := runExchange("raw-binary", want.Len(), func(c *recordingConn) (any, error) {
 		_, err := io.Copy(io.Discard, c)
 		return nil, err
 	}, func(c *recordingConn) error {
@@ -309,8 +353,12 @@ func positiveControl(selfcheck bool) error {
 		[]byte("GET /two HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n"),
 		[]byte("POST /three HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\nConnection: keep-alive\r\n\r\nhello\x00world"),
 	}
+	expected := 0
+	for _, request := range requests {
+		expected += len(request)
+	}
 
-	ex, err := runExchange(func(c *recordingConn) (any, error) {
+	ex, err := runExchange("positive-control", expected, func(c *recordingConn) (any, error) {
 		return receiveRequests(c, len(requests))
 	}, func(c *recordingConn) error {
 		ack := []byte{0}
@@ -385,6 +433,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	progressScenario.Store("startup")
+	watchdog := time.AfterFunc(watchdogTimeout, func() {
+		fmt.Fprintf(os.Stderr, "watchdog timeout after %s: scenario=%s client-written=%d server-received=%d\n",
+			watchdogTimeout, progressScenario.Load(), progressSent.Load(), progressReceived.Load())
+		os.Exit(1)
+	})
+	defer watchdog.Stop()
+
 	scenarios := []struct {
 		name string
 		run  func() error
@@ -394,6 +450,9 @@ func main() {
 		{"positive-control", func() error { return positiveControl(*selfcheck) }},
 	}
 	for _, scenario := range scenarios {
+		progressScenario.Store(scenario.name)
+		progressSent.Store(0)
+		progressReceived.Store(0)
 		if err := scenario.run(); err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", scenario.name, err)
 			os.Exit(1)

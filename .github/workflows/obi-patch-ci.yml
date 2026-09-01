@@ -158,7 +158,8 @@ jobs:
 
           sudo "$RUNNER_TEMP/ebpf-instrument" -config "$RUNNER_TEMP/obi-test.yml" >"$obi_log" 2>&1 &
           obi_pid=$!
-          "$RUNNER_TEMP/egress-integrity" -start-file "$start_file" >"$payload_log" 2>&1 &
+          timeout --signal=TERM --kill-after=10s 150s \
+            "$RUNNER_TEMP/egress-integrity" -start-file "$start_file" >"$payload_log" 2>&1 &
           payload_pid=$!
 
           ready=
