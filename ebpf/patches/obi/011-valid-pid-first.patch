@@ -1,8 +1,27 @@
 diff --git a/bpf/tpinjector/tpinjector.c b/bpf/tpinjector/tpinjector.c
-index a8f24a14..fe56c360 100644
+index c6dcdbbc..078c160f 100644
 --- a/bpf/tpinjector/tpinjector.c
 +++ b/bpf/tpinjector/tpinjector.c
-@@ -1374,6 +1374,38 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -56,6 +56,9 @@ char __license[] SEC("license") = "Dual MIT/GPL";
+ //
+ //   obi_packet_extender (sk_msg entry)
+ //   │
++//   ├── !valid_pid → SK_PASS           │  Unmonitored process — nothing below
++//   │                                  │  may touch a byte of its traffic
++//   │                                  │
+ //   ├── socket parked → SK_PASS        │  Default-deny: this stream left
+ //   │                                  │  HTTP/1, never touch it again
+ //   ├── pull_data + fill_msg_buffers   │  Committed to processing
+@@ -89,8 +92,6 @@ char __license[] SEC("license") = "Dual MIT/GPL";
+ //   │     └── detect_h2                │  streams whose stored tp has
+ //   │                                  │  written=0 (uprobe miss)
+ //   │                                  │
+-//   ├── !valid_pid → SK_PASS           │  Unmonitored process
+-//   │                                  │
+ //   ├── is_h2_socket?                  │  Preface seen / confirmed H2: skip
+ //   │     └─ tail-call detect_h2       │  preface check, drive the H2 chain
+ //   │                                 │
+@@ -1405,6 +1406,38 @@ int obi_packet_extender(struct sk_msg_md *msg) {
          return SK_PASS;
      }
  
@@ -41,7 +60,7 @@ index a8f24a14..fe56c360 100644
      // Default-deny entry gate. A parked socket is never mutated again, and the
      // check sits ahead of everything: ahead of get_tp_info_pid /
      // handle_existing_tp_pid so a leftover trace context cannot resurrect
-@@ -1408,7 +1440,6 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1439,7 +1472,6 @@ int obi_packet_extender(struct sk_msg_md *msg) {
          return SK_PASS;
      }
  
@@ -49,24 +68,24 @@ index a8f24a14..fe56c360 100644
      const connection_info_t conn = get_connection_info(msg);
      const egress_key_t e_key = make_egress_key(&conn);
  
-@@ -1469,6 +1500,16 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1583,6 +1615,16 @@ int obi_packet_extender_http1_dispatch(struct sk_msg_md *msg) {
          }
      }
  
 +    // The Go-gRPC coordination route now sits behind the entry filter too. For
 +    // an allowed pid this is a no-op: valid_pid passed, so control flow reaches
-+    // here exactly as before. For an excluded pid the tail call no longer runs,
-+    // and that direction can only remove injections, never duplicate them: the
-+    // coordination this route implements is the *uprobe* telling sk_msg which
-+    // streams it already wrote (`tp_p->written = 1`, bpf/gotracer/go_grpc.c:983
++    // here exactly as before. For an excluded pid the route no longer runs, and
++    // that direction can only remove injections, never duplicate them: the
++    // coordination it implements is the *uprobe* telling sk_msg which streams
++    // it already wrote (`tp_p->written = 1`, bpf/gotracer/go_grpc.c:983
 +    // "confirm so sk_msg skips this stream"), so sk_msg is the second writer,
 +    // not the first. Not running it drops a would-be injection; the uprobe's
 +    // own write is untouched, and every remaining stream is still refused by
 +    // h2_inject_verdict rather than injected twice.
      if (is_go_grpc_client_conn(&t_ctx->p_conn)) {
-         // already pulled and filled above
+         // already pulled and filled by the entry program
          // per-stream decision in the h2 chain: inject only streams the uprobe left written=0
-@@ -1477,10 +1518,6 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1591,10 +1633,6 @@ int obi_packet_extender_http1_dispatch(struct sk_msg_md *msg) {
          return SK_PASS;
      }
  

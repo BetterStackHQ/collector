@@ -29,6 +29,19 @@ Currently contains patches:
   sees, so `tailscaled`'s control channel (Noise) and DERP client (binary
   frames) were unprotected. The confirmed-HTTP/2 chain is untouched, it is
   already default-deny.
+
+  The gate's two bounded scans and the dispatch that follows them are three
+  separate sk_msg programs (`k_tail_http1_request_line`,
+  `k_tail_http1_upgrade`, `k_tail_http1_dispatch`). That is not decoration: the
+  verifier keeps the exact loop offset each scan ends on, so a scan inlined
+  ahead of other code re-verifies all of it once per possible offset. Inlined,
+  `obi_packet_extender` hit the 1M complexity limit and the whole verdict
+  program failed to load — which disables the injector silently rather than
+  restricting it. A tail call ends the program, so each scan's fan-out reaches
+  only the few instructions after it. For the same reason the request line is
+  matched backwards from the message's first CRLF instead of forwards from the
+  method token, whose seven possible lengths would enter the loop as seven
+  states.
 * 011-valid-pid-first.patch
   Check OBI's discovery filter (`valid_pid`) at the top of
   `obi_packet_extender`. Upstream checks it only on the fall-through route, so

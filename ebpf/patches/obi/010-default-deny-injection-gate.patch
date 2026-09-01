@@ -26,7 +26,7 @@ index 00000000..da2ac5fd
 +    __type(value, u8);
 +} sk_inject_gate SEC(".maps");
 diff --git a/bpf/tpinjector/tpinjector.c b/bpf/tpinjector/tpinjector.c
-index a5febb70..a8f24a14 100644
+index a5febb70..c6dcdbbc 100644
 --- a/bpf/tpinjector/tpinjector.c
 +++ b/bpf/tpinjector/tpinjector.c
 @@ -45,6 +45,7 @@
@@ -37,7 +37,107 @@ index a5febb70..a8f24a14 100644
  #include <tpinjector/maps/sk_tp_info_pid_map.h>
  
  char __license[] SEC("license") = "Dual MIT/GPL";
-@@ -343,6 +344,227 @@ static __always_inline bool http1_upgrade_completed(struct sk_msg_md *msg) {
+@@ -55,24 +56,45 @@ char __license[] SEC("license") = "Dual MIT/GPL";
+ //
+ //   obi_packet_extender (sk_msg entry)
+ //   │
++//   ├── socket parked → SK_PASS        │  Default-deny: this stream left
++//   │                                  │  HTTP/1, never touch it again
++//   ├── pull_data + fill_msg_buffers   │  Committed to processing
++//   │                                  │
++//   └── H2 socket / stale buffer?      │  Gate cannot judge those bytes
++//         ├── yes → http1_dispatch     │
++//         └── no  → http1_request_line │
++//
++//   obi_packet_extender_http1_request_line
++//   │                                     Strict method SP target SP
++//   ├── fail → http1_dispatch             "HTTP/1." DIGIT CRLF at offset 0
++//   └── pass → http1_upgrade
++//
++//   obi_packet_extender_http1_upgrade
++//   │                                     Bounded case-insensitive search
++//   ├── "\r\nupgrade:" → park, SK_PASS    for a request Upgrade field
++//   └── else → http1_dispatch
++//
++//   Each scan gets its own program: a tail call ends the program, so the
++//   precise loop offsets the verifier tracks fan out into a handful of
++//   instructions instead of the whole dispatch below.
++//
++//   obi_packet_extender_http1_dispatch
++//   │
+ //   ├── tp_pid && !is_h2_socket?      ─┐  Central dispatch: Go net/http,
+-//   │     └── handle_existing_tp_pid   │  SSL. Pulls+fills internally after
+-//   │                                  │  passing valid check, then injects.
++//   │     └── handle_existing_tp_pid   │  injects only when the gate passed
+ //   │                                  │  H2 sockets skip this — they carry
+ //   │                                  │  per-stream traceparents in HPACK
+ //   │                                  │
+-//   ├── is_go_grpc_client_conn?        │  Go gRPC: pull+fill, then detect_h2
+-//   │     └── pull+fill, detect_h2     │  injects only streams whose stored
+-//   │                                  │  tp has written=0 (uprobe miss)
++//   ├── is_go_grpc_client_conn?        │  Go gRPC: detect_h2 injects only
++//   │     └── detect_h2                │  streams whose stored tp has
++//   │                                  │  written=0 (uprobe miss)
+ //   │                                  │
+-//   ├── !valid_pid → SK_PASS           │  Unmonitored process — no pull
+-//   │                                  │
+-//   ├── pull_data + fill_msg_buffers   │  Committed to processing
++//   ├── !valid_pid → SK_PASS           │  Unmonitored process
+ //   │                                  │
+ //   ├── is_h2_socket?                  │  Preface seen / confirmed H2: skip
+ //   │     └─ tail-call detect_h2       │  preface check, drive the H2 chain
+ //   │                                 │
+-//   ├── HTTP/1 detected?              │  ── find_existing_tp ── create_tp ──
++//   ├── HTTP/1 gate passed?           │  ── find_existing_tp ── create_tp ──
+ //   │                                 │     write_msg_traceparent
+ //   │                                 │
+ //   └── fall through ─────────────────┴─▶ wrap_http2_traceparent
+@@ -134,6 +156,9 @@ enum {
+     k_tail_validate_h2_tp,
+     k_tail_detect_h2,
+     k_tail_sniff_h2,
++    k_tail_http1_request_line,
++    k_tail_http1_upgrade,
++    k_tail_http1_dispatch,
+ };
+ 
+ int obi_packet_extender_write_msg_tp(struct sk_msg_md *msg);
+@@ -145,10 +170,13 @@ int obi_packet_extender_find_existing_h2_tp(struct sk_msg_md *msg);
+ int obi_packet_extender_validate_h2_tp(struct sk_msg_md *msg);
+ int obi_packet_extender_detect_h2(struct sk_msg_md *msg);
+ int obi_packet_extender_sniff_h2(struct sk_msg_md *msg);
++int obi_packet_extender_http1_request_line(struct sk_msg_md *msg);
++int obi_packet_extender_http1_upgrade(struct sk_msg_md *msg);
++int obi_packet_extender_http1_dispatch(struct sk_msg_md *msg);
+ 
+ struct {
+     __uint(type, BPF_MAP_TYPE_PROG_ARRAY);
+-    __uint(max_entries, 9);
++    __uint(max_entries, 12);
+     __uint(key_size, sizeof(u32));
+     __array(values, int(void *));
+ } extender_jump_table SEC(".maps") = {
+@@ -163,6 +191,9 @@ struct {
+             [k_tail_validate_h2_tp] = (void *)&obi_packet_extender_validate_h2_tp,
+             [k_tail_detect_h2] = (void *)&obi_packet_extender_detect_h2,
+             [k_tail_sniff_h2] = (void *)&obi_packet_extender_sniff_h2,
++            [k_tail_http1_request_line] = (void *)&obi_packet_extender_http1_request_line,
++            [k_tail_http1_upgrade] = (void *)&obi_packet_extender_http1_upgrade,
++            [k_tail_http1_dispatch] = (void *)&obi_packet_extender_http1_dispatch,
+         },
+ };
+ 
+@@ -185,7 +216,9 @@ typedef struct tailcall_ctx {
+     bool go_grpc_conn;            // Go gRPC egress: use uprobe-stored tps, never create
+     bool tp_present;              // frame already carries a traceparent we cannot adopt
+     bool scan_exhausted;          // retry budget ran out before the block was walked
++    bool http1_req;               // gate verdict: this message is an injectable HTTP/1 request
+     u8 opener;                    // first HPACK field byte of the frame being considered
++    u8 _pad[7];                   // -Wpadded is an error here, keep the tail explicit
+ } tailcall_ctx;
+ 
+ SCRATCH_MEM(tailcall_ctx);
+@@ -343,6 +376,226 @@ static __always_inline bool http1_upgrade_completed(struct sk_msg_md *msg) {
      return is_http1_101_response(msg->data, msg->data_end);
  }
  
@@ -96,9 +196,9 @@ index a5febb70..a8f24a14 100644
 +    k_http1_gate_scan_mask = k_http1_gate_scan_max - 1,
 +    // "GET / HTTP/1.1\r\n" — the shortest request line that can exist.
 +    k_http1_min_request_line = 16,
-+    // What the SP after the request-target must be followed by:
-+    // "HTTP/1." DIGIT CR LF.
-+    k_http1_version_span = 10,
++    // SP "HTTP/1." DIGIT — the nine bytes that must sit immediately before the
++    // CRLF that ends a request line.
++    k_http1_version_tail = 9,
 +    // "\r\nupgrade:"
 +    k_http1_upgrade_span = 10,
 +};
@@ -132,67 +232,85 @@ index a5febb70..a8f24a14 100644
 +    return 0;
 +}
 +
-+// A complete RFC 9112 3.1 request line at offset 0:
++// True when offset 0 holds a complete RFC 9112 3.1 request line:
 +//
 +//     method SP request-target SP "HTTP/1." DIGIT CRLF
 +//
-+// Returns the offset just past the CRLF, 0 when the bytes are not a request
-+// line. is_http_request_buf accepts a method prefix plus one target byte and
-+// nothing else, so any framing whose payload happens to open "GET /" passes
-+// it — harmless for generictracer, which only classifies, fatal for the
-+// injector, which mutates whatever it approves. The version token is what
-+// binary payloads cannot fake by accident, so it is the part that matters.
-+// The loose check stays as it is in bpf/common/http_types.h on purpose:
-+// tightening it there would change the generic tracer's read-only view of
-+// unrelated traffic.
-+static __always_inline u32 http1_request_line_end(const unsigned char *buf, u32 len) {
++// is_http_request_buf accepts a method prefix plus one target byte and nothing
++// else, so any framing whose payload happens to open "GET /" passes it —
++// harmless for generictracer, which only classifies, fatal for the injector,
++// which mutates whatever it approves. The version token is what binary payloads
++// cannot fake by accident, so it is the part that matters. The loose check stays
++// as it is in bpf/common/http_types.h on purpose: tightening it there would
++// change the generic tracer's read-only view of unrelated traffic.
++//
++// Verified from the back: find the first CRLF, then demand SP "HTTP/1." DIGIT
++// immediately before it. The obvious shape — walk forward from the end of the
++// method token to the SP that closes the target — makes the loop start at one
++// of the seven method lengths, and the verifier then re-verifies all 512
++// iterations once per length. That is what pushed this program past the 1M
++// complexity limit ("processed 1000001 insns ... total_states 33575") and made
++// the whole sk_msg verdict fail to load. Scanning from a constant offset costs
++// one entry state instead of seven.
++//
++// The one thing this shape does not check is that the request-target holds no
++// SP; it still requires the version token to sit exactly before the *first*
++// CRLF in the message, which is the part opaque payloads cannot satisfy by
++// accident.
++static __always_inline bool http1_request_line_ok(const unsigned char *buf, u32 len) {
 +    if (len > k_http1_gate_scan_max) {
 +        len = k_http1_gate_scan_max;
 +    }
 +    if (len < k_http1_min_request_line) {
-+        return 0;
++        return false;
 +    }
 +
 +    const u32 target = http1_method_span(buf);
 +
 +    if (target == 0 || !is_http_request_target(buf[target & k_http1_gate_scan_mask])) {
-+        return 0;
++        return false;
 +    }
 +
-+    // The request-target ends at the next SP and may contain neither SP, CR nor
-+    // LF (RFC 9112 3.2), so a terminator reached before that SP disqualifies
-+    // the line.
-+    for (u32 i = target + 1; i < len; i++) {
-+        const unsigned char c = buf[i & k_http1_gate_scan_mask];
++    // The earliest a request line can end is right after the shortest possible
++    // one, "GET / HTTP/1.1\r\n", so the scan starts at its CR.
++    u32 cr = 0;
 +
-+        if (c == '\r' || c == '\n') {
-+            return 0;
-+        }
-+        if (c != ' ') {
-+            continue;
-+        }
-+        // The version token has to fit inside the bytes this message actually
-+        // refreshed, otherwise its absence proves nothing.
-+        if (i + k_http1_version_span >= len) {
-+            return 0;
-+        }
++    for (u32 i = k_http1_min_request_line - 2; i + 1 < len; i++) {
++        const unsigned char *p = &buf[i & k_http1_gate_scan_mask];
 +
-+        const unsigned char *v = &buf[(i + 1) & k_http1_gate_scan_mask];
-+
-+        if (v[0] != 'H' || v[1] != 'T' || v[2] != 'T' || v[3] != 'P' || v[4] != '/' ||
-+            v[5] != '1' || v[6] != '.' || v[7] < '0' || v[7] > '9' || v[8] != '\r' ||
-+            v[9] != '\n') {
-+            return 0;
++        // One OR-accumulated comparison and one branch, and the branch leaves
++        // the loop: the body has a single successor edge back to the loop head.
++        if (((u32)(p[0] ^ '\r') | (u32)(p[1] ^ '\n')) == 0) {
++            cr = i;
++            break;
 +        }
-+
-+        return i + k_http1_version_span + 1;
 +    }
 +
-+    return 0;
++    if (cr == 0) {
++        return false;
++    }
++
++    // cr is at least k_http1_min_request_line - 2, so this stays inside the
++    // bytes the method check already validated.
++    const unsigned char *v = &buf[(cr - k_http1_version_tail) & k_http1_gate_scan_mask];
++
++    // SP "HTTP/1." DIGIT, compared by OR-accumulating every mismatch into one
++    // word and taking a single branch. The SP is what separates the version
++    // token from the request-target, and a method byte can never match it, so
++    // no explicit check that the token sits past the method is needed.
++    const u32 mismatch = (u32)(v[0] ^ ' ') | (u32)(v[1] ^ 'H') | (u32)(v[2] ^ 'T') |
++                         (u32)(v[3] ^ 'T') | (u32)(v[4] ^ 'P') | (u32)(v[5] ^ '/') |
++                         (u32)(v[6] ^ '1') | (u32)(v[7] ^ '.') |
++                         (u32)((unsigned char)(v[8] - '0') > 9);
++
++    return mismatch == 0;
 +}
 +
-+// Case-insensitive search for an Upgrade request header, started at the CRLF
-+// that closed the request line so the first header field is covered too.
++// Case-insensitive search for an Upgrade request header. The scan starts at
++// offset 0: http1_request_line_ok has already established that the first CRLF
++// in the message terminates the request line, so the first field this examines
++// is the first header. A constant start also keeps the loop's entry state
++// single, which a caller-computed offset would not.
 +//
 +// This is the client half of the 101-response park above. The server's "101
 +// Switching Protocols" arrives on *ingress* and an sk_msg program only ever
@@ -208,64 +326,45 @@ index a5febb70..a8f24a14 100644
 +//
 +// Capped like the rest of the gate. An Upgrade field pushed past the cap by a
 +// large cookie leaves the socket unparked, but then every later message still
-+// has to satisfy http1_request_line_end before anything is mutated.
-+static __always_inline bool http1_request_upgrades(const unsigned char *buf, u32 len, u32 from) {
++// has to satisfy http1_request_line_ok before anything is mutated.
++static __always_inline bool http1_request_upgrades(const unsigned char *buf, u32 len) {
 +    if (len > k_http1_gate_scan_max) {
 +        len = k_http1_gate_scan_max;
 +    }
 +
-+    for (u32 i = from; i + k_http1_upgrade_span <= len; i++) {
++    for (u32 i = 0; i + k_http1_upgrade_span <= len; i++) {
 +        const unsigned char *p = &buf[i & k_http1_gate_scan_mask];
 +
-+        if (p[0] != '\r' || p[1] != '\n') {
-+            continue;
-+        }
-+        // Empty line: the header block is over and body bytes are not headers.
-+        if (p[2] == '\r' && p[3] == '\n') {
-+            return false;
-+        }
++        // Both tests OR-accumulate their mismatches into one word and take a
++        // single branch, and both branches leave the loop, so the body has one
++        // successor edge back to the loop head. Short-circuiting chains here
++        // multiplied verifier states per iteration until the entry program
++        // exceeded the 1M complexity limit and failed to load.
++        //
 +        // Field names are case-insensitive (RFC 9110 5.1); | 0x20 lowercases
 +        // ASCII letters, as http_types.h already does for the target byte.
-+        if ((p[2] | 0x20) == 'u' && (p[3] | 0x20) == 'p' && (p[4] | 0x20) == 'g' &&
-+            (p[5] | 0x20) == 'r' && (p[6] | 0x20) == 'a' && (p[7] | 0x20) == 'd' &&
-+            (p[8] | 0x20) == 'e' && p[9] == ':') {
++        const u32 crlf = (u32)(p[0] ^ '\r') | (u32)(p[1] ^ '\n');
++        const u32 name = (u32)((p[2] | 0x20) ^ 'u') | (u32)((p[3] | 0x20) ^ 'p') |
++                         (u32)((p[4] | 0x20) ^ 'g') | (u32)((p[5] | 0x20) ^ 'r') |
++                         (u32)((p[6] | 0x20) ^ 'a') | (u32)((p[7] | 0x20) ^ 'd') |
++                         (u32)((p[8] | 0x20) ^ 'e') | (u32)(p[9] ^ ':');
++
++        if ((crlf | name) == 0) {
 +            return true;
++        }
++        // Empty line: the header block is over and body bytes are not headers.
++        if ((crlf | (u32)(p[2] ^ '\r') | (u32)(p[3] ^ '\n')) == 0) {
++            return false;
 +        }
 +    }
 +
 +    return false;
 +}
 +
-+// The gate itself, over the scratch buffer fill_msg_buffers just refreshed.
-+// True when this message may be mutated as an HTTP/1 request; *upgrade is set
-+// when it is a request that asks to leave HTTP/1, which the caller turns into
-+// a permanent park instead of an injection.
-+static __always_inline bool http1_injectable_request(u32 msg_size, bool *upgrade) {
-+    *upgrade = false;
-+
-+    const unsigned char *buf = bpf_map_lookup_elem(&msg_buffer_mem, &(u32){0});
-+
-+    if (!buf) {
-+        return false;
-+    }
-+
-+    const u32 line_end = http1_request_line_end(buf, msg_size);
-+
-+    if (line_end == 0) {
-+        return false;
-+    }
-+
-+    // line_end is at least k_http1_min_request_line, so line_end - 2 lands on
-+    // the CR of the request line's own CRLF.
-+    *upgrade = http1_request_upgrades(buf, msg_size, line_end - 2);
-+
-+    return true;
-+}
-+
  #ifndef ENOMSG
  #define ENOMSG 42
  #endif
-@@ -1098,48 +1320,48 @@ int obi_packet_extender_sniff_h2(struct sk_msg_md *msg) {
+@@ -1098,48 +1351,48 @@ int obi_packet_extender_sniff_h2(struct sk_msg_md *msg) {
  }
  
  // HTTP/1 only. Caller must skip this for H2 sockets — connection-scoped tp_pid
@@ -340,7 +439,7 @@ index a5febb70..a8f24a14 100644
  }
  
  // Sock_msg program which detects packets where it should add space for
-@@ -1152,6 +1374,15 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1152,6 +1405,15 @@ int obi_packet_extender(struct sk_msg_md *msg) {
          return SK_PASS;
      }
  
@@ -356,7 +455,7 @@ index a5febb70..a8f24a14 100644
      // A connection that legally left HTTP/1 via 101 Switching Protocols
      // (kubectl port-forward SPDY/3.1, WebSockets) carries an opaque tunnel
      // from then on: injecting into tunneled bytes that merely resemble an
-@@ -1191,16 +1422,55 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1191,16 +1453,138 @@ int obi_packet_extender(struct sk_msg_md *msg) {
      t_ctx->h2_tp_retries = 0;
      t_ctx->go_grpc_conn = false;
  
@@ -376,26 +475,109 @@ index a5febb70..a8f24a14 100644
 +    // judge a previous message's bytes.
 +    const bool fresh_buffers = fill_msg_buffers(msg, &t_ctx->p_conn, &e_key);
 +
-+    // Default-deny. Every HTTP/1 mutation reachable from here — the TCP option
-+    // scheduled by handle_existing_tp_pid, the Traceparent splice, the trace
-+    // context created for either — now requires that this very message parses
-+    // as a complete HTTP/1 request line in those fresh bytes. Payload that
-+    // merely opens like a request, e.g. a binary frame starting "GET /" with
-+    // no version token behind it, is passed through untouched.
-+    bool upgrade_request = false;
-+    const bool http1_req =
-+        !h2_sock && fresh_buffers && http1_injectable_request(msg->size, &upgrade_request);
-+
-+    // The request asked to leave HTTP/1: park before injecting into it. The
-+    // upgrade request is the last HTTP/1 message on this socket, and its own
-+    // bytes are already part of a handshake the peer may be hashing, so it is
-+    // passed through as-is too.
-+    if (upgrade_request) {
-+        park_socket(msg);
-+        clear_tp_info_pid(&e_key);
++    // Default-deny. Every HTTP/1 mutation downstream — the TCP option scheduled
++    // by handle_existing_tp_pid, the Traceparent splice, the trace context
++    // created for either — requires that this very message parses as a complete
++    // HTTP/1 request line in those fresh bytes. Payload that merely opens like
++    // a request, e.g. a binary frame starting "GET /" with no version token
++    // behind it, is passed through untouched. The verdict is computed by the
++    // two gate programs below and lands in t_ctx->http1_req.
++    if (h2_sock || !fresh_buffers) {
++        t_ctx->http1_req = false;
++        bpf_tail_call_static(msg, &extender_jump_table, k_tail_http1_dispatch);
++        bpf_d_printk("tailcall failed [%s]", __FUNCTION__);
          return SK_PASS;
      }
  
++    bpf_tail_call_static(msg, &extender_jump_table, k_tail_http1_request_line);
++    bpf_d_printk("tailcall failed [%s]", __FUNCTION__);
++
++    return SK_PASS;
++}
++
++// Why the gate is three programs instead of three helper calls: each of the two
++// bounded scans leaves its loop holding one of k_http1_gate_scan_max *precise*
++// offsets, and the verifier keeps that precision, so everything downstream of a
++// scan is re-verified once per possible offset. Chaining two scans and the
++// dispatch inside one program multiplied those factors and blew the verifier's
++// per-program complexity limit outright — "processed 1000001 insns (limit
++// 1000000) ... total_states 28815" — which does not restrict injection, it
++// makes the whole sk_msg verdict fail to load and disables the injector
++// silently. A tail call ends the program, so each scan's fan-out reaches only
++// the handful of instructions after it. Upstream splits detect_h2 and
++// validate_h2_tp out for the same reason, and find_existing_tp scans 1KB per
++// program on exactly this pattern.
++//
++// k_tail_http1_request_line — strict HTTP/1 request-line parse of this message.
++SEC("sk_msg")
++int obi_packet_extender_http1_request_line(struct sk_msg_md *msg) {
++    tailcall_ctx *t_ctx = tailcall_ctx_mem();
++
++    if (!t_ctx) {
++        return SK_PASS;
++    }
++
++    const unsigned char *buf = bpf_map_lookup_elem(&msg_buffer_mem, &(u32){0});
++
++    t_ctx->http1_req = buf && http1_request_line_ok(buf, msg->size);
++
++    if (!t_ctx->http1_req) {
++        bpf_tail_call_static(msg, &extender_jump_table, k_tail_http1_dispatch);
++        bpf_d_printk("tailcall failed [%s]", __FUNCTION__);
++        return SK_PASS;
++    }
++
++    bpf_tail_call_static(msg, &extender_jump_table, k_tail_http1_upgrade);
++    bpf_d_printk("tailcall failed [%s]", __FUNCTION__);
++
++    return SK_PASS;
++}
++
++// k_tail_http1_upgrade — the message is a request; park the socket if it asks
++// to leave HTTP/1 rather than inject into it. The upgrade request is the last
++// HTTP/1 message on this socket, and its own bytes are already part of a
++// handshake the peer may be hashing, so it is passed through as-is too.
++SEC("sk_msg")
++int obi_packet_extender_http1_upgrade(struct sk_msg_md *msg) {
++    tailcall_ctx *t_ctx = tailcall_ctx_mem();
++
++    if (!t_ctx) {
++        return SK_PASS;
++    }
++
++    const unsigned char *buf = bpf_map_lookup_elem(&msg_buffer_mem, &(u32){0});
++
++    if (buf && http1_request_upgrades(buf, msg->size)) {
++        park_socket(msg);
++        clear_tp_info_pid(&t_ctx->e_key);
++        return SK_PASS;
++    }
++
++    bpf_tail_call_static(msg, &extender_jump_table, k_tail_http1_dispatch);
++    bpf_d_printk("tailcall failed [%s]", __FUNCTION__);
++
++    return SK_PASS;
++}
++
++// k_tail_http1_dispatch — everything the default-deny gate guards. Reached only
++// for an unparked socket, with the current message already pulled, the scratch
++// buffer already filled, and the gate's verdict in t_ctx->http1_req.
++SEC("sk_msg")
++int obi_packet_extender_http1_dispatch(struct sk_msg_md *msg) {
++    tailcall_ctx *t_ctx = tailcall_ctx_mem();
++
++    if (!t_ctx) {
++        return SK_PASS;
++    }
++
++    // Same task and same socket as the entry program, so both are re-derived
++    // rather than threaded through the scratch struct.
++    const u64 id = bpf_get_current_pid_tgid();
++    const connection_info_t conn = get_connection_info(msg);
++    const egress_key_t e_key = t_ctx->e_key;
++    const bool http1_req = t_ctx->http1_req;
++    const bool h2_sock = is_h2_socket(msg);
++
 +    // skip H2 here — it uses HPACK for per-stream traceparents
 +    tp_info_pid_t *tp_pid = get_tp_info_pid(&e_key);
 +    if (tp_pid && !h2_sock) {
@@ -414,11 +596,11 @@ index a5febb70..a8f24a14 100644
      if (is_go_grpc_client_conn(&t_ctx->p_conn)) {
 -        bpf_msg_pull_data(msg, 0, msg->size, 0);
 -        fill_msg_buffers(msg, &t_ctx->p_conn, &e_key);
-+        // already pulled and filled above
++        // already pulled and filled by the entry program
          // per-stream decision in the h2 chain: inject only streams the uprobe left written=0
          t_ctx->go_grpc_conn = true;
          bpf_tail_call_static(msg, &extender_jump_table, k_tail_detect_h2);
-@@ -1211,13 +1481,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1211,13 +1595,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
          return SK_PASS;
      }
  
@@ -433,7 +615,7 @@ index a5febb70..a8f24a14 100644
          bpf_tail_call_static(msg, &extender_jump_table, k_tail_detect_h2);
          return SK_PASS;
      }
-@@ -1230,7 +1494,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1230,7 +1608,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
      bpf_dbg_printk("MSG TO=%llx:%d", conn.d_ip[3], conn.d_port);
      bpf_dbg_printk("MSG SIZE=%u", msg->size);
  
@@ -442,3 +624,11 @@ index a5febb70..a8f24a14 100644
      if (is_http) {
          bpf_dbg_printk("len=%d, s_port=%d", msg->size, msg->local_port);
          init_tp_ctx_parent_tp(t_ctx);
+@@ -1239,6 +1617,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+     }
+ 
+     wrap_http2_traceparent(msg, &t_ctx->p_conn);
++
+     return SK_PASS;
+ }
+ 
