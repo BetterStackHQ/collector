@@ -1,0 +1,444 @@
+diff --git a/bpf/tpinjector/maps/sk_inject_gate.h b/bpf/tpinjector/maps/sk_inject_gate.h
+new file mode 100644
+index 00000000..da2ac5fd
+--- /dev/null
++++ b/bpf/tpinjector/maps/sk_inject_gate.h
+@@ -0,0 +1,21 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++#pragma once
++
++#include <bpfcore/vmlinux.h>
++#include <bpfcore/bpf_helpers.h>
++
++// Per-socket verdict of the default-deny injection gate: 0 unknown, 1 parked.
++//
++// Deliberately separate storage from sk_h2_conn_flag: that byte drives the
++// HTTP/2 preface state machine and every dispatch site reads it as an HTTP/2
++// state, so an HTTP/1 verdict folded into its enum would make those reads lie.
++// SK_STORAGE is socket-lifetime state, freed by the kernel when the socket is
++// closed, which is exactly the scope of a "this connection left HTTP/1" fact.
++struct {
++    __uint(type, BPF_MAP_TYPE_SK_STORAGE);
++    __uint(map_flags, BPF_F_NO_PREALLOC);
++    __type(key, u32);
++    __type(value, u8);
++} sk_inject_gate SEC(".maps");
+diff --git a/bpf/tpinjector/tpinjector.c b/bpf/tpinjector/tpinjector.c
+index a5febb70..a8f24a14 100644
+--- a/bpf/tpinjector/tpinjector.c
++++ b/bpf/tpinjector/tpinjector.c
+@@ -45,6 +45,7 @@
+ #include <tpinjector/inject_policy.h>
+ #include <tpinjector/maps/sk_h2_flags.h>
+ #include <tpinjector/maps/sk_h2_conn_flag.h>
++#include <tpinjector/maps/sk_inject_gate.h>
+ #include <tpinjector/maps/sk_tp_info_pid_map.h>
+ 
+ char __license[] SEC("license") = "Dual MIT/GPL";
+@@ -343,6 +344,227 @@ static __always_inline bool http1_upgrade_completed(struct sk_msg_md *msg) {
+     return is_http1_101_response(msg->data, msg->data_end);
+ }
+ 
++// =============================================================================
++// Default-deny HTTP/1 injection gate
++// =============================================================================
++//
++// Per-socket verdict recorded in sk_inject_gate. Parking is permanent: it
++// states that the bytes on this socket are no longer HTTP/1, and nothing on a
++// TCP stream ever takes that back.
++enum {
++    k_inject_gate_unknown = 0, // nothing decided yet
++    k_inject_gate_parked = 1,  // never mutate another byte on this socket
++};
++
++static __always_inline bool sock_is_parked(struct sk_msg_md *msg) {
++    struct bpf_sock *sk = msg->sk;
++
++    // Without a socket there is nowhere to record a verdict, so a park
++    // decided on an earlier message could not have survived to this one.
++    // Default-deny has to fail closed here rather than inject blind; in
++    // practice sk_msg always carries its socket, and the H2 state machine,
++    // schedule_write_tcp_option and set_h2_sock_state all give up on !sk
++    // anyway, so nothing that could inject is lost.
++    if (!sk) {
++        return true;
++    }
++
++    const u8 *gate = bpf_sk_storage_get(&sk_inject_gate, sk, NULL, 0);
++
++    return gate && *gate == k_inject_gate_parked;
++}
++
++static __always_inline void park_socket(struct sk_msg_md *msg) {
++    struct bpf_sock *sk = msg->sk;
++
++    if (!sk) {
++        return;
++    }
++
++    u8 init = k_inject_gate_parked;
++    u8 *gate = bpf_sk_storage_get(&sk_inject_gate, sk, &init, BPF_SK_STORAGE_GET_F_CREATE);
++
++    if (gate) {
++        *gate = k_inject_gate_parked;
++    }
++}
++
++enum {
++    // Bytes of a message the gate is willing to read. fill_msg_buffers
++    // refreshes min(msg->size, k_msg_buffer_size_max) scratch bytes from *this*
++    // message, so the scan is also clamped to msg->size: past it lie either
++    // out-of-message kernel bytes or the tail of a previous message. Power of
++    // two so the index mask keeps every access provably inside the map value.
++    k_http1_gate_scan_max = 512,
++    k_http1_gate_scan_mask = k_http1_gate_scan_max - 1,
++    // "GET / HTTP/1.1\r\n" — the shortest request line that can exist.
++    k_http1_min_request_line = 16,
++    // What the SP after the request-target must be followed by:
++    // "HTTP/1." DIGIT CR LF.
++    k_http1_version_span = 10,
++    // "\r\nupgrade:"
++    k_http1_upgrade_span = 10,
++};
++
++_Static_assert((k_http1_gate_scan_max & (k_http1_gate_scan_max - 1)) == 0,
++               "k_http1_gate_scan_max must be a power of 2");
++_Static_assert(k_http1_gate_scan_max <= k_msg_buffer_size_max,
++               "the gate must not read past what fill_msg_buffers refreshes");
++
++// Length of the method token including its single trailing SP, 0 when the
++// buffer does not open with a method the injector recognises. The method set
++// mirrors is_http_request_buf (bpf/common/http_types.h) so the gate can only
++// ever narrow what upstream calls HTTP/1, never widen it.
++static __always_inline u32 http1_method_span(const unsigned char *p) {
++    if (__builtin_memcmp(p, "GET ", 4) == 0 || __builtin_memcmp(p, "PUT ", 4) == 0) {
++        return 4;
++    }
++    if (__builtin_memcmp(p, "POST ", 5) == 0 || __builtin_memcmp(p, "HEAD ", 5) == 0) {
++        return 5;
++    }
++    if (__builtin_memcmp(p, "PATCH ", 6) == 0) {
++        return 6;
++    }
++    if (__builtin_memcmp(p, "DELETE ", 7) == 0) {
++        return 7;
++    }
++    if (__builtin_memcmp(p, "OPTIONS ", 8) == 0) {
++        return 8;
++    }
++
++    return 0;
++}
++
++// A complete RFC 9112 3.1 request line at offset 0:
++//
++//     method SP request-target SP "HTTP/1." DIGIT CRLF
++//
++// Returns the offset just past the CRLF, 0 when the bytes are not a request
++// line. is_http_request_buf accepts a method prefix plus one target byte and
++// nothing else, so any framing whose payload happens to open "GET /" passes
++// it — harmless for generictracer, which only classifies, fatal for the
++// injector, which mutates whatever it approves. The version token is what
++// binary payloads cannot fake by accident, so it is the part that matters.
++// The loose check stays as it is in bpf/common/http_types.h on purpose:
++// tightening it there would change the generic tracer's read-only view of
++// unrelated traffic.
++static __always_inline u32 http1_request_line_end(const unsigned char *buf, u32 len) {
++    if (len > k_http1_gate_scan_max) {
++        len = k_http1_gate_scan_max;
++    }
++    if (len < k_http1_min_request_line) {
++        return 0;
++    }
++
++    const u32 target = http1_method_span(buf);
++
++    if (target == 0 || !is_http_request_target(buf[target & k_http1_gate_scan_mask])) {
++        return 0;
++    }
++
++    // The request-target ends at the next SP and may contain neither SP, CR nor
++    // LF (RFC 9112 3.2), so a terminator reached before that SP disqualifies
++    // the line.
++    for (u32 i = target + 1; i < len; i++) {
++        const unsigned char c = buf[i & k_http1_gate_scan_mask];
++
++        if (c == '\r' || c == '\n') {
++            return 0;
++        }
++        if (c != ' ') {
++            continue;
++        }
++        // The version token has to fit inside the bytes this message actually
++        // refreshed, otherwise its absence proves nothing.
++        if (i + k_http1_version_span >= len) {
++            return 0;
++        }
++
++        const unsigned char *v = &buf[(i + 1) & k_http1_gate_scan_mask];
++
++        if (v[0] != 'H' || v[1] != 'T' || v[2] != 'T' || v[3] != 'P' || v[4] != '/' ||
++            v[5] != '1' || v[6] != '.' || v[7] < '0' || v[7] > '9' || v[8] != '\r' ||
++            v[9] != '\n') {
++            return 0;
++        }
++
++        return i + k_http1_version_span + 1;
++    }
++
++    return 0;
++}
++
++// Case-insensitive search for an Upgrade request header, started at the CRLF
++// that closed the request line so the first header field is covered too.
++//
++// This is the client half of the 101-response park above. The server's "101
++// Switching Protocols" arrives on *ingress* and an sk_msg program only ever
++// sees egress, so on a client socket the upgrade request is the only warning
++// there is. tailscaled's control channel ("Upgrade: tailscale-control-protocol",
++// then Noise), its DERP client ("Upgrade: DERP", then type/length binary
++// frames) and every WebSocket client have exactly this shape: one HTTP/1
++// request out, then bytes that belong to a different protocol. Whether the
++// server accepted the upgrade is unknowable from egress, so a socket that
++// merely asks is parked: the cost of a refused upgrade is lost propagation,
++// the cost of guessing wrong the other way is a traceparent spliced into
++// tunnelled bytes, shifting their framing for good.
++//
++// Capped like the rest of the gate. An Upgrade field pushed past the cap by a
++// large cookie leaves the socket unparked, but then every later message still
++// has to satisfy http1_request_line_end before anything is mutated.
++static __always_inline bool http1_request_upgrades(const unsigned char *buf, u32 len, u32 from) {
++    if (len > k_http1_gate_scan_max) {
++        len = k_http1_gate_scan_max;
++    }
++
++    for (u32 i = from; i + k_http1_upgrade_span <= len; i++) {
++        const unsigned char *p = &buf[i & k_http1_gate_scan_mask];
++
++        if (p[0] != '\r' || p[1] != '\n') {
++            continue;
++        }
++        // Empty line: the header block is over and body bytes are not headers.
++        if (p[2] == '\r' && p[3] == '\n') {
++            return false;
++        }
++        // Field names are case-insensitive (RFC 9110 5.1); | 0x20 lowercases
++        // ASCII letters, as http_types.h already does for the target byte.
++        if ((p[2] | 0x20) == 'u' && (p[3] | 0x20) == 'p' && (p[4] | 0x20) == 'g' &&
++            (p[5] | 0x20) == 'r' && (p[6] | 0x20) == 'a' && (p[7] | 0x20) == 'd' &&
++            (p[8] | 0x20) == 'e' && p[9] == ':') {
++            return true;
++        }
++    }
++
++    return false;
++}
++
++// The gate itself, over the scratch buffer fill_msg_buffers just refreshed.
++// True when this message may be mutated as an HTTP/1 request; *upgrade is set
++// when it is a request that asks to leave HTTP/1, which the caller turns into
++// a permanent park instead of an injection.
++static __always_inline bool http1_injectable_request(u32 msg_size, bool *upgrade) {
++    *upgrade = false;
++
++    const unsigned char *buf = bpf_map_lookup_elem(&msg_buffer_mem, &(u32){0});
++
++    if (!buf) {
++        return false;
++    }
++
++    const u32 line_end = http1_request_line_end(buf, msg_size);
++
++    if (line_end == 0) {
++        return false;
++    }
++
++    // line_end is at least k_http1_min_request_line, so line_end - 2 lands on
++    // the CR of the request line's own CRLF.
++    *upgrade = http1_request_upgrades(buf, msg_size, line_end - 2);
++
++    return true;
++}
++
+ #ifndef ENOMSG
+ #define ENOMSG 42
+ #endif
+@@ -1098,48 +1320,48 @@ int obi_packet_extender_sniff_h2(struct sk_msg_md *msg) {
+ }
+ 
+ // HTTP/1 only. Caller must skip this for H2 sockets — connection-scoped tp_pid
+-// carries the wrong context for multiplexed streams.
++// carries the wrong context for multiplexed streams — and must have passed the
++// default-deny gate first: the message is then known to be a complete HTTP/1
++// request in a freshly filled scratch buffer, which is the precondition of
++// both mutations below.
++//
++// Upstream scheduled the TCP option as this function's very first statement,
++// ahead of the validity, freshness and payload checks. A message that turned
++// out not to be HTTP could therefore already have put an option on the wire
++// that nothing further down could take back, so the ordering is inverted here:
++// every check first, mutations last. The 009 clear-on-stale semantics are
++// preserved, the caller now owns the fill and clears the pending context when
++// it comes back stale.
+ static __always_inline bool handle_existing_tp_pid(struct sk_msg_md *msg,
+                                                    u64 id,
+                                                    const pid_connection_info_t *p_conn,
+                                                    const egress_key_t *e_key,
+                                                    tp_info_pid_t *tp_pid) {
+-    if (inject_flags & k_inject_tcp_options) {
+-        schedule_write_tcp_option(msg, tp_pid);
+-    }
+-
+     // valid==0: SSL or junk — drop it and stop tracking
+     if (tp_pid->valid == 0) {
+         clear_tp_info_pid(e_key);
+         return true;
+     }
+ 
+-    bpf_msg_pull_data(msg, 0, msg->size, 0);
+-
+-    // If the scratch buffer wasn't refreshed from *this* message (SSL
+-    // payload, empty message, or allocation failure), protocol_detector
+-    // would judge stale bytes left by a previous message on this CPU. A
+-    // stale plaintext HTTP request start would make it approve injecting
+-    // into what is actually opaque data (e.g. TLS ciphertext, which the
+-    // splice would corrupt into a peer-side bad_record_mac). Never detect
+-    // or inject on a stale buffer.
+-    if (!fill_msg_buffers(msg, p_conn, e_key)) {
++    // Still needed next to the gate: protocol_detector also refuses a
++    // connection that already has a request in flight (already_tracked), which
++    // is what keeps a single connection from being extended twice.
++    if (!protocol_detector(msg, id, &p_conn->conn)) {
+         clear_tp_info_pid(e_key);
+-        return true;
++        return false;
+     }
+ 
+-    const bool is_http = protocol_detector(msg, id, &p_conn->conn);
+-    if (is_http) {
+-        if (inject_flags & k_inject_http_headers) {
+-            write_http_traceparent(msg, tp_pid);
+-        } else {
+-            clear_tp_info_pid(e_key);
+-        }
+-        return true;
++    if (inject_flags & k_inject_tcp_options) {
++        schedule_write_tcp_option(msg, tp_pid);
+     }
+ 
+-    clear_tp_info_pid(e_key);
+-    return false;
++    if (inject_flags & k_inject_http_headers) {
++        write_http_traceparent(msg, tp_pid);
++    } else {
++        clear_tp_info_pid(e_key);
++    }
++
++    return true;
+ }
+ 
+ // Sock_msg program which detects packets where it should add space for
+@@ -1152,6 +1374,15 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+         return SK_PASS;
+     }
+ 
++    // Default-deny entry gate. A parked socket is never mutated again, and the
++    // check sits ahead of everything: ahead of get_tp_info_pid /
++    // handle_existing_tp_pid so a leftover trace context cannot resurrect
++    // injection, and ahead of the protocol_detector route so no byte of a
++    // parked stream is even classified.
++    if (sock_is_parked(msg)) {
++        return SK_PASS;
++    }
++
+     // A connection that legally left HTTP/1 via 101 Switching Protocols
+     // (kubectl port-forward SPDY/3.1, WebSockets) carries an opaque tunnel
+     // from then on: injecting into tunneled bytes that merely resemble an
+@@ -1191,16 +1422,55 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+     t_ctx->h2_tp_retries = 0;
+     t_ctx->go_grpc_conn = false;
+ 
+-    // skip H2 here — it uses HPACK for per-stream traceparents
+-    tp_info_pid_t *tp_pid = get_tp_info_pid(&e_key);
+-    if (tp_pid && !is_h2_socket(msg) &&
+-        handle_existing_tp_pid(msg, id, &t_ctx->p_conn, &e_key, tp_pid)) {
++    // Confirmed and scanning HTTP/2 sockets keep their own chain: HPACK
++    // injection is already default-deny (h2_inject_verdict) and an H2 frame is
++    // not an HTTP/1 request, so the HTTP/1 gate must never judge one. Read
++    // once, the state cannot change inside this program.
++    const bool h2_sock = is_h2_socket(msg);
++
++    bpf_msg_pull_data(msg, 0, msg->size, 0);
++    // 009: a scratch buffer that wasn't refreshed from *this* message (SSL
++    // payload, empty message, allocation failure) would make everything below
++    // judge a previous message's bytes.
++    const bool fresh_buffers = fill_msg_buffers(msg, &t_ctx->p_conn, &e_key);
++
++    // Default-deny. Every HTTP/1 mutation reachable from here — the TCP option
++    // scheduled by handle_existing_tp_pid, the Traceparent splice, the trace
++    // context created for either — now requires that this very message parses
++    // as a complete HTTP/1 request line in those fresh bytes. Payload that
++    // merely opens like a request, e.g. a binary frame starting "GET /" with
++    // no version token behind it, is passed through untouched.
++    bool upgrade_request = false;
++    const bool http1_req =
++        !h2_sock && fresh_buffers && http1_injectable_request(msg->size, &upgrade_request);
++
++    // The request asked to leave HTTP/1: park before injecting into it. The
++    // upgrade request is the last HTTP/1 message on this socket, and its own
++    // bytes are already part of a handshake the peer may be hashing, so it is
++    // passed through as-is too.
++    if (upgrade_request) {
++        park_socket(msg);
++        clear_tp_info_pid(&e_key);
+         return SK_PASS;
+     }
+ 
++    // skip H2 here — it uses HPACK for per-stream traceparents
++    tp_info_pid_t *tp_pid = get_tp_info_pid(&e_key);
++    if (tp_pid && !h2_sock) {
++        if (!http1_req) {
++            // Upstream entered handle_existing_tp_pid at this point and
++            // scheduled a TCP option before reading a single payload byte.
++            // Default-deny drops the pending context instead — which is also
++            // 009's clear-on-stale behaviour, now covering every reason the
++            // gate can refuse.
++            clear_tp_info_pid(&e_key);
++        } else if (handle_existing_tp_pid(msg, id, &t_ctx->p_conn, &e_key, tp_pid)) {
++            return SK_PASS;
++        }
++    }
++
+     if (is_go_grpc_client_conn(&t_ctx->p_conn)) {
+-        bpf_msg_pull_data(msg, 0, msg->size, 0);
+-        fill_msg_buffers(msg, &t_ctx->p_conn, &e_key);
++        // already pulled and filled above
+         // per-stream decision in the h2 chain: inject only streams the uprobe left written=0
+         t_ctx->go_grpc_conn = true;
+         bpf_tail_call_static(msg, &extender_jump_table, k_tail_detect_h2);
+@@ -1211,13 +1481,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+         return SK_PASS;
+     }
+ 
+-    bpf_msg_pull_data(msg, 0, msg->size, 0);
+-    // See handle_existing_tp_pid: a stale scratch buffer must never reach
+-    // protocol_detector. H2 handling below is unaffected, it reads the
+-    // message directly and has its own SSL guards.
+-    const bool fresh_buffers = fill_msg_buffers(msg, &t_ctx->p_conn, &e_key);
+-
+-    if (is_h2_socket(msg)) {
++    if (h2_sock) {
+         bpf_tail_call_static(msg, &extender_jump_table, k_tail_detect_h2);
+         return SK_PASS;
+     }
+@@ -1230,7 +1494,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+     bpf_dbg_printk("MSG TO=%llx:%d", conn.d_ip[3], conn.d_port);
+     bpf_dbg_printk("MSG SIZE=%u", msg->size);
+ 
+-    const bool is_http = fresh_buffers && protocol_detector(msg, id, &conn);
++    const bool is_http = http1_req && protocol_detector(msg, id, &conn);
+     if (is_http) {
+         bpf_dbg_printk("len=%d, s_port=%d", msg->size, msg->local_port);
+         init_tp_ctx_parent_tp(t_ctx);

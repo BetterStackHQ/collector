@@ -1,0 +1,79 @@
+diff --git a/bpf/tpinjector/tpinjector.c b/bpf/tpinjector/tpinjector.c
+index a8f24a14..fe56c360 100644
+--- a/bpf/tpinjector/tpinjector.c
++++ b/bpf/tpinjector/tpinjector.c
+@@ -1374,6 +1374,38 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+         return SK_PASS;
+     }
+ 
++    const u64 id = bpf_get_current_pid_tgid();
++
++    // Discovery filter, hoisted to the entry. Upstream tested it only on the
++    // fall-through route, so the existing-trace route (get_tp_info_pid /
++    // handle_existing_tp_pid) and the Go-gRPC coordination route both mutated
++    // messages of processes OBI was never asked to instrument. Nothing below
++    // may touch a byte before this passes.
++    //
++    // What it reads: pid_matches() against the `valid_pids` bitmap, memoised in
++    // `pid_cache` (bpf/pid/pid.h). Both maps are OBI_PIN_INTERNAL and are
++    // filled by the userspace discovery loop, rebuildValidPids() in
++    // pkg/internal/ebpf/generictracer/generictracer.go, so the allow-list here
++    // is exactly the set of instrumented executables. With
++    // OTEL_EBPF_BPF_PID_FILTER_OFF (`filter_pids == 0`) it degrades to
++    // "return the tgid", i.e. everything passes, matching the rest of OBI.
++    //
++    // Context: sk_msg runs from tcp_bpf_sendmsg in the sending task's syscall
++    // context, so bpf_get_current_pid_tgid() is the sender. Every unknown
++    // context resolves in the deny direction — a kthread or tgid 0 yields 0
++    // and returns here — which skips injection and can never corrupt: this
++    // program's only mutations are reached further down.
++    //
++    // Consequence of sitting above the park bookkeeping: an excluded pid's
++    // upgrade request no longer parks the socket. That is safe because an
++    // excluded pid cannot mutate anything either, and a socket written by both
++    // an excluded and an included process (or one discovered only after its
++    // upgrade request went out) falls back on the strict request-line gate,
++    // which post-upgrade tunnel bytes have to pass before anything is spliced.
++    if (!valid_pid(id)) {
++        return SK_PASS;
++    }
++
+     // Default-deny entry gate. A parked socket is never mutated again, and the
+     // check sits ahead of everything: ahead of get_tp_info_pid /
+     // handle_existing_tp_pid so a leftover trace context cannot resurrect
+@@ -1408,7 +1440,6 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+         return SK_PASS;
+     }
+ 
+-    const u64 id = bpf_get_current_pid_tgid();
+     const connection_info_t conn = get_connection_info(msg);
+     const egress_key_t e_key = make_egress_key(&conn);
+ 
+@@ -1469,6 +1500,16 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+         }
+     }
+ 
++    // The Go-gRPC coordination route now sits behind the entry filter too. For
++    // an allowed pid this is a no-op: valid_pid passed, so control flow reaches
++    // here exactly as before. For an excluded pid the tail call no longer runs,
++    // and that direction can only remove injections, never duplicate them: the
++    // coordination this route implements is the *uprobe* telling sk_msg which
++    // streams it already wrote (`tp_p->written = 1`, bpf/gotracer/go_grpc.c:983
++    // "confirm so sk_msg skips this stream"), so sk_msg is the second writer,
++    // not the first. Not running it drops a would-be injection; the uprobe's
++    // own write is untouched, and every remaining stream is still refused by
++    // h2_inject_verdict rather than injected twice.
+     if (is_go_grpc_client_conn(&t_ctx->p_conn)) {
+         // already pulled and filled above
+         // per-stream decision in the h2 chain: inject only streams the uprobe left written=0
+@@ -1477,10 +1518,6 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+         return SK_PASS;
+     }
+ 
+-    if (!valid_pid(id)) {
+-        return SK_PASS;
+-    }
+-
+     if (h2_sock) {
+         bpf_tail_call_static(msg, &extender_jump_table, k_tail_detect_h2);
+         return SK_PASS;
