@@ -8,12 +8,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -21,6 +21,9 @@ const (
 	traceparentSize = 70
 	ioTimeout       = 10 * time.Second
 	watchdogTimeout = 120 * time.Second
+
+	// 204 keeps the response bodyless, so the client only has to consume a head.
+	httpNoContentResponse = "HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n"
 )
 
 var (
@@ -30,14 +33,158 @@ var (
 	progressReceived atomic.Int64
 )
 
+// rawConn is a blocking AF_INET socket driven with direct syscalls, deliberately
+// outside Go's netpoller and net.Conn machinery.
+//
+// This is not incidental. OBI attaches uprobes to net.(*netFD).Read/Write for Go
+// executables, and the write uprobe runs *before* the bytes reach the sk_msg
+// verdict program. It marks the connection as having a request in flight, and
+// tpinjector's protocol_detector then refuses it ("already extended before,
+// ignoring this packet"), so no HTTP/1 message on a net.Conn ever reaches the
+// injection path this harness exists to test — neither to be injected into nor
+// to be passed through. Raw syscalls keep the uprobes out of the picture, which
+// is also what the non-Go workloads that depend on sk_msg injection look like.
+type rawConn struct {
+	fd int
+}
+
+func setSocketTimeouts(fd int) error {
+	tv := syscall.NsecToTimeval(ioTimeout.Nanoseconds())
+	if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
+		return fmt.Errorf("SO_RCVTIMEO: %w", err)
+	}
+	if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &tv); err != nil {
+		return fmt.Errorf("SO_SNDTIMEO: %w", err)
+	}
+	return nil
+}
+
+// The Go runtime preempts threads with signals, so every blocking syscall here
+// has to tolerate EINTR.
+func (c *rawConn) Read(p []byte) (int, error) {
+	for {
+		n, err := syscall.Read(c.fd, p)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if n == 0 {
+			return 0, io.EOF
+		}
+		return n, nil
+	}
+}
+
+func (c *rawConn) Write(p []byte) (int, error) {
+	written := 0
+	for written < len(p) {
+		n, err := syscall.Write(c.fd, p[written:])
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
+			return written, err
+		}
+		written += n
+	}
+	return written, nil
+}
+
+func (c *rawConn) CloseWrite() error {
+	return syscall.Shutdown(c.fd, syscall.SHUT_WR)
+}
+
+func (c *rawConn) Close() error {
+	return syscall.Close(c.fd)
+}
+
+type rawListener struct {
+	fd   int
+	port int
+}
+
+func rawListen() (*rawListener, error) {
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, syscall.IPPROTO_TCP)
+	if err != nil {
+		return nil, fmt.Errorf("socket: %w", err)
+	}
+	addr := &syscall.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}
+	if err := syscall.Bind(fd, addr); err != nil {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("bind: %w", err)
+	}
+	if err := syscall.Listen(fd, 1); err != nil {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("listen: %w", err)
+	}
+	bound, err := syscall.Getsockname(fd)
+	if err != nil {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("getsockname: %w", err)
+	}
+	in4, ok := bound.(*syscall.SockaddrInet4)
+	if !ok {
+		_ = syscall.Close(fd)
+		return nil, errors.New("listener is not AF_INET")
+	}
+	return &rawListener{fd: fd, port: in4.Port}, nil
+}
+
+func (l *rawListener) accept() (*rawConn, error) {
+	for {
+		fd, _, err := syscall.Accept(l.fd)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("accept: %w", err)
+		}
+		if err := setSocketTimeouts(fd); err != nil {
+			_ = syscall.Close(fd)
+			return nil, err
+		}
+		return &rawConn{fd: fd}, nil
+	}
+}
+
+func (l *rawListener) Close() error {
+	return syscall.Close(l.fd)
+}
+
+func rawDial(port int) (*rawConn, error) {
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, syscall.IPPROTO_TCP)
+	if err != nil {
+		return nil, fmt.Errorf("socket: %w", err)
+	}
+	if err := setSocketTimeouts(fd); err != nil {
+		_ = syscall.Close(fd)
+		return nil, err
+	}
+	addr := &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}
+	for {
+		err = syscall.Connect(fd, addr)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		break
+	}
+	if err != nil {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("connect: %w", err)
+	}
+	return &rawConn{fd: fd}, nil
+}
+
 type recordingConn struct {
-	net.Conn
-	clientSide   bool
+	*rawConn
+	clientSide    bool
 	read, written bytes.Buffer
 }
 
 func (c *recordingConn) Read(p []byte) (int, error) {
-	n, err := c.Conn.Read(p)
+	n, err := c.rawConn.Read(p)
 	c.read.Write(p[:n])
 	if !c.clientSide {
 		progressReceived.Add(int64(n))
@@ -46,7 +193,7 @@ func (c *recordingConn) Read(p []byte) (int, error) {
 }
 
 func (c *recordingConn) Write(p []byte) (int, error) {
-	n, err := c.Conn.Write(p)
+	n, err := c.rawConn.Write(p)
 	c.written.Write(p[:n])
 	if c.clientSide {
 		progressSent.Add(int64(n))
@@ -54,24 +201,9 @@ func (c *recordingConn) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func (c *recordingConn) CloseWrite() error {
-	return c.Conn.(*net.TCPConn).CloseWrite()
-}
-
 type exchange struct {
 	sent, received []byte
-	serverValue   any
-}
-
-func setConnDeadlines(c net.Conn) error {
-	deadline := time.Now().Add(ioTimeout)
-	if err := c.SetReadDeadline(deadline); err != nil {
-		return fmt.Errorf("set read deadline: %w", err)
-	}
-	if err := c.SetWriteDeadline(deadline); err != nil {
-		return fmt.Errorf("set write deadline: %w", err)
-	}
-	return nil
+	serverValue    any
 }
 
 func exchangeError(name, side string, expected int, err error) error {
@@ -80,7 +212,7 @@ func exchangeError(name, side string, expected int, err error) error {
 }
 
 func runExchange(name string, expected int, server func(*recordingConn) (any, error), client func(*recordingConn) error) (exchange, error) {
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	ln, err := rawListen()
 	if err != nil {
 		return exchange{}, exchangeError(name, "listen", expected, err)
 	}
@@ -93,31 +225,22 @@ func runExchange(name string, expected int, server func(*recordingConn) (any, er
 	}
 	serverDone := make(chan serverResult, 1)
 	go func() {
-		conn, err := ln.Accept()
+		conn, err := ln.accept()
 		if err != nil {
 			serverDone <- serverResult{err: err}
 			return
 		}
-		rc := &recordingConn{Conn: conn}
-		if err := setConnDeadlines(rc); err != nil {
-			_ = rc.Close()
-			serverDone <- serverResult{err: err}
-			return
-		}
+		rc := &recordingConn{rawConn: conn}
 		value, err := server(rc)
 		_ = rc.Close()
 		serverDone <- serverResult{value: value, received: bytes.Clone(rc.read.Bytes()), err: err}
 	}()
 
-	conn, err := net.DialTimeout("tcp4", ln.Addr().String(), 5*time.Second)
+	conn, err := rawDial(ln.port)
 	if err != nil {
 		return exchange{}, exchangeError(name, "dial", expected, err)
 	}
-	rc := &recordingConn{Conn: conn, clientSide: true}
-	if err := setConnDeadlines(rc); err != nil {
-		_ = rc.Close()
-		return exchange{}, exchangeError(name, "client", expected, err)
-	}
+	rc := &recordingConn{rawConn: conn, clientSide: true}
 	clientErr := client(rc)
 	_ = rc.Close()
 	result := <-serverDone
@@ -317,7 +440,12 @@ func receiveRequests(c *recordingConn, count int) (positiveResult, error) {
 			return result, err
 		}
 		result.bodies = append(result.bodies, body)
-		if err := writeAll(c, []byte{0xac}); err != nil {
+		// A real response, not a one-byte ack. OBI's generic tracer tracks the
+		// request as in flight on this connection and tpinjector refuses a
+		// connection that still has one ("already extended before, ignoring
+		// this packet"), so without a parsable response only the first
+		// keep-alive request on the connection is ever injected into.
+		if err := writeAll(c, []byte(httpNoContentResponse)); err != nil {
 			return result, err
 		}
 	}
@@ -361,16 +489,20 @@ func positiveControl(selfcheck bool) error {
 	ex, err := runExchange("positive-control", expected, func(c *recordingConn) (any, error) {
 		return receiveRequests(c, len(requests))
 	}, func(c *recordingConn) error {
-		ack := []byte{0}
+		reader := bufio.NewReader(c)
 		for _, request := range requests {
 			if err := writeAll(c, request); err != nil {
 				return err
 			}
-			if _, err := io.ReadFull(c, ack); err != nil {
+			line, err := reader.ReadString('\n')
+			if err != nil {
 				return err
 			}
-			if ack[0] != 0xac {
-				return fmt.Errorf("bad server acknowledgement %#x", ack[0])
+			if line != "HTTP/1.1 204 No Content\r\n" {
+				return fmt.Errorf("bad server status line %q", line)
+			}
+			if err := readHeader(reader); err != nil {
+				return err
 			}
 		}
 		return c.CloseWrite()

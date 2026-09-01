@@ -72,6 +72,19 @@ if [ -z "$ready" ]; then
   exit 1
 fi
 
+# OBI logs a BPF load failure as a warning and carries on with that tracer
+# disabled. If an injector program is the one that failed, every byte-integrity
+# scenario below passes for the wrong reason — nothing is attached that could
+# corrupt anything — so treat it as a hard failure. Typical cause: a tpinjector
+# patch pushing a program past the verifier's complexity limit ("BPF program is
+# too large. Processed 1000001 insn"). Scoped to the injector's own programs so
+# an unrelated optional tracer failing on some kernel does not fail the run.
+if grep -qE "couldn't load tracer.*Obi(PacketExtender|SockmapTracker)" "$obi_log"; then
+  echo "OBI failed to load an injector program; the integrity scenarios would pass vacuously"
+  grep -E "couldn't load tracer.*Obi(PacketExtender|SockmapTracker)" "$obi_log"
+  exit 1
+fi
+
 touch "$start_file"
 wait "$payload_pid"
 cat "$payload_log"
