@@ -9,12 +9,14 @@ payload_log=/tmp/egress-integrity.log
 start_file=/tmp/egress-integrity.start
 obi_pid=
 payload_pid=
+early_pid=
 
 cleanup() {
   status=$?
   set +e
   [ -n "$payload_pid" ] && kill "$payload_pid" 2>/dev/null
   [ -n "$obi_pid" ] && kill "$obi_pid" 2>/dev/null
+  [ -n "$early_pid" ] && kill -9 "$early_pid" 2>/dev/null
   sleep 1
   [ -n "$payload_pid" ] && kill -9 "$payload_pid" 2>/dev/null
   [ -n "$obi_pid" ] && kill -9 "$obi_pid" 2>/dev/null
@@ -47,6 +49,36 @@ fi
 if ! grep -q ' /sys/kernel/tracing tracefs ' /proc/mounts; then
   mount -t tracefs tracefs /sys/kernel/tracing
 fi
+
+# The deny-child scenario needs '*deny-child*' excluded from instrumentation,
+# and it is the runner's job rather than each caller's: the scenario is part of
+# this harness, so its precondition travels with it. Inserted right after the
+# top-level discovery key, at the same indentation as the instrument list the
+# callers set; the grep fails the run loudly if the config had no such block.
+run_config=/tmp/obi-config-with-exclusion.yml
+awk '{ print }
+     /^discovery:[[:space:]]*$/ {
+       print "  exclude_instrument:"
+       print "    - exe_path: \"*deny-child*\""
+     }' "$config" >"$run_config"
+grep -q 'deny-child' "$run_config"
+config=$run_config
+
+# An excluded process that predates OBI. This is the production shape of the
+# bug in T-20708 — an excluded daemon already running when the agent starts —
+# and the only way to exercise the publisher's deferral, because the first
+# discovery poll runs before the first BPF collection exists, so the exclusion
+# is recorded before there is a map to put it in. Any executable will do; only
+# its path has to match the exclusion.
+early_exe=/tmp/deny-child-early
+early_pid_file=/tmp/deny-child-early.pid
+rm -f "$early_pid_file"
+cp /usr/bin/sleep "$early_exe"
+"$early_exe" 600 &
+early_pid=$!
+echo "$early_pid" >"$early_pid_file"
+# keeps bash from printing a job notification when cleanup kills it
+disown "$early_pid"
 
 rm -f "$start_file"
 "$obi" -config "$config" >"$obi_log" 2>&1 &
