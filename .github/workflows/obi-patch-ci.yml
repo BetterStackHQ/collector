@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "ebpf/patches/obi/**"
+      - "ebpf/tests/egress-integrity/**"
       - "ebpf/Dockerfile"
       - ".github/workflows/obi-patch-ci.yml"
   push:
@@ -11,6 +12,7 @@ on:
       - main
     paths:
       - "ebpf/patches/obi/**"
+      - "ebpf/tests/egress-integrity/**"
       - "ebpf/Dockerfile"
       - ".github/workflows/obi-patch-ci.yml"
 
@@ -72,3 +74,85 @@ jobs:
 
       - name: Build production OBI stage
         run: docker build --target obi-builder --file ebpf/Dockerfile .
+
+  egress-integrity:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read OBI build pins
+        run: |
+          {
+            echo "OBI_VERSION=$(grep -oP '^ARG OBI_VERSION=\K.*' ebpf/Dockerfile | head -1 | tr -d '\"')"
+            echo "OBI_REVISION=$(grep -oP '^ARG OBI_REVISION=\K.*' ebpf/Dockerfile | head -1 | tr -d '\"')"
+          } >> "$GITHUB_ENV"
+
+      - name: Clone OBI and apply patches
+        run: |
+          git clone --depth 1 --branch "$OBI_VERSION" \
+            https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation.git "$RUNNER_TEMP/obi"
+          test "$(git -C "$RUNNER_TEMP/obi" rev-parse HEAD)" = "$OBI_REVISION"
+          for p in "$GITHUB_WORKSPACE"/ebpf/patches/obi/*.patch; do
+            [ -e "$p" ] || break
+            git -C "$RUNNER_TEMP/obi" apply "$p"
+          done
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ebpf/tests/egress-integrity/go.mod
+          cache: false
+
+      - name: Build egress-integrity payload
+        working-directory: ebpf/tests/egress-integrity
+        run: go build -o "$RUNNER_TEMP/egress-integrity" .
+
+      - name: Build and extract patched OBI
+        run: |
+          docker build --platform linux/amd64 --target obi-builder \
+            --tag obi-egress-builder --file ebpf/Dockerfile .
+          container="$(docker create obi-egress-builder)"
+          trap 'docker rm -f "$container"' EXIT
+          docker cp "$container:/tmp/obi/bin/obi" "$RUNNER_TEMP/ebpf-instrument"
+          chmod +x "$RUNNER_TEMP/ebpf-instrument"
+          test -x "$RUNNER_TEMP/ebpf-instrument"
+
+      - name: Self-check payload
+        run: $RUNNER_TEMP/egress-integrity -selfcheck
+
+      - name: Verify egress integrity under OBI
+        run: |
+          cat >"$RUNNER_TEMP/obi-test.yml" <<'YAML'
+          log_level: debug
+          trace_printer: text
+          discovery:
+            instrument:
+              - exe_path: "*egress-integrity*"
+          ebpf:
+            context_propagation: headers,tcp
+          YAML
+
+          container="obi-egress-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            status=$?
+            set +e
+            docker rm -f "$container" >/dev/null 2>&1
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          timeout --signal=TERM --kill-after=10s 240s \
+            docker run --name "$container" --rm \
+              --platform linux/amd64 \
+              --privileged \
+              --cgroupns=private \
+              --network=none \
+              --mount "type=bind,source=$RUNNER_TEMP/ebpf-instrument,target=/opt/ebpf-instrument,readonly" \
+              --mount "type=bind,source=$RUNNER_TEMP/egress-integrity,target=/opt/egress-integrity,readonly" \
+              --mount "type=bind,source=$RUNNER_TEMP/obi-test.yml,target=/opt/obi-test.yml,readonly" \
+              --mount "type=bind,source=$GITHUB_WORKSPACE/ebpf/tests/egress-integrity/run-under-obi.sh,target=/opt/run-under-obi.sh,readonly" \
+              ubuntu:22.04 \
+              /opt/run-under-obi.sh \
+                /opt/ebpf-instrument \
+                /opt/egress-integrity \
+                /opt/obi-test.yml

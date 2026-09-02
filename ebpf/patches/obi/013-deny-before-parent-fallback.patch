@@ -1,0 +1,569 @@
+diff --git a/bpf/pid/maps/denied_pids.h b/bpf/pid/maps/denied_pids.h
+new file mode 100644
+index 000000000..fb49317f9
+--- /dev/null
++++ b/bpf/pid/maps/denied_pids.h
+@@ -0,0 +1,37 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++#pragma once
++
++#include <bpfcore/vmlinux.h>
++#include <bpfcore/bpf_helpers.h>
++
++#include <common/pin_internal.h>
++
++#include <pid/maps/map_sizing.h>
++
++#include <pid/types/pid_data.h>
++
++// Processes discovery excluded, keyed exactly like the allow-list that
++// pid_matches() reads: the pid as seen inside its own pid namespace, plus that
++// namespace's inode. Filled from userspace by the criteria matcher, which is
++// the only component that evaluates exclude_instrument and the only one that
++// sees the processes it drops.
++//
++// An exact-match hash rather than a second copy of the `valid_pids` bitmap on
++// purpose. That bitmap hashes (ns, pid) into 192053 bits with no collision
++// resolution, which upstream can afford because a collision there fails *open*:
++// some extra process passes the filter. The same collision in a deny structure
++// would fail closed and silently stop instrumenting a process the user did
++// select, so this side has to be exact.
++//
++// Sized like `valid_pids` (1000 processes * 3 namespace levels). A full map
++// means new denials are refused, which userspace reports; it does not evict, so
++// an existing denial can never quietly lapse.
++struct {
++    __uint(type, BPF_MAP_TYPE_HASH);
++    __uint(max_entries, k_max_concurrent_pids);
++    __type(key, pid_data_t);
++    __type(value, u8);
++    __uint(pinning, OBI_PIN_INTERNAL);
++} denied_pids SEC(".maps");
+diff --git a/bpf/pid/pid.h b/bpf/pid/pid.h
+index 7cea1b777..88866c03f 100644
+--- a/bpf/pid/pid.h
++++ b/bpf/pid/pid.h
+@@ -8,6 +8,7 @@
+ 
+ #include <logger/bpf_dbg.h>
+ 
++#include <pid/maps/denied_pids.h>
+ #include <pid/maps/pid_cache.h>
+ #include <pid/maps/valid_pids.h>
+ 
+@@ -66,6 +67,32 @@ static __always_inline u32 valid_pid(u64 id) {
+     if (a_pid != 0) {
+         pid_data_t p_key = {.pid = a_pid, .ns = pid_ns_id};
+ 
++        // Discovery exclusions, honoured before the allow-list and before the
++        // parent fallback below.
++        //
++        // The fallback is deliberate — it is how OBI follows an instrumented
++        // process into its children — but it also let an *excluded* process
++        // pass on its parent's ticket. That is not hypothetical: with
++        // `open_ports` discovery, pid 1 is routinely instrumented, and every
++        // process on the machine descends from pid 1, so `exclude_instrument`
++        // meant nothing in the kernel. It was measured on a real host, where
++        // an excluded tailscaled enrolled into the sockhash 2/2 times.
++        //
++        // Only the process's own identity is consulted. A denied parent does
++        // not taint its children: a supervisor the user excluded may well fork
++        // the workload they asked for, and that workload has its own entry in
++        // the allow-list. So this rejects exactly what userspace rejected, and
++        // the fork-following below is otherwise untouched.
++        //
++        // Placed after the pid_cache lookup, not before it, because the cache
++        // is a positive memo and the publisher evicts the pids it denies (see
++        // pkg/ebpf/common/denied_pids.go). Checking here leaves the hot path
++        // for allowed processes exactly as it was: one cache lookup, no task
++        // walk, no second map.
++        if (bpf_map_lookup_elem(&denied_pids, &p_key)) {
++            return 0;
++        }
++
+         const u8 found_ns_pid = pid_matches(&p_key);
+ 
+         if (found_ns_pid) {
+diff --git a/pkg/appolly/discover/finder.go b/pkg/appolly/discover/finder.go
+index 29ca47b98..5d3159678 100644
+--- a/pkg/appolly/discover/finder.go
++++ b/pkg/appolly/discover/finder.go
+@@ -127,7 +127,7 @@ func (pf *ProcessFinder) Start(ctx context.Context, opts ...ProcessFinderStartOp
+ 	), swarm.WithID("LanguageDecoratorProvider"))
+ 
+ 	criteriaFilteredEvents := msgh.QueueFromConfig[[]Event[ProcessMatch]](pf.cfg, "criteriaFilteredEvents")
+-	swi.Add(criteriaMatcherProvider(pf.cfg, langEnrichedEvents, criteriaFilteredEvents, configCriteria, startConfig.dynamicPIDSelector),
++	swi.Add(criteriaMatcherProvider(pf.cfg, langEnrichedEvents, criteriaFilteredEvents, configCriteria, startConfig.dynamicPIDSelector, pf.ebpfEventContext),
+ 		swarm.WithID("CriteriaMatcher"))
+ 	swi.Add(dynamicMatcherProvider(langEnrichedEvents, criteriaFilteredEvents, appDynamicSelector),
+ 		swarm.WithID("DynamicMatcher"))
+diff --git a/pkg/appolly/discover/matcher.go b/pkg/appolly/discover/matcher.go
+index cafef1741..2ffec501d 100644
+--- a/pkg/appolly/discover/matcher.go
++++ b/pkg/appolly/discover/matcher.go
+@@ -38,6 +38,7 @@ func criteriaMatcherProvider(
+ 	output *msg.Queue[[]Event[ProcessMatch]],
+ 	configCriteria []services.Selector,
+ 	dynamicSelector *DynamicPIDSelector,
++	eventContext *ebpfcommon.EBPFEventContext,
+ ) swarm.InstanceFunc {
+ 	instrumenterNamespace, _ := namespaceFetcherFunc(app.PID(osPidFunc()))
+ 	if dynamicSelector != nil {
+@@ -45,8 +46,9 @@ func criteriaMatcherProvider(
+ 		return swarm.DirectInstance(emptyFunc)
+ 	}
+ 
++	log := slog.With("component", "discover.CriteriaMatcher")
+ 	m := &Matcher{
+-		Log:                 slog.With("component", "discover.CriteriaMatcher"),
++		Log:                 log,
+ 		Criteria:            configCriteria,
+ 		ExcludeCriteria:     ExcludingCriteria(cfg),
+ 		LogEnricherCriteria: LogEnricherFindingCriteria(cfg),
+@@ -55,6 +57,7 @@ func criteriaMatcherProvider(
+ 		Output:              output,
+ 		Namespace:           instrumenterNamespace,
+ 		HasHostPidAccess:    hasHostPidAccess(),
++		Denied:              ebpfcommon.NewDeniedPIDs(eventContext, log),
+ 	}
+ 	return swarm.DirectInstance(m.Run)
+ }
+@@ -74,6 +77,9 @@ type Matcher struct {
+ 	Output           *msg.Queue[[]Event[ProcessMatch]]
+ 	Namespace        string
+ 	HasHostPidAccess bool
++	// Denied mirrors the exclusion decisions taken here into the BPF pid
++	// filter, which cannot derive them: see ebpfcommon.DeniedPIDs.
++	Denied *ebpfcommon.DeniedPIDs
+ }
+ 
+ // ProcessMatch matches a found process with the first selection criteria it fulfilled.
+@@ -105,6 +111,10 @@ func (m *Matcher) Run(ctx context.Context) {
+ }
+ 
+ func (m *Matcher) filter(events []Event[ProcessAttrs]) []Event[ProcessMatch] {
++	// Exclusions recorded before the BPF pid filter was loaded still have to
++	// reach it; a no-op once they have.
++	m.Denied.Flush()
++
+ 	var matches []Event[ProcessMatch]
+ 	for _, ev := range events {
+ 		if ev.Type == EventDeleted {
+@@ -173,6 +183,23 @@ func (m *Matcher) filterCreated(obj ProcessAttrs) (Event[ProcessMatch], bool) {
+ 		return Event[ProcessMatch]{}, false
+ 	}
+ 
++	// Publish the exclusion decision to the BPF pid filter, which cannot take
++	// it: this is the only component that evaluates exclude_instrument, and
++	// excluded processes are dropped here rather than forwarded, so nothing
++	// downstream ever hears about them. Without this, valid_pid()'s parent
++	// fallback keeps letting an excluded process through on an instrumented
++	// ancestor's ticket. The retraction is for pid reuse: this pid may be the
++	// same number a denied process used to have.
++	//
++	// Nothing else about the matching below changes, exclusion included: the
++	// checks in matchCriteria() and on the parent-history route are upstream's
++	// and stay authoritative for this pipeline.
++	if m.isExcluded(&obj, proc) {
++		m.Denied.Deny(obj.pid)
++	} else {
++		m.Denied.Forget(obj.pid)
++	}
++
+ 	if processMatch := m.matchCriteria(obj, proc); processMatch != nil {
+ 		m.ProcessHistory[obj.pid] = *processMatch
+ 
+@@ -200,6 +227,9 @@ func (m *Matcher) filterCreated(obj ProcessAttrs) (Event[ProcessMatch], bool) {
+ }
+ 
+ func (m *Matcher) filterDeleted(obj ProcessAttrs) (Event[ProcessMatch], bool) {
++	// Denials outlive nothing: the pid is free for reuse the moment it is gone.
++	m.Denied.Forget(obj.pid)
++
+ 	procMatch, ok := m.ProcessHistory[obj.pid]
+ 	if !ok {
+ 		m.Log.Debug("deleted untracked process. Ignoring", "pid", obj.pid)
+diff --git a/pkg/appolly/discover/matcher_test.go b/pkg/appolly/discover/matcher_test.go
+index c4b28eb99..dce07a516 100644
+--- a/pkg/appolly/discover/matcher_test.go
++++ b/pkg/appolly/discover/matcher_test.go
+@@ -50,7 +50,7 @@ func TestMatchersMutuallyExclusive(t *testing.T) {
+ 		}
+ 
+ 		swi := swarm.Instancer{}
+-		swi.Add(criteriaMatcherProvider(&pipeConfig, inQ, outQ, cfgCriteria, sel), swarm.WithID("CriteriaMatcher"))
++		swi.Add(criteriaMatcherProvider(&pipeConfig, inQ, outQ, cfgCriteria, sel, nil), swarm.WithID("CriteriaMatcher"))
+ 		swi.Add(dynamicMatcherProvider(inQ, outQ, sel.appSignals()), swarm.WithID("DynamicMatcher"))
+ 		runner, err := swi.Instance(t.Context())
+ 		require.NoError(t, err)
+@@ -81,7 +81,7 @@ func TestMatchersMutuallyExclusive(t *testing.T) {
+ 		}
+ 
+ 		swi := swarm.Instancer{}
+-		swi.Add(criteriaMatcherProvider(&pipeConfig, inQ, outQ, cfgCriteria, nil), swarm.WithID("CriteriaMatcher"))
++		swi.Add(criteriaMatcherProvider(&pipeConfig, inQ, outQ, cfgCriteria, nil, nil), swarm.WithID("CriteriaMatcher"))
+ 		swi.Add(dynamicMatcherProvider(inQ, outQ, nil), swarm.WithID("DynamicMatcher"))
+ 		runner, err := swi.Instance(t.Context())
+ 		require.NoError(t, err)
+@@ -131,7 +131,7 @@ func TestCriteriaMatcher(t *testing.T) {
+ 	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
+ 	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
+ 	filteredProcesses := filteredProcessesQu.Subscribe()
+-	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil)(t.Context())
++	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil, nil)(t.Context())
+ 	require.NoError(t, err)
+ 	go matcherFunc(t.Context())
+ 	defer filteredProcessesQu.Close()
+@@ -182,7 +182,7 @@ func TestCriteriaMatcherLanguage(t *testing.T) {
+ 	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
+ 	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
+ 	filteredProcesses := filteredProcessesQu.Subscribe()
+-	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil)(t.Context())
++	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil, nil)(t.Context())
+ 	require.NoError(t, err)
+ 	go matcherFunc(t.Context())
+ 	defer filteredProcessesQu.Close()
+@@ -232,7 +232,7 @@ func TestCriteriaMatcher_Exclude(t *testing.T) {
+ 	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
+ 	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
+ 	filteredProcesses := filteredProcessesQu.Subscribe()
+-	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil)(t.Context())
++	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil, nil)(t.Context())
+ 	require.NoError(t, err)
+ 	go matcherFunc(t.Context())
+ 	defer filteredProcessesQu.Close()
+@@ -273,7 +273,7 @@ func TestCriteriaMatcher_Exclude_Metadata(t *testing.T) {
+ 	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
+ 	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
+ 	filteredProcesses := filteredProcessesQu.Subscribe()
+-	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil)(t.Context())
++	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil, nil)(t.Context())
+ 	require.NoError(t, err)
+ 	go matcherFunc(t.Context())
+ 	defer filteredProcessesQu.Close()
+@@ -320,7 +320,7 @@ func TestCriteriaMatcher_MetadataWithDeprecatedPathRegexp(t *testing.T) {
+ 	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
+ 	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
+ 	filteredProcesses := filteredProcessesQu.Subscribe()
+-	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, criteria, nil)(t.Context())
++	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, criteria, nil, nil)(t.Context())
+ 	require.NoError(t, err)
+ 	go matcherFunc(t.Context())
+ 	defer func() {
+@@ -364,7 +364,7 @@ func TestCriteriaMatcher_MustMatchAllAttributes(t *testing.T) {
+ 	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
+ 	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
+ 	filteredProcesses := filteredProcessesQu.Subscribe()
+-	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil)(t.Context())
++	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil, nil)(t.Context())
+ 	require.NoError(t, err)
+ 	go matcherFunc(t.Context())
+ 	defer filteredProcessesQu.Close()
+@@ -419,7 +419,7 @@ func TestCriteriaMatcherMissingPort(t *testing.T) {
+ 	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
+ 	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
+ 	filteredProcesses := filteredProcessesQu.Subscribe()
+-	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil)(t.Context())
++	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil, nil)(t.Context())
+ 	require.NoError(t, err)
+ 	go matcherFunc(t.Context())
+ 	defer filteredProcessesQu.Close()
+@@ -461,7 +461,7 @@ func TestCriteriaMatcherExcludedChildDoesNotInheritParentMatch(t *testing.T) {
+ 	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
+ 	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
+ 	filteredProcesses := filteredProcessesQu.Subscribe()
+-	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil)(t.Context())
++	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil, nil)(t.Context())
+ 	require.NoError(t, err)
+ 	go matcherFunc(t.Context())
+ 	defer filteredProcessesQu.Close()
+@@ -563,7 +563,7 @@ func TestCriteriaMatcherContainersOnly(t *testing.T) {
+ 	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
+ 	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
+ 	filteredProcesses := filteredProcessesQu.Subscribe()
+-	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil)(t.Context())
++	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil, nil)(t.Context())
+ 	require.NoError(t, err)
+ 	go matcherFunc(t.Context())
+ 	defer filteredProcessesQu.Close()
+@@ -702,7 +702,7 @@ func TestInstrumentation_CoexistingWithDeprecatedServices(t *testing.T) {
+ 			discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
+ 			filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
+ 			filteredProcesses := filteredProcessesQu.Subscribe()
+-			matcherFunc, err := criteriaMatcherProvider(&tc.cfg, discoveredProcesses, filteredProcessesQu, FindingCriteria(&tc.cfg), nil)(t.Context())
++			matcherFunc, err := criteriaMatcherProvider(&tc.cfg, discoveredProcesses, filteredProcessesQu, FindingCriteria(&tc.cfg), nil, nil)(t.Context())
+ 			require.NoError(t, err)
+ 			go matcherFunc(t.Context())
+ 			defer filteredProcessesQu.Close()
+@@ -737,7 +737,7 @@ func TestCriteriaMatcher_TargetPIDs(t *testing.T) {
+ 		discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
+ 		filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
+ 		filteredProcesses := filteredProcessesQu.Subscribe()
+-		matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil)(t.Context())
++		matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil, nil)(t.Context())
+ 		require.NoError(t, err)
+ 		go matcherFunc(t.Context())
+ 		defer filteredProcessesQu.Close()
+@@ -768,7 +768,7 @@ func TestCriteriaMatcher_TargetPIDs(t *testing.T) {
+ 		discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
+ 		filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
+ 		filteredProcesses := filteredProcessesQu.Subscribe()
+-		matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil)(t.Context())
++		matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil, nil)(t.Context())
+ 		require.NoError(t, err)
+ 		go matcherFunc(t.Context())
+ 		defer filteredProcessesQu.Close()
+@@ -957,7 +957,7 @@ func TestCriteriaMatcher_Granular(t *testing.T) {
+ 
+ 	filteredProcesses := filteredProcessesQu.Subscribe()
+ 
+-	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil)(t.Context())
++	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil, nil)(t.Context())
+ 
+ 	require.NoError(t, err)
+ 
+diff --git a/pkg/appolly/discover/watcher_kube_test.go b/pkg/appolly/discover/watcher_kube_test.go
+index 62304ba4e..38bbab209 100644
+--- a/pkg/appolly/discover/watcher_kube_test.go
++++ b/pkg/appolly/discover/watcher_kube_test.go
+@@ -205,7 +205,7 @@ func TestWatcherKubeEnricherWithMatcher(t *testing.T) {
+       version: "v[0-9]*"
+ `), &pipeConfig))
+ 
+-	swi.Add(criteriaMatcherProvider(&pipeConfig, connectQueue, outputQueue, FindingCriteria(&pipeConfig), nil))
++	swi.Add(criteriaMatcherProvider(&pipeConfig, connectQueue, outputQueue, FindingCriteria(&pipeConfig), nil, nil))
+ 
+ 	nodesRunner, err := swi.Instance(t.Context())
+ 	require.NoError(t, err)
+diff --git a/pkg/ebpf/common/denied_pids.go b/pkg/ebpf/common/denied_pids.go
+new file mode 100644
+index 000000000..03e25c633
+--- /dev/null
++++ b/pkg/ebpf/common/denied_pids.go
+@@ -0,0 +1,224 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package ebpfcommon // import "go.opentelemetry.io/obi/pkg/ebpf/common"
++
++import (
++	"errors"
++	"log/slog"
++	"sync"
++
++	"github.com/cilium/ebpf"
++
++	"go.opentelemetry.io/obi/pkg/appolly/app"
++	"go.opentelemetry.io/obi/pkg/internal/procs"
++)
++
++// Both maps are declared in bpf/pid/maps/ with OBI_PIN_INTERNAL, so
++// ResolveMaps() creates exactly one of each per agent and hands the same
++// object to every collection that includes pid.h. Reaching them by name
++// through EBPFEventContext.EBPFMaps is therefore reaching the maps the kernel
++// side actually reads, and it does not depend on which tracer happens to be
++// loaded: the entry outlives any single ProcessTracer.
++const (
++	deniedPIDsMapName = "denied_pids"
++	pidCacheMapName   = "pid_cache"
++)
++
++// deniedPIDKey mirrors pid_data_t (bpf/pid/types/pid_data.h).
++type deniedPIDKey struct {
++	Pid uint32
++	Ns  uint32
++}
++
++// DeniedPIDs publishes discovery's exclusions to the BPF pid filter.
++//
++// valid_pid() (bpf/pid/pid.h) falls back to the parent's pid when a process is
++// not in the allow-list, which is how OBI follows an instrumented process into
++// its children. Nothing told the kernel about the processes discovery had
++// *excluded*, so an excluded process under an instrumented parent — and with
++// `open_ports` discovery, pid 1 is often instrumented — passed the filter
++// anyway. This is the missing half: the criteria matcher records what it
++// excluded here, and valid_pid() rejects those identities before it consults
++// either the allow-list or the parent.
++//
++// Keys are per namespaced pid, exactly as PIDsFilter.addPID() records the
++// allow side: /proc/<pid>/status NSpid lists the process's pid at every level,
++// and BPF only ever derives the innermost one, so publishing all of them makes
++// the two sides agree without having to guess which level the kernel will see.
++type DeniedPIDs struct {
++	mu  sync.Mutex
++	ctx *EBPFEventContext
++	log *slog.Logger
++	// keys published per host pid, kept because the process is gone from /proc
++	// by the time it has to be retracted
++	published map[app.PID][]deniedPIDKey
++	// set when an entry in published is not in the BPF map. The maps do not
++	// exist until the first tracer loads, and the first discovery poll
++	// normally runs before that.
++	backlog bool
++}
++
++// NewDeniedPIDs returns a publisher writing into eventContext's shared maps.
++// A nil eventContext yields a publisher that records nothing, which is what
++// unit tests and the darwin build get.
++func NewDeniedPIDs(eventContext *EBPFEventContext, log *slog.Logger) *DeniedPIDs {
++	return &DeniedPIDs{
++		ctx:       eventContext,
++		log:       log,
++		published: map[app.PID][]deniedPIDKey{},
++	}
++}
++
++// Deny records pid as excluded from instrumentation.
++func (d *DeniedPIDs) Deny(pid app.PID) {
++	if d == nil || d.ctx == nil {
++		return
++	}
++
++	d.mu.Lock()
++	defer d.mu.Unlock()
++
++	if _, known := d.published[pid]; !known {
++		keys := d.keysFor(pid)
++		if len(keys) == 0 {
++			return
++		}
++		d.log.Debug("excluding pid from the BPF pid filter", "pid", pid, "nspids", len(keys))
++		d.published[pid] = keys
++		d.backlog = true
++	}
++
++	if d.backlog {
++		// one failed publish retries every recorded pid, so a denial recorded
++		// before the maps existed cannot be lost
++		d.flushLocked()
++	}
++}
++
++// Forget retracts pid's denial: it exited, or it turned out to match the
++// discovery criteria after all. Pids are reused, and a denial that outlived
++// its process would silently stop instrumenting the next owner.
++func (d *DeniedPIDs) Forget(pid app.PID) {
++	if d == nil || d.ctx == nil {
++		return
++	}
++
++	d.mu.Lock()
++	defer d.mu.Unlock()
++
++	keys, known := d.published[pid]
++	if !known {
++		return
++	}
++	delete(d.published, pid)
++
++	denied, _ := d.maps()
++	if denied == nil {
++		return
++	}
++	for _, key := range keys {
++		// a pid namespace teardown can take the whole key set with it
++		if err := denied.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
++			d.log.Debug("cannot retract excluded pid", "pid", pid, "error", err)
++		}
++	}
++}
++
++// Flush retries denials recorded while the BPF maps were still unavailable.
++// Cheap and a no-op in the common case; the matcher calls it once per batch of
++// process events.
++func (d *DeniedPIDs) Flush() {
++	if d == nil || d.ctx == nil {
++		return
++	}
++
++	d.mu.Lock()
++	defer d.mu.Unlock()
++
++	if d.backlog {
++		d.flushLocked()
++	}
++}
++
++func (d *DeniedPIDs) flushLocked() {
++	denied, cache := d.maps()
++	if denied == nil {
++		d.log.Debug("BPF pid filter not loaded yet, deferring exclusions", "pids", len(d.published))
++		return
++	}
++
++	d.backlog = false
++	for pid, keys := range d.published {
++		for _, key := range keys {
++			if err := denied.Put(key, uint8(1)); err != nil {
++				// A full map is the interesting case: it means new exclusions
++				// stop reaching the kernel, which fails open.
++				d.log.Warn("cannot publish excluded pid to the BPF pid filter",
++					"pid", pid, "nspid", key.Pid, "ns", key.Ns, "error", err)
++				d.backlog = true
++				continue
++			}
++			evictPIDCache(cache, key.Pid)
++		}
++		evictPIDCache(cache, uint32(pid))
++	}
++}
++
++// evictPIDCache drops a memoised valid_pid() pass.
++//
++// pid_cache is a positive cache: valid_pid() writes it only for a pid it just
++// accepted, and returns from it without looking at anything else. An excluded
++// process that made egress before discovery got to it was accepted on its
++// parent's ticket and cached, so publishing the denial without this would
++// change nothing for that process for as long as the entry lives.
++//
++// The map is keyed by a bare u32 with no namespace, and upstream looks it up
++// with the host tgid while storing under the namespaced pid, so both spellings
++// are evicted. A number that collides with an unrelated host pid costs that
++// process one re-evaluation of valid_pid(), which is what BlockPID() has
++// always done too.
++func evictPIDCache(cache *ebpf.Map, pid uint32) {
++	if cache == nil {
++		return
++	}
++	_ = cache.Delete(pid)
++}
++
++// keysFor reads the identities BPF will see for a host pid. Mirrors
++// PIDsFilter.addPID(): the pid namespace inode plus every level of NSpid.
++func (d *DeniedPIDs) keysFor(pid app.PID) []deniedPIDKey {
++	ns, err := procs.FindNamespace(pid)
++	if err != nil {
++		// the process exited between the poll and here; the next poll reports
++		// it deleted and there is nothing left to deny
++		d.log.Debug("cannot read pid namespace of excluded process", "pid", pid, "error", err)
++		return nil
++	}
++
++	nsPIDs, err := procs.FindNamespacedPids(pid)
++	if err != nil {
++		d.log.Debug("cannot read namespaced pids of excluded process", "pid", pid, "error", err)
++		return nil
++	}
++	if len(nsPIDs) == 0 {
++		// no NSpid line in /proc/<pid>/status: not a namespaced kernel, so the
++		// pid BPF derives is this one. The allow side skips such a process
++		// entirely; denying is the safe direction, so it is published instead.
++		nsPIDs = []app.PID{pid}
++	}
++
++	keys := make([]deniedPIDKey, 0, len(nsPIDs))
++	for _, nsPID := range nsPIDs {
++		keys = append(keys, deniedPIDKey{Pid: uint32(nsPID), Ns: ns})
++	}
++
++	return keys
++}
++
++func (d *DeniedPIDs) maps() (denied, cache *ebpf.Map) {
++	d.ctx.MapsLock.Lock()
++	defer d.ctx.MapsLock.Unlock()
++
++	return d.ctx.EBPFMaps[deniedPIDsMapName], d.ctx.EBPFMaps[pidCacheMapName]
++}
