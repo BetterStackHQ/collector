@@ -68,9 +68,9 @@ jobs:
         working-directory: ${{ runner.temp }}/obi
         run: go mod download
 
-      - name: Test tpinjector package
+      - name: Test patched packages
         working-directory: ${{ runner.temp }}/obi
-        run: go test -race ./pkg/internal/ebpf/tpinjector
+        run: go test -race ./pkg/internal/ebpf/tpinjector ./pkg/appolly/discover/exec ./pkg/internal/procs
 
       - name: Build production OBI stage
         run: docker build --target obi-builder --file ebpf/Dockerfile .

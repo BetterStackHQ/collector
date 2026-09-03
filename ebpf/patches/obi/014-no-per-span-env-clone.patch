@@ -1,0 +1,61 @@
+diff --git a/pkg/appolly/discover/exec/file.go b/pkg/appolly/discover/exec/file.go
+index eabf55c5d..3cf8099ea 100644
+--- a/pkg/appolly/discover/exec/file.go
++++ b/pkg/appolly/discover/exec/file.go
+@@ -104,8 +104,13 @@ func (fi *FileInfo) ServiceAttrs() svc.Attrs {
+ 	defer fi.mu.RUnlock()
+ 
+ 	out := fi.service
++	// Metadata is decorated per span downstream, so every span needs its own
++	// copy. EnvVars is only ever read after discovery (ApplyEnvVariables
++	// replaces the whole map under the lock), so spans share the one map: a
++	// per-span clone is paid on every event and, for a process whose environ
++	// region was overwritten by setproctitle (nginx, valkey, ruby, sshd), the
++	// map is sized for thousands of empty NUL-separated entries.
+ 	out.Metadata = maps.Clone(fi.service.Metadata)
+-	out.EnvVars = maps.Clone(fi.service.EnvVars)
+ 
+ 	// no need to clone the other fields as they are immutable
+ 	return out
+diff --git a/pkg/appolly/discover/exec/file_test.go b/pkg/appolly/discover/exec/file_test.go
+index dbc946a94..da19673c8 100644
+--- a/pkg/appolly/discover/exec/file_test.go
++++ b/pkg/appolly/discover/exec/file_test.go
+@@ -102,3 +102,20 @@ func TestApplyEnvVariables(t *testing.T) {
+ 		})
+ 	}
+ }
++
++// ServiceAttrs is called once per span: Metadata is decorated per span so it
++// must be a copy, EnvVars is read-only after discovery so it must be shared.
++func TestServiceAttrsSharesEnvVarsClonesMetadata(t *testing.T) {
++	fi := New(Init{})
++	fi.SetMetadata(map[attr.Name]string{"k": "v"})
++	fi.ApplyEnvVariables(map[string]string{"OTEL_SERVICE_NAME": "svc"})
++
++	snap := fi.ServiceAttrs()
++	snap.Metadata["k"] = "changed"
++	if got := fi.ServiceAttrs().Metadata["k"]; got != "v" {
++		t.Fatalf("Metadata not cloned per snapshot: %q", got)
++	}
++	if reflect.ValueOf(snap.EnvVars).Pointer() != reflect.ValueOf(fi.ServiceAttrs().EnvVars).Pointer() {
++		t.Fatal("EnvVars cloned per snapshot")
++	}
++}
+diff --git a/pkg/internal/procs/procenv.go b/pkg/internal/procs/procenv.go
+index 7d967b881..067a67d7b 100644
+--- a/pkg/internal/procs/procenv.go
++++ b/pkg/internal/procs/procenv.go
+@@ -12,7 +12,11 @@ import (
+ )
+ 
+ func envStrsToMap(varsStr []string) map[string]string {
+-	vars := make(map[string]string, len(varsStr))
++	// not presized from len(varsStr): /proc/<pid>/environ of a process that
++	// rewrote its argv/environ area (setproctitle) splits into thousands of
++	// empty strings, and the hint would reserve hundreds of KiB for a map that
++	// ends up holding a handful of entries
++	vars := map[string]string{}
+ 
+ 	for _, s := range varsStr {
+ 		keyVal := strings.SplitN(s, "=", 2)
