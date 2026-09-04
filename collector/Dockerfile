@@ -6,16 +6,16 @@ FROM debian:13.5 AS cluster-agent-builder
 RUN apt-get update && apt-get install -y curl git
 ARG GO_VERSION=1.24.9
 RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz -o go.tar.gz && \
-    tar -C /usr/local -xzf go.tar.gz && rm go.tar.gz
+  tar -C /usr/local -xzf go.tar.gz && rm go.tar.gz
 ENV PATH="/usr/local/go/bin:${PATH}"
 ARG CLUSTER_AGENT_VERSION=v1.6.1
 RUN git clone --depth 1 --branch ${CLUSTER_AGENT_VERSION} \
-    https://github.com/coroot/coroot-cluster-agent.git /tmp/cluster-agent
+  https://github.com/coroot/coroot-cluster-agent.git /tmp/cluster-agent
 WORKDIR /tmp/cluster-agent
 COPY ebpf/patches/cluster-agent/*.patch ./
 RUN git apply *.patch
 RUN CGO_ENABLED=0 go build -mod=readonly \
-    -o /usr/bin/coroot-cluster-agent .
+  -o /usr/bin/coroot-cluster-agent .
 
 # Final stage
 FROM debian:13.5-slim
@@ -59,7 +59,7 @@ RUN mkdir -p /versions/0-default \
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
 ENV CLUSTER_COLLECTOR=false
-ENV COLLECTOR_VERSION=1.1.39
+ENV COLLECTOR_VERSION=1.1.40
 ENV VECTOR_VERSION=0.47.0
 ENV OBI_VERSION=0.12.2
 ENV CLUSTER_AGENT_VERSION=1.6.1
