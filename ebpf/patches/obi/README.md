@@ -248,3 +248,26 @@ Currently contains patches:
   too. Against pristine+008..012 the scenario reports all four differences from
   one run: the child's socket enrolled in `sock_dir`, one Traceparent on its
   request, 61 bytes arriving as 131, and the socket still enrolled afterwards.
+* 014-no-per-span-env-clone.patch
+  Stop `FileInfo.ServiceAttrs()` cloning the process environment for every
+  span, and stop `procs.envStrsToMap()` presizing that map from the raw
+  NUL-split count of `/proc/<pid>/environ`. Upstream's `PIDsFilter.Filter`
+  calls `ServiceAttrs()` once per span, so each span carried a fresh copy of
+  `EnvVars` and `Metadata`. `EnvVars` is only read after discovery
+  (`ApplyEnvVariables` swaps the whole map under the lock), so spans now share
+  it; `Metadata` stays cloned because the k8s decorator writes it per span.
+
+  Why it mattered: a process that rewrites its argv/environ area with
+  `setproctitle` (valkey, nginx, ruby/puma, sshd) reads back as thousands of
+  empty NUL-separated strings, so the presized map reserved ~8 Swiss tables of
+  40 KiB for a handful of entries, and `maps.Clone` reproduces that layout per
+  span: ~320 KiB per span of those services. Two upstream stages then hold
+  span copies for minutes: `SettleConditionalParents` (new in v0.12.0, #3001)
+  parks up to 8192 `ParentConditional` spans for `max_transaction_time` (5m),
+  and every OTel metrics reporter keeps a `*svc.Attrs` pointing into a
+  100-span batch for its lifetime. Under otel-demo browser load that is
+  1.3 GiB of live env-map copies within five minutes and a 2 GiB cgroup OOM
+  loop; a `viewcore` pass over a core of the unpatched process attributed 75%
+  of the retained 40 KiB map tables to the settler and 20% to
+  `Metrics.service`. Measured on the same k3s node and workload: unpatched
+  reached 750-1450 MiB anon RSS in 5 minutes, patched sits at ~80 MiB.
