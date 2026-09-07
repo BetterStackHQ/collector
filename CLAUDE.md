@@ -20,7 +20,7 @@ docker-compose.yml          # Standard compose: collector + ebpf services
 docker-compose.seccomp.yml  # Same with seccomp for Docker < 20.10.10
 collector-seccomp.json      # Seccomp profile allowing clone3 for Tokio/Vector
 collector/
-  Dockerfile                # Multi-stage: Vector 0.47.0 + Cluster Agent 1.6.1 + Debian 13.5-slim
+  Dockerfile                # Multi-stage: Vector 0.47.0 + Cluster Agent 1.10.0 + Debian 13.5-slim
   bootstrap.sh              # Downloads manifest from API, provisions both containers
   bootstrap_supervisord.conf
   run_supervisord.sh

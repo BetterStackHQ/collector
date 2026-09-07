@@ -1,0 +1,77 @@
+diff --git a/metrics/target.go b/metrics/target.go
+--- a/metrics/target.go
++++ b/metrics/target.go
+@@ -11,10 +11,10 @@
+ 	"github.com/coroot/coroot-cluster-agent/common"
+ 	"github.com/coroot/coroot-cluster-agent/config"
+ 	"github.com/coroot/coroot-cluster-agent/k8s"
++	"github.com/coroot/coroot-cluster-agent/metrics/dbtracker"
+ 	"github.com/coroot/coroot-cluster-agent/metrics/mongo"
+ 	"github.com/coroot/coroot-cluster-agent/metrics/mysql"
+ 	"github.com/coroot/coroot-cluster-agent/metrics/postgres"
+-	"github.com/coroot/coroot-cluster-agent/schema/emitter"
+ 	"github.com/coroot/logger"
+ 	"github.com/go-kit/log/level"
+ 	gomysql "github.com/go-sql-driver/mysql"
+@@ -103,7 +103,7 @@
+ 	return t.coll != nil
+ }
+ 
+-func (t *Target) StartExporter(reg *prometheus.Registry, credentials Credentials, tlsCreds common.TLSCredentials, scrapeInterval, scrapeTimeout time.Duration, changeEmitter *emitter.ChangeEmitter, maxTablesPerDB int, trackSizes, trackBloat bool, excludeDatabases []string) error {
++func (t *Target) StartExporter(reg *prometheus.Registry, credentials Credentials, tlsCreds common.TLSCredentials, scrapeInterval, scrapeTimeout time.Duration, changeEmitter dbtracker.ChangeEmitter, maxTablesPerDB int, trackSizes, trackBloat bool, excludeDatabases []string) error {
+ 	collectTimeout := scrapeTimeout - time.Second
+ 	if collectTimeout <= 0 {
+ 		collectTimeout = time.Second
+diff --git a/metrics/metrics.go b/metrics/metrics.go
+index f631870..2a57fbe 100644
+--- a/metrics/metrics.go
++++ b/metrics/metrics.go
+@@ -13,6 +13,7 @@ import (
+ 	"github.com/coroot/coroot-cluster-agent/flags"
+ 	"github.com/coroot/coroot-cluster-agent/k8s"
+ 	"github.com/coroot/coroot-cluster-agent/metrics/aws"
++	"github.com/coroot/coroot-cluster-agent/metrics/dbtracker"
+ 	"github.com/coroot/coroot-cluster-agent/metrics/ksm"
+ 	"github.com/coroot/coroot-cluster-agent/schema/emitter"
+ 	"github.com/coroot/logger"
+@@ -45,7 +46,7 @@ type Metrics struct {
+ 	k8sPodEvents <-chan k8s.PodEvent
+ 	ksm          *ksm.KSM
+ 
+-	changeEmitter *emitter.ChangeEmitter
++	changeEmitter dbtracker.ChangeEmitter
+ }
+ 
+ func NewMetrics(k8s *k8s.K8S) (*Metrics, error) {
+diff --git a/metrics/schema_tracking_test.go b/metrics/schema_tracking_test.go
+new file mode 100644
+index 0000000..95d11e9
+--- /dev/null
++++ b/metrics/schema_tracking_test.go
+@@ -0,0 +1,26 @@
++package metrics
++
++import (
++	"net/url"
++	"testing"
++	"time"
++
++	"github.com/coroot/coroot-cluster-agent/flags"
++	"github.com/coroot/coroot-cluster-agent/metrics/dbtracker"
++	"github.com/stretchr/testify/require"
++)
++
++func TestDisabledSchemaTrackingPassesNilEmitter(t *testing.T) {
++	oldURL, oldInterval, oldTracking := *flags.CorootURL, *flags.MetricsScrapeInterval, *flags.TrackDatabaseChanges
++	t.Cleanup(func() {
++		*flags.CorootURL, *flags.MetricsScrapeInterval, *flags.TrackDatabaseChanges = oldURL, oldInterval, oldTracking
++	})
++	*flags.CorootURL, _ = url.Parse("http://127.0.0.1:38263")
++	*flags.MetricsScrapeInterval = 15 * time.Second
++	*flags.TrackDatabaseChanges = false
++	ms, err := NewMetrics(nil)
++	require.NoError(t, err)
++	// Database constructors use this interface; a typed nil would enable tracking.
++	var changeEmitter dbtracker.ChangeEmitter = ms.changeEmitter
++	require.True(t, changeEmitter == nil)
++}

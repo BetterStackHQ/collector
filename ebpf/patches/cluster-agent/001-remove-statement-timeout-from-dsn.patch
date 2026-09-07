@@ -1,20 +1,20 @@
 diff --git a/metrics/target.go b/metrics/target.go
+index 0243c87..5a2d40f 100644
 --- a/metrics/target.go
 +++ b/metrics/target.go
-@@ -5,7 +5,6 @@
+@@ -6,7 +6,6 @@ import (
  	"maps"
  	"net"
  	"net/url"
 -	"strconv"
  	"time"
-
- 	"github.com/coroot/coroot-cluster-agent/config"
-@@ -101,7 +100,6 @@
- 	case TargetTypePostgres:
+ 
+ 	"github.com/coroot/coroot-cluster-agent/common"
+@@ -116,7 +115,6 @@ func (t *Target) StartExporter(reg *prometheus.Registry, credentials Credentials
  		userPass := url.UserPassword(credentials.Username, credentials.Password)
  		query := url.Values{}
  		query.Set("connect_timeout", "1")
 -		query.Set("statement_timeout", strconv.Itoa(int(collectTimeout.Milliseconds())))
  		sslmode := t.Params["sslmode"]
- 		if sslmode == "" {
- 			sslmode = "disable"
+ 		pqTLSName := ""
+ 		if tlsCreds.CA != "" || (tlsCreds.Cert != "" && tlsCreds.Key != "") {

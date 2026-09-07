@@ -1,0 +1,258 @@
+diff --git a/metrics/ksm/ksm.go b/metrics/ksm/ksm.go
+index f657afb..e9179f0 100644
+--- a/metrics/ksm/ksm.go
++++ b/metrics/ksm/ksm.go
+@@ -97,13 +97,8 @@ func (ksm *KSM) Stop() {
+ }
+ 
+ func customResourceConfig() string {
+-	resources := append(fluxcd(), argocd()...)
+-	resources = append(resources, cnpg()...)
+-	resources = append(resources, perconaPG()...)
+-	resources = append(resources, psmdb()...)
+-	resources = append(resources, pxc()...)
+ 	cfg := crs.Metrics{
+-		Spec: crs.MetricsSpec{Resources: resources},
++		Spec: crs.MetricsSpec{Resources: fluxcd()},
+ 	}
+ 	data, err := yaml.Marshal(cfg)
+ 	if err != nil {
+diff --git a/metrics/ksm/monitoring_test.go b/metrics/ksm/monitoring_test.go
+new file mode 100644
+index 0000000..bebbca9
+--- /dev/null
++++ b/metrics/ksm/monitoring_test.go
+@@ -0,0 +1,18 @@
++package ksm
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/require"
++	"gopkg.in/yaml.v3"
++	crs "k8s.io/kube-state-metrics/v2/pkg/customresourcestate"
++)
++
++func TestCustomResourceWatchersPreserveExistingScope(t *testing.T) {
++	var cfg crs.Metrics
++	require.NoError(t, yaml.Unmarshal([]byte(customResourceConfig()), &cfg))
++	require.Len(t, cfg.Spec.Resources, len(fluxcd()))
++	for i, resource := range cfg.Spec.Resources {
++		require.Equal(t, fluxcd()[i].GroupVersionKind, resource.GroupVersionKind)
++	}
++}
+diff --git a/metrics/mongo/mongo.go b/metrics/mongo/mongo.go
+index e623935..e80576a 100644
+--- a/metrics/mongo/mongo.go
++++ b/metrics/mongo/mongo.go
+@@ -272,24 +272,6 @@ func (c *Collector) snapshot() {
+ 		c.isPercona = bi.PsmdbVersion != ""
+ 	}
+ 
+-	if err := c.collectServerStatus(ctx); err != nil {
+-		c.logger.Warning(err)
+-		c.scrapeErrors[err.Error()] = true
+-		c.ss = nil
+-	}
+-
+-	if err := c.collectCurrentOp(ctx); err != nil {
+-		c.logger.Warning(err)
+-		c.scrapeErrors[err.Error()] = true
+-		c.currentOp = nil
+-	}
+-
+-	if err := c.collectProfiler(ctx); err != nil {
+-		c.logger.Warning(err)
+-		c.scrapeErrors[err.Error()] = true
+-		c.topQueries = nil
+-	}
+-
+ 	if rs, err := c.collectReplStatus(ctx); err != nil {
+ 		c.logger.Warning(err)
+ 		c.scrapeErrors[err.Error()] = true
+@@ -297,24 +279,6 @@ func (c *Collector) snapshot() {
+ 		c.rsStatus = rs
+ 	}
+ 
+-	if cfg, err := c.collectReplConfig(ctx); err != nil {
+-		c.logger.Warning(err)
+-		c.scrapeErrors[err.Error()] = true
+-	} else {
+-		c.rsConfig = cfg
+-	}
+-
+-	if c.rsStatus != nil && c.rsStatus.ReplicaSet != "" {
+-		if oplog, err := c.collectOplog(ctx); err != nil {
+-			c.logger.Warning(err)
+-			c.scrapeErrors[err.Error()] = true
+-		} else {
+-			c.oplog = oplog
+-		}
+-	} else {
+-		c.oplog = nil
+-	}
+-
+ 	if c.emitter != nil {
+ 		c.trackSettingsChanges(ctx)
+ 	}
+diff --git a/metrics/mongo/monitoring_test.go b/metrics/mongo/monitoring_test.go
+new file mode 100644
+index 0000000..e60c38b
+--- /dev/null
++++ b/metrics/mongo/monitoring_test.go
+@@ -0,0 +1,70 @@
++package mongo
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/coroot/logger"
++	"github.com/prometheus/client_golang/prometheus"
++	"github.com/stretchr/testify/require"
++	"go.mongodb.org/mongo-driver/bson"
++	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
++)
++
++func TestSnapshotPreservesDashboardMetricsWithoutDeepMonitoring(t *testing.T) {
++	mt := mtest.New(t, mtest.NewOptions().ClientType(mtest.Mock))
++	mt.Run("replica with collection sizes", func(mt *mtest.T) {
++		mt.AddMockResponses(
++			mtest.CreateSuccessResponse(), // ping
++			mtest.CreateSuccessResponse(bson.E{Key: "version", Value: "7.0.0"}),
++			mtest.CreateSuccessResponse(
++				bson.E{Key: "set", Value: "rs0"},
++				bson.E{Key: "members", Value: bson.A{bson.D{
++					{Key: "self", Value: true}, {Key: "stateStr", Value: "PRIMARY"},
++					{Key: "lastAppliedWallTime", Value: time.Unix(1700000000, 0)},
++				}}},
++			),
++			mtest.CreateSuccessResponse(bson.E{Key: "databases", Value: bson.A{bson.D{
++				{Key: "name", Value: "app"}, {Key: "sizeOnDisk", Value: 4096},
++			}}}),
++			mtest.CreateCursorResponse(0, "app.$cmd.listCollections", mtest.FirstBatch,
++				bson.D{{Key: "name", Value: "orders"}, {Key: "type", Value: "collection"}}),
++			mtest.CreateCursorResponse(0, "app.orders", mtest.FirstBatch,
++				bson.D{{Key: "storageStats", Value: bson.D{{Key: "totalSize", Value: 1024}}}}),
++			mtest.CreateSuccessResponse(), // Collect ping
++		)
++		c := &Collector{
++			ctx: context.Background(), client: mt.Client, logger: logger.NewKlog("test"),
++			scrapeInterval: 15 * time.Second, collectTimeout: 9 * time.Second,
++			dbTracker:  newDatabaseTracker(1000, false, true, logger.NewKlog("test")),
++			ssCounters: newServerStatusCounters(), profilerLastTs: map[string]time.Time{},
++		}
++		c.snapshot()
++		require.Empty(mt, c.scrapeErrors)
++		reg := prometheus.NewRegistry()
++		reg.MustRegister(c)
++		families, err := reg.Gather()
++		require.NoError(mt, err)
++		values := map[string]float64{}
++		for _, family := range families {
++			values[family.GetName()] = family.Metric[0].GetGauge().GetValue()
++		}
++		for name, value := range map[string]float64{
++			"mongo_up": 1, "mongo_scrape_error": 0, "mongo_info": 1,
++			"mongo_rs_status": 1, "mongo_rs_last_applied_timestamp_ms": 1700000000000,
++			"mongo_database_size_bytes": 4096, "mongo_collection_size_bytes": 1024,
++		} {
++			require.Contains(mt, values, name)
++			require.Equal(mt, value, values[name], name)
++		}
++		commands := []string{}
++		for _, event := range mt.GetAllStartedEvents() {
++			commands = append(commands, event.CommandName)
++			if event.CommandName == "aggregate" {
++				require.Contains(mt, event.Command.String(), "$collStats")
++			}
++		}
++		require.Equal(mt, []string{"ping", "buildInfo", "replSetGetStatus", "listDatabases", "listCollections", "aggregate", "ping"}, commands)
++	})
++}
+diff --git a/metrics/mysql/mysql.go b/metrics/mysql/mysql.go
+index ff20a7e..2a6202e 100644
+--- a/metrics/mysql/mysql.go
++++ b/metrics/mysql/mysql.go
+@@ -230,12 +230,6 @@ func (c *Collector) snapshot() {
+ 		c.scrapeErrors[err.Error()] = true
+ 		return
+ 	}
+-	c.activePrev = c.activeCurr
+-	if c.activeCurr, err = c.queryActiveStatements(ctx, c.activePrev); err != nil {
+-		c.logger.Warning(err)
+-		c.scrapeErrors[err.Error()] = true
+-		c.activeCurr = nil
+-	}
+ 	c.ioByTablePrev = c.ioByTableCurr
+ 	c.ioByTableCurr, err = c.queryTableIOWaits(ctx)
+ 	if err != nil {
+@@ -244,17 +238,6 @@ func (c *Collector) snapshot() {
+ 		return
+ 	}
+ 
+-	c.lockWaitsSnapshot(ctx)
+-	c.innodbTrxSnapshot(ctx)
+-	c.innodbCountersSnapshot(ctx)
+-	c.binlogSnapshot(ctx)
+-
+-	if c.globalVariables["group_replication_group_name"] != "" {
+-		c.groupReplicationSnapshot(ctx)
+-	} else {
+-		c.groupReplication = nil
+-	}
+-
+ 	if c.emitter != nil {
+ 		c.trackSettingsChanges(ctx)
+ 	}
+diff --git a/metrics/postgres/collector.go b/metrics/postgres/collector.go
+index 1c83a7a..620be13 100644
+--- a/metrics/postgres/collector.go
++++ b/metrics/postgres/collector.go
+@@ -240,21 +240,6 @@ func (c *Collector) snapshot() {
+ 		c.logger.Warning(err)
+ 	}
+ 
+-	if err = c.getCheckpointStats(ctx, version); err != nil {
+-		c.scrapeErrors[err.Error()] = true
+-		c.logger.Warning(err)
+-	}
+-
+-	if err = c.getWalStats(ctx, version); err != nil {
+-		c.scrapeErrors[err.Error()] = true
+-		c.logger.Warning(err)
+-	}
+-
+-	if err = c.getWraparoundStats(ctx, version); err != nil {
+-		c.scrapeErrors[err.Error()] = true
+-		c.logger.Warning(err)
+-	}
+-
+ 	querySizeLimit := 0
+ 	for _, s := range c.settings {
+ 		if s.Name == "track_activity_query_size" {
+diff --git a/metrics/postgres/database.go b/metrics/postgres/database.go
+index be1c150..c95fbd4 100644
+--- a/metrics/postgres/database.go
++++ b/metrics/postgres/database.go
+@@ -109,9 +109,7 @@ WHERE c.relkind = 'r'
+ 	if dt.trackBloat {
+ 		bloat = collectBloat(ctx, db, dt.logger)
+ 	}
+-	// vacuum progress must be resolved here (per-database) — pg_stat_progress_vacuum.relid
+-	// only maps to a table name via pg_class in the database the vacuum runs in
+-	vacuumProgress := collectVacuumProgress(ctx, db, dt.logger)
++	var vacuumProgress []vacuumProgressEntry
+ 
+ 	if dt.maxTablesPerDB > 0 && tableCount > dt.maxTablesPerDB {
+ 		dt.logger.Warningf("database %s has %d tables (limit %d), skipping", dbName, tableCount, dt.maxTablesPerDB)
+@@ -149,7 +147,7 @@ WHERE c.relkind = 'r'
+ 		return nil, bloat, nil, vacuumProgress, nil
+ 	}
+ 
+-	tableStats := collectTableStats(ctx, db, dt.logger)
++	var tableStats []tableStatEntry
+ 
+ 	tableSizes, err := queryTableSizes(ctx, db, dbName)
+ 	if err != nil {
