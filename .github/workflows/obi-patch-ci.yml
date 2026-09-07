@@ -70,7 +70,7 @@ jobs:
 
       - name: Test patched packages
         working-directory: ${{ runner.temp }}/obi
-        run: go test -race ./pkg/internal/ebpf/tpinjector ./pkg/appolly/discover/exec ./pkg/internal/procs
+        run: go test -race ./pkg/internal/ebpf/tpinjector ./pkg/appolly/discover ./pkg/appolly/discover/exec ./pkg/ebpf/common ./pkg/internal/procs
 
       - name: Build production OBI stage
         run: docker build --target obi-builder --file ebpf/Dockerfile .
