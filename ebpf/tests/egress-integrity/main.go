@@ -481,6 +481,14 @@ func positiveControl(selfcheck bool) error {
 		[]byte("GET /two HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n"),
 		[]byte("POST /three HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\nConnection: keep-alive\r\n\r\nhello\x00world"),
 	}
+	// Exercise both sides of the scratch-buffer ceiling, including the exact
+	// 8192-byte send that upstream previously masked to a zero-byte copy.
+	for _, size := range []int{8191, 8192, 8193} {
+		head := fmt.Sprintf("GET /size-%d HTTP/1.1\r\nHost: x\r\nX-Padding: ", size)
+		tail := "\r\nConnection: keep-alive\r\n\r\n"
+		requests = append(requests, []byte(head+strings.Repeat("x", size-len(head)-len(tail))+tail))
+	}
+
 	expected := 0
 	for _, request := range requests {
 		expected += len(request)
@@ -528,7 +536,7 @@ func positiveControl(selfcheck bool) error {
 	if traceparents != wantTraceparents || result.traceparents != wantTraceparents {
 		return fmt.Errorf("Traceparent count: raw=%d parsed=%d, want=%d", traceparents, result.traceparents, wantTraceparents)
 	}
-	wantBodies := [][]byte{nil, nil, []byte("hello\x00world")}
+	wantBodies := [][]byte{nil, nil, []byte("hello\x00world"), nil, nil, nil}
 	for i := range wantBodies {
 		if !bytes.Equal(result.bodies[i], wantBodies[i]) {
 			return fmt.Errorf("request %d body changed: %w", i+1, byteDiff(wantBodies[i], result.bodies[i]))

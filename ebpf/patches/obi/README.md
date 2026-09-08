@@ -4,17 +4,31 @@ Patches here are applied in lexical order (`NNN-description.patch`) on top of th
 tag pinned by `ARG OBI_VERSION` / `OBI_REVISION` in `ebpf/Dockerfile`. The build and
 `obi-patch-ci.yml` tolerate an empty directory.
 
-Currently contains patches:
+## v0.13.0 rebase
+
+Pinned to `3cc19862cef1abdaaeaa2a6387b462d31822010e`, using the same
+`obi-generator:0.2.15` digest as v0.12.2 (also the v0.13.0 Makefile default).
+
+| Patch | Decision | Upstream comparison |
+| --- | --- | --- |
+| 008 | Keep unchanged | No HTTP/1 upgrade parking upstream. |
+| 009 | Remove | [#3257](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3257) gates both HTTP detector paths on a fresh fill. [#3298](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3298) bounds copies by the mapped window; [#3304](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3304) invalidates failed fills for the other readers. |
+| 010 | Restack | Preserve the upstream buffer fixes, move the fill to the entry program, and bound both downstream HTTP/1 scans by the copied window instead of `msg->size`. HTTP/2 stream ownership from #3156 remains intact. |
+| 011 | Keep unchanged | Upstream still checks discovery after the existing-trace and Go-gRPC routes. |
+| 012 | Keep unchanged | Upstream still enrolls all outgoing sockets and backfills by network namespace. |
+| 013 | Restack | Adapt the finder hunk to the queue metrics argument. Explicit denials remain necessary; #3170's PID drain period addresses exited allowed processes, not discovery exclusions. |
+| 014 | Retain only map sizing | [#3232](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3232) replaces per-span cloning with `UnsafeServiceAttrs()`, but leaves `envStrsToMap()` presizing unchanged. |
+
+Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
+bounds are part of the base now. A successful fill can copy less than `msg->size`
+after a failed pull; `http1_buf_size` carries that copied length across the gate's
+tail calls so they cannot classify stale bytes beyond it.
+
+## Current patches
 
 * 008-never-inject-after-http-upgrade.patch
   Prevent OBI from injecting after HTTP upgrade (e.g. WebSocket) requests, which
   would break the connection.
-* 009-never-inject-on-stale-msg-buffer.patch
-  Only run tpinjector's HTTP request detection when fill_msg_buffers actually
-  refreshed the per-CPU scratch buffer from the current message. On SSL
-  connections the fill deliberately bails, so the detector would otherwise judge
-  stale bytes from a previous message and could splice a Traceparent header into
-  TLS ciphertext, corrupting the stream (peer-side bad_record_mac).
 * 010-default-deny-injection-gate.patch
   Invert tpinjector's HTTP/1 trust model. Upstream mutates any egress message
   whose first bytes look like a request method, which is why binary streams get
@@ -248,26 +262,10 @@ Currently contains patches:
   too. Against pristine+008..012 the scenario reports all four differences from
   one run: the child's socket enrolled in `sock_dir`, one Traceparent on its
   request, 61 bytes arriving as 131, and the socket still enrolled afterwards.
-* 014-no-per-span-env-clone.patch
-  Stop `FileInfo.ServiceAttrs()` cloning the process environment for every
-  span, and stop `procs.envStrsToMap()` presizing that map from the raw
-  NUL-split count of `/proc/<pid>/environ`. Upstream's `PIDsFilter.Filter`
-  calls `ServiceAttrs()` once per span, so each span carried a fresh copy of
-  `EnvVars` and `Metadata`. `EnvVars` is only read after discovery
-  (`ApplyEnvVariables` swaps the whole map under the lock), so spans now share
-  it; `Metadata` stays cloned because the k8s decorator writes it per span.
-
-  Why it mattered: a process that rewrites its argv/environ area with
-  `setproctitle` (valkey, nginx, ruby/puma, sshd) reads back as thousands of
-  empty NUL-separated strings, so the presized map reserved ~8 Swiss tables of
-  40 KiB for a handful of entries, and `maps.Clone` reproduces that layout per
-  span: ~320 KiB per span of those services. Two upstream stages then hold
-  span copies for minutes: `SettleConditionalParents` (new in v0.12.0, #3001)
-  parks up to 8192 `ParentConditional` spans for `max_transaction_time` (5m),
-  and every OTel metrics reporter keeps a `*svc.Attrs` pointing into a
-  100-span batch for its lifetime. Under otel-demo browser load that is
-  1.3 GiB of live env-map copies within five minutes and a 2 GiB cgroup OOM
-  loop; a `viewcore` pass over a core of the unpatched process attributed 75%
-  of the retained 40 KiB map tables to the settler and 20% to
-  `Metrics.service`. Measured on the same k3s node and workload: unpatched
-  reached 750-1450 MiB anon RSS in 5 minutes, patched sits at ~80 MiB.
+* 014-no-env-map-presizing.patch
+  Do not presize the environment map from the NUL-split count of
+  `/proc/<pid>/environ`. Processes using `setproctitle` can leave thousands of
+  empty entries, reserving hundreds of KiB for a handful of environment variables.
+  Upstream #3232 bypasses `ServiceAttrs()` on the span path, so the former
+  per-span clone change and its test are no longer needed. Environment-map
+  presizing is unchanged upstream and still needs this patch.
