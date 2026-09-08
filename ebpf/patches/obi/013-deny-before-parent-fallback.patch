@@ -87,20 +87,20 @@ index 7cea1b777..88866c03f 100644
  
          if (found_ns_pid) {
 diff --git a/pkg/appolly/discover/finder.go b/pkg/appolly/discover/finder.go
-index 29ca47b98..5d3159678 100644
+index 57e39c12c..5b3e7874c 100644
 --- a/pkg/appolly/discover/finder.go
 +++ b/pkg/appolly/discover/finder.go
 @@ -127,7 +127,7 @@ func (pf *ProcessFinder) Start(ctx context.Context, opts ...ProcessFinderStartOp
  	), swarm.WithID("LanguageDecoratorProvider"))
  
- 	criteriaFilteredEvents := msgh.QueueFromConfig[[]Event[ProcessMatch]](pf.cfg, "criteriaFilteredEvents")
+ 	criteriaFilteredEvents := msgh.QueueFromConfig[[]Event[ProcessMatch]](pf.cfg, pf.ctxInfo.Metrics, "criteriaFilteredEvents")
 -	swi.Add(criteriaMatcherProvider(pf.cfg, langEnrichedEvents, criteriaFilteredEvents, configCriteria, startConfig.dynamicPIDSelector),
 +	swi.Add(criteriaMatcherProvider(pf.cfg, langEnrichedEvents, criteriaFilteredEvents, configCriteria, startConfig.dynamicPIDSelector, pf.ebpfEventContext),
  		swarm.WithID("CriteriaMatcher"))
  	swi.Add(dynamicMatcherProvider(langEnrichedEvents, criteriaFilteredEvents, appDynamicSelector),
  		swarm.WithID("DynamicMatcher"))
 diff --git a/pkg/appolly/discover/matcher.go b/pkg/appolly/discover/matcher.go
-index cafef1741..2ffec501d 100644
+index c0300ef22..ac2adcf7c 100644
 --- a/pkg/appolly/discover/matcher.go
 +++ b/pkg/appolly/discover/matcher.go
 @@ -38,6 +38,7 @@ func criteriaMatcherProvider(

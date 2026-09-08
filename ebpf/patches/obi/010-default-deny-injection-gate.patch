@@ -1,6 +1,6 @@
 diff --git a/bpf/tpinjector/maps/sk_inject_gate.h b/bpf/tpinjector/maps/sk_inject_gate.h
 new file mode 100644
-index 00000000..da2ac5fd
+index 000000000..da2ac5fde
 --- /dev/null
 +++ b/bpf/tpinjector/maps/sk_inject_gate.h
 @@ -0,0 +1,21 @@
@@ -26,10 +26,10 @@ index 00000000..da2ac5fd
 +    __type(value, u8);
 +} sk_inject_gate SEC(".maps");
 diff --git a/bpf/tpinjector/tpinjector.c b/bpf/tpinjector/tpinjector.c
-index a5febb70..c6dcdbbc 100644
+index a7e8bc344..9fb6541a4 100644
 --- a/bpf/tpinjector/tpinjector.c
 +++ b/bpf/tpinjector/tpinjector.c
-@@ -45,6 +45,7 @@
+@@ -47,6 +47,7 @@
  #include <tpinjector/inject_policy.h>
  #include <tpinjector/maps/sk_h2_flags.h>
  #include <tpinjector/maps/sk_h2_conn_flag.h>
@@ -37,7 +37,7 @@ index a5febb70..c6dcdbbc 100644
  #include <tpinjector/maps/sk_tp_info_pid_map.h>
  
  char __license[] SEC("license") = "Dual MIT/GPL";
-@@ -55,24 +56,45 @@ char __license[] SEC("license") = "Dual MIT/GPL";
+@@ -57,24 +58,45 @@ char __license[] SEC("license") = "Dual MIT/GPL";
  //
  //   obi_packet_extender (sk_msg entry)
  //   │
@@ -92,7 +92,7 @@ index a5febb70..c6dcdbbc 100644
  //   │                                 │     write_msg_traceparent
  //   │                                 │
  //   └── fall through ─────────────────┴─▶ wrap_http2_traceparent
-@@ -134,6 +156,9 @@ enum {
+@@ -136,6 +158,9 @@ enum {
      k_tail_validate_h2_tp,
      k_tail_detect_h2,
      k_tail_sniff_h2,
@@ -102,7 +102,7 @@ index a5febb70..c6dcdbbc 100644
  };
  
  int obi_packet_extender_write_msg_tp(struct sk_msg_md *msg);
-@@ -145,10 +170,13 @@ int obi_packet_extender_find_existing_h2_tp(struct sk_msg_md *msg);
+@@ -147,10 +172,13 @@ int obi_packet_extender_find_existing_h2_tp(struct sk_msg_md *msg);
  int obi_packet_extender_validate_h2_tp(struct sk_msg_md *msg);
  int obi_packet_extender_detect_h2(struct sk_msg_md *msg);
  int obi_packet_extender_sniff_h2(struct sk_msg_md *msg);
@@ -117,7 +117,7 @@ index a5febb70..c6dcdbbc 100644
      __uint(key_size, sizeof(u32));
      __array(values, int(void *));
  } extender_jump_table SEC(".maps") = {
-@@ -163,6 +191,9 @@ struct {
+@@ -165,6 +193,9 @@ struct {
              [k_tail_validate_h2_tp] = (void *)&obi_packet_extender_validate_h2_tp,
              [k_tail_detect_h2] = (void *)&obi_packet_extender_detect_h2,
              [k_tail_sniff_h2] = (void *)&obi_packet_extender_sniff_h2,
@@ -127,17 +127,25 @@ index a5febb70..c6dcdbbc 100644
          },
  };
  
-@@ -185,7 +216,9 @@ typedef struct tailcall_ctx {
+@@ -180,6 +211,7 @@ typedef struct tailcall_ctx {
+     u32 h2_hpack_len;             // HPACK length (frame payload minus prefix and trailing pad)
+     u32 h2_scan_pos;              // resume offset for detect_h2 across tail calls
+     u32 h2_tp_candidate_pos;      // HPACK scan start or found candidate offset (>= max = none)
++    u32 http1_buf_size;           // bytes copied from the current mapped message window
+     u8 niter;                     // HTTP/1 find-existing scan iteration counter
+     u8 h2_frames;                 // H2 frames already injected this packet (capped)
+     u8 h2_tp_retries;             // malformed HPACK traceparent candidates retried this packet
+@@ -187,7 +219,9 @@ typedef struct tailcall_ctx {
      bool go_grpc_conn;            // Go gRPC egress: use uprobe-stored tps, never create
      bool tp_present;              // frame already carries a traceparent we cannot adopt
      bool scan_exhausted;          // retry budget ran out before the block was walked
 +    bool http1_req;               // gate verdict: this message is an injectable HTTP/1 request
      u8 opener;                    // first HPACK field byte of the frame being considered
-+    u8 _pad[7];                   // -Wpadded is an error here, keep the tail explicit
++    u8 _pad[3];                   // -Wpadded is an error here, keep the tail explicit
  } tailcall_ctx;
  
  SCRATCH_MEM(tailcall_ctx);
-@@ -343,6 +376,226 @@ static __always_inline bool http1_upgrade_completed(struct sk_msg_md *msg) {
+@@ -345,6 +379,226 @@ static __always_inline bool http1_upgrade_completed(struct sk_msg_md *msg) {
      return is_http1_101_response(msg->data, msg->data_end);
  }
  
@@ -188,8 +196,8 @@ index a5febb70..c6dcdbbc 100644
 +
 +enum {
 +    // Bytes of a message the gate is willing to read. fill_msg_buffers
-+    // refreshes min(msg->size, k_msg_buffer_size_max) scratch bytes from *this*
-+    // message, so the scan is also clamped to msg->size: past it lie either
++    // refreshes only the mapped window, capped at k_msg_buffer_size_max, from this
++    // message, so the scan is clamped to that copied length: past it lie either
 +    // out-of-message kernel bytes or the tail of a previous message. Power of
 +    // two so the index mask keeps every access provably inside the map value.
 +    k_http1_gate_scan_max = 512,
@@ -364,7 +372,7 @@ index a5febb70..c6dcdbbc 100644
  #ifndef ENOMSG
  #define ENOMSG 42
  #endif
-@@ -1098,48 +1351,48 @@ int obi_packet_extender_sniff_h2(struct sk_msg_md *msg) {
+@@ -1142,41 +1396,48 @@ int obi_packet_extender_sniff_h2(struct sk_msg_md *msg) {
  }
  
  // HTTP/1 only. Caller must skip this for H2 sockets — connection-scoped tp_pid
@@ -398,21 +406,13 @@ index a5febb70..c6dcdbbc 100644
  
 -    bpf_msg_pull_data(msg, 0, msg->size, 0);
 -
--    // If the scratch buffer wasn't refreshed from *this* message (SSL
--    // payload, empty message, or allocation failure), protocol_detector
--    // would judge stale bytes left by a previous message on this CPU. A
--    // stale plaintext HTTP request start would make it approve injecting
--    // into what is actually opaque data (e.g. TLS ciphertext, which the
--    // splice would corrupt into a peer-side bad_record_mac). Never detect
--    // or inject on a stale buffer.
 -    if (!fill_msg_buffers(msg, p_conn, e_key)) {
 +    // Still needed next to the gate: protocol_detector also refuses a
 +    // connection that already has a request in flight (already_tracked), which
 +    // is what keeps a single connection from being extended twice.
 +    if (!protocol_detector(msg, id, &p_conn->conn)) {
          clear_tp_info_pid(e_key);
--        return true;
-+        return false;
+         return false;
      }
  
 -    const bool is_http = protocol_detector(msg, id, &p_conn->conn);
@@ -439,7 +439,7 @@ index a5febb70..c6dcdbbc 100644
  }
  
  // Sock_msg program which detects packets where it should add space for
-@@ -1152,6 +1405,15 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1189,6 +1450,15 @@ int obi_packet_extender(struct sk_msg_md *msg) {
          return SK_PASS;
      }
  
@@ -455,7 +455,7 @@ index a5febb70..c6dcdbbc 100644
      // A connection that legally left HTTP/1 via 101 Switching Protocols
      // (kubectl port-forward SPDY/3.1, WebSockets) carries an opaque tunnel
      // from then on: injecting into tunneled bytes that merely resemble an
-@@ -1191,16 +1453,138 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1228,16 +1498,143 @@ int obi_packet_extender(struct sk_msg_md *msg) {
      t_ctx->h2_tp_retries = 0;
      t_ctx->go_grpc_conn = false;
  
@@ -474,6 +474,11 @@ index a5febb70..c6dcdbbc 100644
 +    // payload, empty message, allocation failure) would make everything below
 +    // judge a previous message's bytes.
 +    const bool fresh_buffers = fill_msg_buffers(msg, &t_ctx->p_conn, &e_key);
++
++    // A failed pull can expose only part of msg->size. Match the copied window.
++    u32 window = fresh_buffers ? (unsigned char *)msg->data_end - (unsigned char *)msg->data : 0;
++    bpf_clamp_umax(window, k_msg_buffer_size_max);
++    t_ctx->http1_buf_size = window;
 +
 +    // Default-deny. Every HTTP/1 mutation downstream — the TCP option scheduled
 +    // by handle_existing_tp_pid, the Traceparent splice, the trace context
@@ -519,7 +524,7 @@ index a5febb70..c6dcdbbc 100644
 +
 +    const unsigned char *buf = bpf_map_lookup_elem(&msg_buffer_mem, &(u32){0});
 +
-+    t_ctx->http1_req = buf && http1_request_line_ok(buf, msg->size);
++    t_ctx->http1_req = buf && http1_request_line_ok(buf, t_ctx->http1_buf_size);
 +
 +    if (!t_ctx->http1_req) {
 +        bpf_tail_call_static(msg, &extender_jump_table, k_tail_http1_dispatch);
@@ -547,7 +552,7 @@ index a5febb70..c6dcdbbc 100644
 +
 +    const unsigned char *buf = bpf_map_lookup_elem(&msg_buffer_mem, &(u32){0});
 +
-+    if (buf && http1_request_upgrades(buf, msg->size)) {
++    if (buf && http1_request_upgrades(buf, t_ctx->http1_buf_size)) {
 +        park_socket(msg);
 +        clear_tp_info_pid(&t_ctx->e_key);
 +        return SK_PASS;
@@ -600,31 +605,36 @@ index a5febb70..c6dcdbbc 100644
          // per-stream decision in the h2 chain: inject only streams the uprobe left written=0
          t_ctx->go_grpc_conn = true;
          bpf_tail_call_static(msg, &extender_jump_table, k_tail_detect_h2);
-@@ -1211,13 +1595,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1248,17 +1645,12 @@ int obi_packet_extender(struct sk_msg_md *msg) {
          return SK_PASS;
      }
  
 -    bpf_msg_pull_data(msg, 0, msg->size, 0);
--    // See handle_existing_tp_pid: a stale scratch buffer must never reach
--    // protocol_detector. H2 handling below is unaffected, it reads the
--    // message directly and has its own SSL guards.
--    const bool fresh_buffers = fill_msg_buffers(msg, &t_ctx->p_conn, &e_key);
+-    const bool msg_buffers_ready = fill_msg_buffers(msg, &t_ctx->p_conn, &e_key);
 -
 -    if (is_h2_socket(msg)) {
 +    if (h2_sock) {
          bpf_tail_call_static(msg, &extender_jump_table, k_tail_detect_h2);
          return SK_PASS;
      }
-@@ -1230,7 +1608,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+ 
+-    // on a bail (SSL, etc.) msg_buffer_mem is stale — the HTTP detector would
+-    // match a prior request and inject into this connection
+-    if (!msg_buffers_ready || msg->size <= MIN_HTTP_SIZE) {
++    if (msg->size <= MIN_HTTP_SIZE) {
+         return SK_PASS;
+     }
+ 
+@@ -1266,7 +1658,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
      bpf_dbg_printk("MSG TO=%llx:%d", conn.d_ip[3], conn.d_port);
      bpf_dbg_printk("MSG SIZE=%u", msg->size);
  
--    const bool is_http = fresh_buffers && protocol_detector(msg, id, &conn);
+-    const bool is_http = protocol_detector(msg, id, &conn);
 +    const bool is_http = http1_req && protocol_detector(msg, id, &conn);
      if (is_http) {
          bpf_dbg_printk("len=%d, s_port=%d", msg->size, msg->local_port);
          init_tp_ctx_parent_tp(t_ctx);
-@@ -1239,6 +1617,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1275,6 +1667,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
      }
  
      wrap_http2_traceparent(msg, &t_ctx->p_conn);
