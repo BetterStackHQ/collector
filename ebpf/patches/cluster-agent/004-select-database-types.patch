@@ -1,0 +1,105 @@
+diff --git a/metrics/target.go b/metrics/target.go
+--- a/metrics/target.go
++++ b/metrics/target.go
+@@ -6,6 +6,9 @@
+ 	"maps"
+ 	"net"
+ 	"net/url"
++	"os"
++	"slices"
++	"strings"
+ 	"time"
+ 
+ 	"github.com/coroot/coroot-cluster-agent/common"
+@@ -248,7 +251,16 @@
+ 	}
+ }
+ 
++// An unset selection preserves upstream defaults; an empty selection disables all databases.
++func databaseTypeEnabled(kind TargetType) bool {
++	selected, configured := os.LookupEnv("DATABASE_TYPES")
++	return !configured || slices.Contains(strings.Split(selected, ","), string(kind))
++}
++
+ func TargetFromConfig(i config.ApplicationInstrumentation) *Target {
++	if !databaseTypeEnabled(TargetType(i.Type)) {
++		return nil
++	}
+ 	t := &Target{
+ 		Type: TargetType(i.Type),
+ 		Addr: net.JoinHostPort(i.Host, i.Port),
+@@ -359,6 +371,9 @@
+ 	}
+ 
+ 	if t != nil {
++		if !databaseTypeEnabled(t.Type) {
++			return nil
++		}
+ 		t.DiscoveredFromPodAnnotations = true
+ 		t.Description = fmt.Sprintf("ns=%s, pod=%s, node=%s", pod.Id.Namespace, pod.Id.Name, pod.Id.NodeName)
+ 		t.logger = logger.NewKlog(t.String())
+diff --git a/metrics/metrics.go b/metrics/metrics.go
+--- a/metrics/metrics.go
++++ b/metrics/metrics.go
+@@ -326,6 +326,9 @@
+ 	actual := map[string]bool{}
+ 	for _, i := range instrumentation {
+ 		target := TargetFromConfig(i)
++		if target == nil {
++			continue
++		}
+ 		actual[target.Addr] = true
+ 		ms.targetsLock.Lock()
+ 		t := ms.targets[target.Addr]
+diff --git a/metrics/database_types_test.go b/metrics/database_types_test.go
+new file mode 100644
+--- /dev/null
++++ b/metrics/database_types_test.go
+@@ -0,0 +1,47 @@
++package metrics
++
++import (
++	"os"
++	"testing"
++
++	"github.com/coroot/coroot-cluster-agent/config"
++	"github.com/coroot/coroot-cluster-agent/k8s"
++	"github.com/prometheus/client_golang/prometheus"
++	"github.com/stretchr/testify/require"
++)
++
++func TestDatabaseTypesGateConfigAndAnnotations(t *testing.T) {
++	for _, enabled := range []string{"", "redis,mongodb,memcached", "postgres,mysql"} {
++		t.Run(enabled, func(t *testing.T) {
++			t.Setenv("DATABASE_TYPES", enabled)
++			for _, kind := range []string{"postgres", "mysql", "redis", "mongodb", "memcached"} {
++				configured := TargetFromConfig(config.ApplicationInstrumentation{Type: kind, Host: "127.0.0.1", Port: "1234"})
++				annotated := TargetFromPod(&k8s.Pod{IP: "127.0.0.1", Annotations: map[string]string{"coroot.com/" + kind + "-scrape": "true"}})
++				want := (enabled == "postgres,mysql" && (kind == "postgres" || kind == "mysql")) ||
++					(enabled == "redis,mongodb,memcached" && (kind == "redis" || kind == "mongodb" || kind == "memcached"))
++				require.Equal(t, want, configured != nil, "configured %s", kind)
++				require.Equal(t, want, annotated != nil, "annotated %s", kind)
++			}
++		})
++	}
++}
++
++func TestDisabledDatabaseConfigRemovesOldTarget(t *testing.T) {
++	t.Setenv("DATABASE_TYPES", "redis")
++	ms := &Metrics{reg: prometheus.NewRegistry(), targets: map[string]*Target{}}
++	cfg := []config.ApplicationInstrumentation{{Type: "redis", Host: "127.0.0.1", Port: "6379"}}
++	ms.discoverFromConfig(cfg)
++	require.Len(t, ms.targets, 1)
++	t.Setenv("DATABASE_TYPES", "")
++	ms.discoverFromConfig(cfg)
++	require.Empty(t, ms.targets)
++}
++
++func TestUnsetDatabaseTypesPreservesDefaults(t *testing.T) {
++	t.Setenv("DATABASE_TYPES", "")
++	require.NoError(t, os.Unsetenv("DATABASE_TYPES"))
++	for _, kind := range []string{"postgres", "mysql", "redis", "mongodb", "memcached"} {
++		require.NotNil(t, TargetFromConfig(config.ApplicationInstrumentation{Type: kind}))
++		require.NotNil(t, TargetFromPod(&k8s.Pod{IP: "127.0.0.1", Annotations: map[string]string{"coroot.com/" + kind + "-scrape": "true"}}))
++	}
++}
