@@ -53,6 +53,7 @@ jobs:
           check "collector ENV VECTOR_VERSION"        "$(grep -oP '^ENV VECTOR_VERSION=\K.*' "$COL" | head -1)"                   "$vec"
           check "collector ENV OBI_VERSION"           "$(norm "$(grep -oP '^ENV OBI_VERSION=\K.*' "$COL" | head -1)")"            "$obi"
           check "collector ENV CLUSTER_AGENT_VERSION" "$(norm "$(grep -oP '^ENV CLUSTER_AGENT_VERSION=\K.*' "$COL" | head -1)")"  "$ca"
+          check "ebpf ENV CLUSTER_AGENT_VERSION"      "$(norm "$(grep -oP '^ENV CLUSTER_AGENT_VERSION=\K.*' "$EBPF" | head -1)")" "$ca"
 
           # collector builds the same cluster-agent it declares (and that ebpf ships).
           check "collector build ARG CLUSTER_AGENT_VERSION" "$(norm "$(grep -oP '^ARG CLUSTER_AGENT_VERSION=\K.*' "$COL" | head -1)")" "$ca"
