@@ -4,6 +4,7 @@ set -euo pipefail
 obi=$1
 payload=$2
 config=$3
+expected_tracer=${4:-}
 obi_log=/tmp/obi.log
 payload_log=/tmp/egress-integrity.log
 start_file=/tmp/egress-integrity.start
@@ -111,11 +112,24 @@ fi
 # patch pushing a program past the verifier's complexity limit ("BPF program is
 # too large. Processed 1000001 insn"). Scoped to the injector's own programs so
 # an unrelated optional tracer failing on some kernel does not fail the run.
-if grep -qE "couldn't load tracer.*Obi(PacketExtender|SockmapTracker)" "$obi_log"; then
+if grep -qE "couldn't load tracer.*Obi(PacketExtender|SockmapTracker|InjectorTcpConnect)" "$obi_log"; then
   echo "OBI failed to load an injector program; the integrity scenarios would pass vacuously"
-  grep -E "couldn't load tracer.*Obi(PacketExtender|SockmapTracker)" "$obi_log"
+  grep -E "couldn't load tracer.*Obi(PacketExtender|SockmapTracker|InjectorTcpConnect)" "$obi_log"
   exit 1
 fi
+
+case "$expected_tracer" in
+  go)
+    grep -Fq 'program=*gotracer.Tracer' "$obi_log"
+    if grep -Fq 'program=*generictracer.Tracer' "$obi_log"; then
+      echo "Go-only admission test unexpectedly loaded a generic tracer"
+      exit 1
+    fi
+    ;;
+  generic)
+    grep -Fq 'program=*generictracer.Tracer' "$obi_log"
+    ;;
+esac
 
 touch "$start_file"
 wait "$payload_pid"

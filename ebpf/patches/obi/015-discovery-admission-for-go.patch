@@ -1,0 +1,821 @@
+diff --git a/bpf/gotracer/go_nethttp.c b/bpf/gotracer/go_nethttp.c
+index 92db041e..8c545a57 100644
+--- a/bpf/gotracer/go_nethttp.c
++++ b/bpf/gotracer/go_nethttp.c
+@@ -807,10 +807,7 @@ int GUARDED_PROG(obi_uprobe_roundTripReturn, struct pt_regs *, ctx) {
+     if (info) {
+         __builtin_memcpy(&trace->conn, info, sizeof(connection_info_t));
+ 
+-        egress_key_t e_key = {
+-            .d_port = info->d_port,
+-            .s_port = info->s_port,
+-        };
++        const egress_key_t e_key = make_egress_key(info);
+         bpf_map_delete_elem(&outgoing_trace_map, &e_key);
+         bpf_map_delete_elem(&go_ongoing_http, &e_key);
+     } else {
+@@ -1097,10 +1094,9 @@ static __always_inline int on_writeSubset_returns(struct pt_regs *ctx,
+         go_addr_key_from_id(&g_key, (void *)inv->req_goaddr);
+         connection_info_t *info = bpf_map_lookup_elem(&ongoing_client_connections, &g_key);
+         if (info) {
+-            egress_key_t e_key = {
+-                .d_port = info->d_port,
+-                .s_port = info->s_port,
+-            };
++            // persistConnRoundTrip publishes under sorted ports. Match that key
++            // even when the server port is higher than the client port.
++            const egress_key_t e_key = make_egress_key(info);
+             //dbg_print_http_connection_info(info);
+             bpf_map_delete_elem(&outgoing_trace_map, &e_key);
+             bpf_dbg_printk(
+diff --git a/bpf/tpinjector/discovery.h b/bpf/tpinjector/discovery.h
+new file mode 100644
+index 00000000..c15984ff
+--- /dev/null
++++ b/bpf/tpinjector/discovery.h
+@@ -0,0 +1,43 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++#pragma once
++
++#include <bpfcore/bpf_core_read.h>
++#include <pid/pid_helpers.h>
++#include <pid/maps/denied_pids.h>
++#include <tpinjector/maps/inject_pids.h>
++
++volatile const s32 filter_pids = 0;
++
++static __always_inline bool valid_inject_pid(u64 id) {
++    if (!filter_pids) {
++        return pid_from_pid_tgid(id) != 0;
++    }
++
++    const struct task_struct *task = (const struct task_struct *)bpf_get_current_task();
++    int pid = 0;
++    int ppid = 0;
++    u32 ns = 0;
++    ns_pid_ppid(task, &pid, &ppid, &ns);
++    if (!pid) {
++        return false;
++    }
++
++    pid_data_t key = {.pid = (u32)pid, .ns = ns};
++    // Check every send: cached admission must not outlive an explicit denial.
++    if (bpf_map_lookup_elem(&denied_pids, &key)) {
++        return false;
++    }
++    if (bpf_map_lookup_elem(&inject_pids, &key)) {
++        return true;
++    }
++
++    // Follow undiscovered workers, but never interpret a parent's PID in its
++    // child's namespace when the two processes live in different namespaces.
++    if (ppid && ns == BPF_CORE_READ(task, real_parent, nsproxy, pid_ns_for_children, ns.inum)) {
++        key.pid = (u32)ppid;
++        return bpf_map_lookup_elem(&inject_pids, &key) != NULL;
++    }
++    return false;
++}
+diff --git a/bpf/tpinjector/maps/inject_connects.h b/bpf/tpinjector/maps/inject_connects.h
+new file mode 100644
+index 00000000..63c522ce
+--- /dev/null
++++ b/bpf/tpinjector/maps/inject_connects.h
+@@ -0,0 +1,20 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++#pragma once
++
++#include <bpfcore/vmlinux.h>
++#include <bpfcore/bpf_helpers.h>
++
++#include <common/map_sizing.h>
++#include <common/pin_internal.h>
++
++// tcp_connect runs in the dialing task; sockops runs later, often in softirq.
++// Key by the socket, not its tuple, to separate identical tuples in netns.
++struct {
++    __uint(type, BPF_MAP_TYPE_LRU_HASH);
++    __uint(max_entries, MAX_CONCURRENT_SHARED_REQUESTS);
++    __type(key, u64);
++    __type(value, u8);
++    __uint(pinning, OBI_PIN_INTERNAL);
++} inject_connects SEC(".maps");
+diff --git a/bpf/tpinjector/maps/inject_pids.h b/bpf/tpinjector/maps/inject_pids.h
+new file mode 100644
+index 00000000..f73b3a05
+--- /dev/null
++++ b/bpf/tpinjector/maps/inject_pids.h
+@@ -0,0 +1,21 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++#pragma once
++
++#include <bpfcore/vmlinux.h>
++#include <bpfcore/bpf_helpers.h>
++
++#include <common/pin_internal.h>
++#include <pid/maps/map_sizing.h>
++#include <pid/types/pid_data.h>
++
++// Discovery admits both Go and generic processes here. The generic tracer's
++// valid_pids bitmap deliberately contains only its own processes.
++struct {
++    __uint(type, BPF_MAP_TYPE_HASH);
++    __uint(max_entries, k_max_concurrent_pids);
++    __type(key, pid_data_t);
++    __type(value, u8);
++    __uint(pinning, OBI_PIN_INTERNAL);
++} inject_pids SEC(".maps");
+diff --git a/bpf/tpinjector/tpinjector.c b/bpf/tpinjector/tpinjector.c
+index 71e7d2f0..c79d22e9 100644
+--- a/bpf/tpinjector/tpinjector.c
++++ b/bpf/tpinjector/tpinjector.c
+@@ -29,7 +29,9 @@
+ #include <common/trace_util.h>
+ #include <common/tracing.h>
+ 
+-#include <pid/pid.h>
++#include <common/preempt_guard.h>
++#include <tpinjector/discovery.h>
++#include <tpinjector/maps/inject_connects.h>
+ 
+ #include <logger/bpf_dbg.h>
+ 
+@@ -38,7 +40,6 @@
+ #include <maps/msg_buffers.h>
+ #include <maps/outgoing_trace_map.h>
+ #include <maps/sock_dir.h>
+-#include <maps/sock_pids.h>
+ #include <maps/tp_info_mem.h>
+ #include <maps/tracked_sock_cookies.h>
+ 
+@@ -59,7 +60,7 @@ char __license[] SEC("license") = "Dual MIT/GPL";
+ //
+ //   obi_packet_extender (sk_msg entry)
+ //   │
+-//   ├── !valid_pid → SK_PASS           │  Unmonitored process — nothing below
++//   ├── !valid_inject_pid → SK_PASS           │  Unmonitored process — nothing below
+ //   │                                  │  may touch a byte of its traffic
+ //   │                                  │
+ //   ├── socket parked → SK_PASS        │  Default-deny: this stream left
+@@ -363,9 +364,9 @@ enum { k_http1_101_check_len = 16 };
+ static __always_inline bool is_http1_101_response(const unsigned char *d,
+                                                   const unsigned char *end) {
+     return d && (void *)d + k_http1_101_check_len <= (void *)end && d[0] == 'H' && d[1] == 'T' &&
+-           d[2] == 'T' && d[3] == 'P' && d[4] == '/' && d[5] == '1' && d[6] == '.' &&
+-           d[7] >= '0' && d[7] <= '9' && d[8] == ' ' && d[9] == '1' && d[10] == '0' &&
+-           d[11] == '1' && (d[12] == ' ' || d[12] == '\r');
++           d[2] == 'T' && d[3] == 'P' && d[4] == '/' && d[5] == '1' && d[6] == '.' && d[7] >= '0' &&
++           d[7] <= '9' && d[8] == ' ' && d[9] == '1' && d[10] == '0' && d[11] == '1' &&
++           (d[12] == ' ' || d[12] == '\r');
+ }
+ 
+ // One-shot probe for a connection leaving HTTP/1: a 101 is the last HTTP/1
+@@ -803,89 +804,28 @@ static __always_inline void bpf_sock_ops_set_flags(struct bpf_sock_ops *skops, u
+     bpf_sock_ops_cb_flags_set(skops, skops->bpf_sock_ops_cb_flags | flags);
+ }
+ 
+-// =============================================================================
+-// Discovery-scoped sockhash membership
+-// =============================================================================
+-//
+-// Putting a socket in sock_dir is not free instrumentation. sock_hash_update
+-// runs sk_psock_init -> tcp_bpf_update_proto, which replaces the socket's
+-// sk_prot with the tcp_bpf one; the tcp_bpf sendmsg/recvmsg paths are what
+-// stalled a GitHub runner's log stream and tailscaled's control channel
+-// (T-20708). Upstream enrolls unconditionally, so OBI's discovery exclusions
+-// mean nothing at the socket layer: every TCP client socket in the cgroup gets
+-// converted whether or not its process was selected for instrumentation.
+-//
+-// The obstacle is that the enrolling callback cannot see the owner.
+-// BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB is raised by tcp_finish_connect() ->
+-// tcp_init_transfer() (net/ipv4/tcp_input.c) while the SYN-ACK is processed.
+-// Unless the socket happened to be owned by the connecting task at that
+-// moment, that is NET_RX softirq on whichever CPU took the packet, so the
+-// current task is the interrupted one — an unrelated process, or 0 for the
+-// idle task. Deciding discovery there would deny instrumented processes at
+-// random, which is worse than the bug. BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB is
+-// further removed still: it fires for a child socket that no task has returned
+-// from accept() yet. sock_ops cannot even ask: bpf_get_current_pid_tgid()
+-// reaches BPF_PROG_TYPE_SOCK_OPS only through bpf_base_func_proto(), and it was
+-// not added there until v6.10 (Yonghong Song, "bpf: Allow
+-// bpf_get_[ns_]current_pid_tgid() in all program types"). On 5.15 the program
+-// does not load at all: "unknown func bpf_get_current_pid_tgid#14".
+-//
+-// So the decision is taken where it is already being taken correctly.
+-// obi_kprobe_tcp_connect (bpf/generictracer/k_tracer.c) runs at the first
+-// instruction of tcp_connect(), reached only through sk_prot->connect from
+-// connect(2) or tcp_sendmsg_fastopen(), so the current task is by construction
+-// the process dialling. It tests valid_pid() and, only then, records the
+-// connection in `sock_pids` keyed by the sorted connection_info_t. Every socket
+-// that can reach ACTIVE_ESTABLISHED sent its SYN from there, and the source
+-// port is already final (inet_hash_connect() runs before tcp_connect()), so the
+-// entry is present and the key is stable by the time we look.
+-//
+-// The two key derivations agree by construction and OBI already depends on it
+-// in the other direction: bpf_sock_ops_parse_hdr_cb() below writes
+-// incoming_trace_map with get_connection_info_ops() + sort_connection_info(),
+-// and find_trace_for_server_request() (bpf/common/trace_lifecycle.h) reads it
+-// with a key built from parse_sock_info(). Both store IPv4 as v4-in-v6 and both
+-// hold host-order ports.
+-//
+-// Why prevention rather than eviction: undoing an enrollment means deleting
+-// from a SOCKHASH, and since v6.10 the verifier only lets the program types
+-// listed in may_update_sockmap() do that — commit 98e948fb60d4 ("bpf: Allow
+-// delete from sockmap/sockhash only if update is allowed"), which folded
+-// map_delete_elem into the same allow-list after syzkaller found the lock
+-// inversion described in ff9105993240. BPF_PROG_TYPE_SK_MSG is not on that
+-// list, so obi_packet_extender — the one program that always runs in the
+-// sender's task context — cannot evict the socket it was called for; the load
+-// fails outright with "cannot pass map_type 18 into func bpf_map_delete_elem".
+-// Not enrolling in the first place is both permitted everywhere and strictly
+-// better: there is no window during which the socket is on tcp_bpf at all.
+-//
+-// Helper floor: this adds only bpf_map_lookup_elem to the sock_ops program,
+-// which has been in bpf_base_func_proto()'s unconditional set since sockmaps
+-// existed.
+-static __always_inline bool sock_opened_by_instrumented_pid(struct bpf_sock_ops *skops) {
+-    connection_info_t conn = get_connection_info_ops(skops);
+-    sort_connection_info(&conn);
+-
+-    return bpf_map_lookup_elem(&sock_pids, &conn) != NULL;
++// Record ownership while current is the dialing process, before the SYN-ACK
++// reaches the sockops callback. This must also work without a generic tracer.
++SEC("kprobe/tcp_connect")
++int BPF_KPROBE_GUARDED(obi_injector_tcp_connect, struct sock *sk) {
++    (void)ctx;
++    const u64 socket = (u64)sk;
++    if (valid_inject_pid(bpf_get_current_pid_tgid())) {
++        bpf_map_update_elem(&inject_connects, &socket, &(u8){1}, BPF_ANY);
++    } else {
++        // A failed connection can leave an entry until this address is reused.
++        bpf_map_delete_elem(&inject_connects, &socket);
++    }
++    return 0;
+ }
+ 
+-// Helper that writes in the sock map for a sock_ops program
++// Helper that writes in the sock map for a sock_ops program.
+ static __always_inline void bpf_sock_ops_active_est_cb(struct bpf_sock_ops *skops) {
+-    // Default-deny. No sock_pids entry means no instrumented task dialled this
+-    // connection, and an unenrolled socket keeps its original protocol ops: no
+-    // sk_msg verdict, no TCP option callbacks, nothing for tcp_bpf to stall.
+-    // The passive path below is untouched, so inbound TCP-option parsing for
+-    // server sockets is unchanged.
+-    //
+-    // Fails closed in every uncertain case. A kernel-internal socket, an MPTCP
+-    // subflow dialled from a workqueue, a socket opened before OBI attached or
+-    // before its process was discovered: no entry, no enrollment, propagation
+-    // lost but nothing corrupted. The residual fail-open is a full 4-tuple
+-    // reused by an excluded process while the previous owner's LRU entry is
+-    // still live, which lands on today's behaviour for that one socket.
+-    if (!sock_opened_by_instrumented_pid(skops)) {
++    const u64 socket = (u64)skops->sk;
++    if (!bpf_map_lookup_elem(&inject_connects, &socket)) {
+         return;
+     }
++    bpf_map_delete_elem(&inject_connects, &socket);
+ 
+     const u64 cookie = bpf_get_socket_cookie(skops);
+ 
+@@ -1002,8 +942,7 @@ static __always_inline void bpf_sock_ops_parse_hdr_cb(struct bpf_sock_ops *skops
+     bpf_map_update_elem(&incoming_trace_map, &conn, &tp, BPF_ANY);
+ }
+ 
+-// Tracks outgoing sockets of instrumented processes: only connections
+-// obi_kprobe_tcp_connect recorded in sock_pids are enrolled
++// Tracks outgoing sockets admitted by obi_injector_tcp_connect
+ // (BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB). We don't track incoming, those would be
+ // BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB
+ SEC("sockops")
+@@ -1538,33 +1477,8 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+ 
+     const u64 id = bpf_get_current_pid_tgid();
+ 
+-    // Discovery filter, hoisted to the entry. Upstream tested it only on the
+-    // fall-through route, so the existing-trace route (get_tp_info_pid /
+-    // handle_existing_tp_pid) and the Go-gRPC coordination route both mutated
+-    // messages of processes OBI was never asked to instrument. Nothing below
+-    // may touch a byte before this passes.
+-    //
+-    // What it reads: pid_matches() against the `valid_pids` bitmap, memoised in
+-    // `pid_cache` (bpf/pid/pid.h). Both maps are OBI_PIN_INTERNAL and are
+-    // filled by the userspace discovery loop, rebuildValidPids() in
+-    // pkg/internal/ebpf/generictracer/generictracer.go, so the allow-list here
+-    // is exactly the set of instrumented executables. With
+-    // OTEL_EBPF_BPF_PID_FILTER_OFF (`filter_pids == 0`) it degrades to
+-    // "return the tgid", i.e. everything passes, matching the rest of OBI.
+-    //
+-    // Context: sk_msg runs from tcp_bpf_sendmsg in the sending task's syscall
+-    // context, so bpf_get_current_pid_tgid() is the sender. Every unknown
+-    // context resolves in the deny direction — a kthread or tgid 0 yields 0
+-    // and returns here — which skips injection and can never corrupt: this
+-    // program's only mutations are reached further down.
+-    //
+-    // Consequence of sitting above the park bookkeeping: an excluded pid's
+-    // upgrade request no longer parks the socket. That is safe because an
+-    // excluded pid cannot mutate anything either, and a socket written by both
+-    // an excluded and an included process (or one discovered only after its
+-    // upgrade request went out) falls back on the strict request-line gate,
+-    // which post-upgrade tunnel bytes have to pass before anything is spliced.
+-    if (!valid_pid(id)) {
++    // Pending trace context never substitutes for discovery admission.
++    if (!valid_inject_pid(id)) {
+         return SK_PASS;
+     }
+ 
+@@ -1751,7 +1665,7 @@ int obi_packet_extender_http1_dispatch(struct sk_msg_md *msg) {
+     }
+ 
+     // The Go-gRPC coordination route now sits behind the entry filter too. For
+-    // an allowed pid this is a no-op: valid_pid passed, so control flow reaches
++    // an allowed pid this is a no-op: discovery admission passed, so control flow reaches
+     // here exactly as before. For an excluded pid the route no longer runs, and
+     // that direction can only remove injections, never duplicate them: the
+     // coordination it implements is the *uprobe* telling sk_msg which streams
+diff --git a/pkg/appolly/discover/matcher.go b/pkg/appolly/discover/matcher.go
+index ac2adcf7..786432af 100644
+--- a/pkg/appolly/discover/matcher.go
++++ b/pkg/appolly/discover/matcher.go
+@@ -11,6 +11,7 @@ import (
+ 	"os"
+ 	"slices"
+ 	"strings"
++	"time"
+ 
+ 	"github.com/shirou/gopsutil/v4/process"
+ 
+@@ -20,7 +21,6 @@ import (
+ 	"go.opentelemetry.io/obi/pkg/obi"
+ 	"go.opentelemetry.io/obi/pkg/pipe/msg"
+ 	"go.opentelemetry.io/obi/pkg/pipe/swarm"
+-	"go.opentelemetry.io/obi/pkg/pipe/swarm/swarms"
+ )
+ 
+ var (
+@@ -100,14 +100,28 @@ func (pm ProcessMatch) LogEnricherEnabled() bool {
+ func (m *Matcher) Run(ctx context.Context) {
+ 	defer m.Output.Close()
+ 	m.Log.Debug("starting criteria matcher node")
+-	swarms.ForEachInput(ctx, m.Input, m.Log.Debug, func(i []Event[ProcessAttrs]) {
+-		m.Log.Debug("filtering processes", "len", len(i))
+-		o := m.filter(i)
+-		m.Log.Debug("processes matching selection criteria", "len", len(o))
+-		if len(o) > 0 {
+-			m.Output.Send(o)
++	// Maps load after the first discovery batch. Retry pending exclusions even
++	// when no subsequent process event arrives.
++	retry := time.NewTicker(time.Second)
++	defer retry.Stop()
++	for {
++		select {
++		case <-ctx.Done():
++			return
++		case <-retry.C:
++			m.Denied.Flush()
++		case i, ok := <-m.Input:
++			if !ok {
++				return
++			}
++			m.Log.Debug("filtering processes", "len", len(i))
++			o := m.filter(i)
++			m.Log.Debug("processes matching selection criteria", "len", len(o))
++			if len(o) > 0 {
++				m.Output.Send(o)
++			}
+ 		}
+-	})
++	}
+ }
+ 
+ func (m *Matcher) filter(events []Event[ProcessAttrs]) []Event[ProcessMatch] {
+diff --git a/pkg/appolly/discover/matcher_privileged_test.go b/pkg/appolly/discover/matcher_privileged_test.go
+new file mode 100644
+index 00000000..462b9d28
+--- /dev/null
++++ b/pkg/appolly/discover/matcher_privileged_test.go
+@@ -0,0 +1,78 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++//go:build linux && privileged_tests
++
++package discover
++
++import (
++	"context"
++	"log/slog"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/cilium/ebpf"
++	"github.com/cilium/ebpf/rlimit"
++	"github.com/stretchr/testify/require"
++
++	"go.opentelemetry.io/obi/pkg/appolly/app"
++	ebpfcommon "go.opentelemetry.io/obi/pkg/ebpf/common"
++	"go.opentelemetry.io/obi/pkg/internal/procs"
++	"go.opentelemetry.io/obi/pkg/pipe/msg"
++)
++
++func TestMatcherPublishesDeferredDenialsWithoutProcessEvents(t *testing.T) {
++	require.NoError(t, rlimit.RemoveMemlock())
++	eventContext := &ebpfcommon.EBPFEventContext{EBPFMaps: map[string]*ebpf.Map{}}
++	denied := ebpfcommon.NewDeniedPIDs(eventContext, slog.Default())
++	pid := app.PID(os.Getpid())
++	denied.Deny(pid) // Discovery precedes the first tracer's map creation.
++
++	input := make(chan []Event[ProcessAttrs])
++	m := &Matcher{
++		Log: slog.Default(), Denied: denied, Input: input,
++		Output: msg.NewQueue[[]Event[ProcessMatch]](),
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		m.Run(ctx)
++	}()
++	t.Cleanup(func() {
++		cancel()
++		<-done
++	})
++
++	deniedMap, err := ebpf.NewMap(&ebpf.MapSpec{
++		Type: ebpf.Hash, KeySize: 8, ValueSize: 1, MaxEntries: 16,
++	})
++	require.NoError(t, err)
++	defer deniedMap.Close()
++	eventContext.MapsLock.Lock()
++	eventContext.EBPFMaps["denied_pids"] = deniedMap
++	eventContext.MapsLock.Unlock()
++
++	ns, err := procs.FindNamespace(pid)
++	require.NoError(t, err)
++	nsPIDs, err := procs.FindNamespacedPids(pid)
++	require.NoError(t, err)
++	if len(nsPIDs) != 0 {
++		pid = nsPIDs[len(nsPIDs)-1]
++	}
++	key := struct{ PID, NS uint32 }{uint32(pid), ns}
++	require.Eventually(t, func() bool {
++		var value uint8
++		return deniedMap.Lookup(key, &value) == nil && value == 1
++	}, 5*time.Second, 10*time.Millisecond)
++
++	// Closing input must also stop the retry ticker without context cancellation.
++	close(input)
++	select {
++	case <-done:
++	case <-time.After(time.Second):
++		t.Fatal("matcher did not stop after input closed")
++	}
++}
+diff --git a/pkg/internal/ebpf/tpinjector/pid_filter_privileged_test.go b/pkg/internal/ebpf/tpinjector/pid_filter_privileged_test.go
+new file mode 100644
+index 00000000..ffe60de5
+--- /dev/null
++++ b/pkg/internal/ebpf/tpinjector/pid_filter_privileged_test.go
+@@ -0,0 +1,241 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++//go:build linux && privileged_tests
++
++package tpinjector
++
++import (
++	"bytes"
++	"io"
++	"net"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/cilium/ebpf"
++	"github.com/cilium/ebpf/asm"
++	"github.com/cilium/ebpf/features"
++	"github.com/cilium/ebpf/link"
++	"github.com/cilium/ebpf/rlimit"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"go.opentelemetry.io/obi/pkg/appolly/app"
++	"go.opentelemetry.io/obi/pkg/appolly/app/svc"
++	discexec "go.opentelemetry.io/obi/pkg/appolly/discover/exec"
++	"go.opentelemetry.io/obi/pkg/internal/procs"
++	"go.opentelemetry.io/obi/pkg/obi"
++	"golang.org/x/net/http2"
++	"golang.org/x/net/http2/hpack"
++)
++
++// Seed the state normally published by uprobes, then send through the real
++// sk_msg program. An empty PID allow-list must override both fast paths.
++func TestInjectorPIDFilter(t *testing.T) {
++	require.Equal(t, 0, os.Geteuid(), "privileged eBPF test must run as root")
++	require.NoError(t, rlimit.RemoveMemlock())
++	// Kernel TGIDs may differ from userspace PIDs in nested test containers.
++	// Older kernels lack this socket-filter helper; CI there runs in the host PID namespace.
++	pid := uint32(os.Getpid())
++	if features.HaveProgramHelper(ebpf.SocketFilter, asm.FnGetCurrentPidTgid) == nil {
++		pidProbe, err := ebpf.NewProgram(&ebpf.ProgramSpec{
++			Type: ebpf.SocketFilter, License: "GPL",
++			Instructions: asm.Instructions{asm.FnGetCurrentPidTgid.Call(), asm.RSh.Imm(asm.R0, 32), asm.Return()},
++		})
++		require.NoError(t, err)
++		defer pidProbe.Close()
++		pid, _, err = pidProbe.Test(make([]byte, 14))
++		require.NoError(t, err)
++	}
++
++	for _, route := range []string{"http_headers", "tcp_options", "go_grpc"} {
++		t.Run(route, func(t *testing.T) {
++			for _, policy := range []string{"rejected", "go_discovered", "generic_discovered", "blocked", "denied", "parent_allowed", "denied_child", "filter_off"} {
++				t.Run(policy, func(t *testing.T) {
++					filter := int32(1)
++					if policy == "filter_off" {
++						filter = 0
++					}
++					flags := uint32(1)
++					if route == "tcp_options" {
++						flags = 2
++					}
++					coll := loadPIDFilterInjector(t, filter, flags)
++					cfg := &obi.Config{}
++					injector := New(cfg)
++					injector.bpfObjects.InjectPids = coll.Maps["inject_pids"]
++					injector.backfillDisabled = true
++					userPID := app.PID(os.Getpid())
++					ns, err := procs.FindNamespace(userPID)
++					require.NoError(t, err)
++					fi := discexec.New(discexec.Init{Pid: userPID, Ns: ns})
++					rejected := policy == "rejected" || policy == "blocked" || policy == "denied" || policy == "denied_child"
++					if policy != "rejected" && policy != "filter_off" {
++						admitPID := userPID
++						if policy == "parent_allowed" || policy == "denied_child" {
++							admitPID = app.PID(os.Getppid())
++						}
++						// The common tracer receives these notifications for both Go
++						// and generic discovery, including before socket backfill.
++						if policy == "go_discovered" {
++							fi.ApplyServiceDefaults(svc.InstrumentableGolang)
++						} else {
++							fi.ApplyServiceDefaults(svc.InstrumentableGeneric)
++						}
++						injector.AllowPID(admitPID, ns, fi)
++						require.Contains(t, injector.injectionPIDs, admitPID)
++						if policy == "blocked" {
++							injector.BlockPID(userPID, ns)
++						}
++						if policy == "denied" || policy == "denied_child" {
++							ids, err := procs.FindNamespacedPids(userPID)
++							require.NoError(t, err)
++							require.NotEmpty(t, ids)
++							require.NoError(t, coll.Maps["denied_pids"].Put(BpfPidDataT{Pid: uint32(ids[len(ids)-1]), Ns: ns}, uint8(1)))
++						}
++					}
++
++					client, server := injectorSocketPair(t)
++					local := client.LocalAddr().(*net.TCPAddr)
++					remote := client.RemoteAddr().(*net.TCPAddr)
++					conn := BpfConnectionInfoT{
++						S_addr: [16]byte(local.IP.To16()), D_addr: [16]byte(remote.IP.To16()),
++						S_port: uint16(local.Port), D_port: uint16(remote.Port),
++					}
++					// Both loopback ports are ephemeral: OBI sorts the larger first.
++					if conn.D_port > conn.S_port {
++						conn.S_port, conn.D_port = conn.D_port, conn.S_port
++						conn.S_addr, conn.D_addr = conn.D_addr, conn.S_addr
++					}
++					key := BpfEgressKeyT{S_port: conn.S_port, D_port: conn.D_port}
++					payload := []byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
++					if route == "go_grpc" {
++						key.StreamId = 1
++						require.NoError(t, coll.Maps["go_grpc_client_conns"].Put(
++							BpfPidConnectionInfoT{Conn: conn, Pid: pid}, uint8(1)))
++						payload = injectorGRPCRequest(t)
++					}
++					tp := BpfTpInfoPidT{Pid: pid, Valid: 1}
++					tp.Tp.TraceId[0], tp.Tp.SpanId[0], tp.Tp.Flags = 1, 2, 1
++					require.NoError(t, coll.Maps["outgoing_trace_map"].Put(key, tp))
++
++					raw, err := client.SyscallConn()
++					require.NoError(t, err)
++					var socketFD uint32
++					require.NoError(t, raw.Control(func(fd uintptr) {
++						socketFD = uint32(fd)
++						err = coll.Maps["sock_dir"].Put(uint64(1), socketFD)
++					}))
++					require.NoError(t, err)
++					require.NoError(t, client.SetWriteDeadline(time.Now().Add(5*time.Second)))
++					_, err = client.Write(payload)
++					require.NoError(t, err)
++					require.NoError(t, client.CloseWrite())
++					require.NoError(t, server.SetReadDeadline(time.Now().Add(5*time.Second)))
++					received, err := io.ReadAll(server)
++					require.NoError(t, err)
++
++					var scheduled BpfTpInfoPidT
++					err = coll.Maps["sk_tp_info_pid_map"].Lookup(socketFD, &scheduled)
++					if rejected {
++						assert.Equal(t, payload, received, "rejected PID must not get a header")
++						assert.ErrorIs(t, err, ebpf.ErrKeyNotExist, "rejected PID must not schedule a TCP option")
++						var pending BpfTpInfoPidT
++						require.NoError(t, coll.Maps["outgoing_trace_map"].Lookup(key, &pending))
++						assert.Equal(t, tp, pending, "rejected PID must not consume pending trace context")
++					} else if route == "tcp_options" {
++						require.NoError(t, err, "allowed PID must still schedule a TCP option")
++						assert.Equal(t, tp.Tp, scheduled.Tp)
++						assert.Equal(t, payload, received)
++					} else {
++						assert.Greater(t, len(received), len(payload), "allowed PID must still inject a header")
++						if route == "go_grpc" {
++							assertInjectedGRPCTraceparent(t, received)
++						} else {
++							assert.Contains(t, string(received), "Traceparent: 00-01000000000000000000000000000000-0200000000000000-01\r\n")
++						}
++					}
++				})
++			}
++		})
++	}
++}
++
++func loadPIDFilterInjector(t *testing.T, filter int32, flags uint32) *ebpf.Collection {
++	t.Helper()
++	spec, err := LoadBpf()
++	require.NoError(t, err)
++	require.NoError(t, spec.Variables["filter_pids"].Set(filter))
++	require.NoError(t, spec.Variables["inject_flags"].Set(flags))
++	// Only attach to sockets created by this test; no cgroup-wide sockops probe.
++	for name, prog := range spec.Programs {
++		if prog.Type != ebpf.SkMsg && name != "obi_injector_tcp_connect" {
++			delete(spec.Programs, name)
++		}
++	}
++	for _, m := range spec.Maps {
++		m.Pinning = ebpf.PinNone
++	}
++	coll, err := ebpf.NewCollection(spec)
++	require.NoError(t, err)
++	t.Cleanup(coll.Close)
++	opts := link.RawAttachProgramOptions{
++		Target:  coll.Maps["sock_dir"].FD(),
++		Program: coll.Programs["obi_packet_extender"], Attach: ebpf.AttachSkMsgVerdict,
++	}
++	require.NoError(t, link.RawAttachProgram(opts))
++	t.Cleanup(func() { assert.NoError(t, link.RawDetachProgram(link.RawDetachProgramOptions(opts))) })
++	return coll
++}
++
++func injectorSocketPair(t *testing.T) (*net.TCPConn, net.Conn) {
++	t.Helper()
++	listener, err := net.Listen("tcp4", "127.0.0.1:0")
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = listener.Close() })
++	client, err := net.Dial("tcp4", listener.Addr().String())
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = client.Close() })
++	server, err := listener.Accept()
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = server.Close() })
++	return client.(*net.TCPConn), server
++}
++
++func injectorGRPCRequest(t *testing.T) []byte {
++	t.Helper()
++	var headers bytes.Buffer
++	enc := hpack.NewEncoder(&headers)
++	for _, field := range []hpack.HeaderField{
++		{Name: ":method", Value: "POST"}, {Name: ":scheme", Value: "http"},
++		{Name: ":path", Value: "/test.Service/Call"}, {Name: ":authority", Value: "localhost"},
++		{Name: "content-type", Value: "application/grpc"},
++	} {
++		require.NoError(t, enc.WriteField(field))
++	}
++	var wire bytes.Buffer
++	wire.WriteString(http2.ClientPreface)
++	framer := http2.NewFramer(&wire, nil)
++	require.NoError(t, framer.WriteSettings())
++	require.NoError(t, framer.WriteHeaders(http2.HeadersFrameParam{
++		StreamID: 1, BlockFragment: headers.Bytes(), EndHeaders: true, EndStream: true,
++	}))
++	return wire.Bytes()
++}
++
++func assertInjectedGRPCTraceparent(t *testing.T, wire []byte) {
++	t.Helper()
++	require.True(t, bytes.HasPrefix(wire, []byte(http2.ClientPreface)))
++	framer := http2.NewFramer(nil, bytes.NewReader(wire[len(http2.ClientPreface):]))
++	_, err := framer.ReadFrame()
++	require.NoError(t, err)
++	frame, err := framer.ReadFrame()
++	require.NoError(t, err)
++	headers, ok := frame.(*http2.HeadersFrame)
++	require.True(t, ok)
++	fields, err := hpack.NewDecoder(4096, nil).DecodeFull(headers.HeaderBlockFragment())
++	require.NoError(t, err)
++	assert.Contains(t, fields, hpack.HeaderField{
++		Name: "traceparent", Value: "00-01000000000000000000000000000000-0200000000000000-01",
++	})
++}
+diff --git a/pkg/internal/ebpf/tpinjector/tpinjector.go b/pkg/internal/ebpf/tpinjector/tpinjector.go
+index 6b7d48e7..fb27090f 100644
+--- a/pkg/internal/ebpf/tpinjector/tpinjector.go
++++ b/pkg/internal/ebpf/tpinjector/tpinjector.go
+@@ -29,6 +29,7 @@ import (
+ 	ebpfcommon "go.opentelemetry.io/obi/pkg/ebpf/common"
+ 	"go.opentelemetry.io/obi/pkg/internal/goexec"
+ 	"go.opentelemetry.io/obi/pkg/internal/netns"
++	"go.opentelemetry.io/obi/pkg/internal/procs"
+ 	"go.opentelemetry.io/obi/pkg/obi"
+ 	"go.opentelemetry.io/obi/pkg/pipe/msg"
+ )
+@@ -57,6 +58,7 @@ type Tracer struct {
+ 	badNetns                *expirable.LRU[uint64, struct{}]
+ 	netnsAttempts           *expirable.LRU[uint64, int]
+ 	backfillDisabled        bool
++	injectionPIDs           map[app.PID]BpfPidDataT
+ }
+ 
+ const (
+@@ -87,10 +89,15 @@ func New(cfg *obi.Config) *Tracer {
+ // sees every socket in the namespace and cannot attribute one to a process, so
+ // the discovered pid's own socket inodes are published to iter_allowed_socks
+ // first and retracted afterwards. See bpf/tpinjector/maps/iter_allowed_socks.h.
+-func (p *Tracer) AllowPID(pid app.PID, _ uint32, _ *exec.FileInfo) {
++func (p *Tracer) AllowPID(pid app.PID, ns uint32, _ *exec.FileInfo) {
+ 	p.iterMu.Lock()
+ 	defer p.iterMu.Unlock()
+ 
++	if err := p.allowInjectionPID(pid, ns); err != nil {
++		p.log.Warn("cannot admit process for context propagation", "pid", pid, "error", err)
++		return
++	}
++
+ 	if p.backfillDisabled || p.seenPIDs.Contains(pid) {
+ 		return
+ 	}
+@@ -226,7 +233,45 @@ func socketInode(target string) (uint64, bool) {
+ 	return ino, true
+ }
+ 
+-func (p *Tracer) BlockPID(app.PID, uint32) {}
++func (p *Tracer) allowInjectionPID(pid app.PID, ns uint32) error {
++	if p.bpfObjects.InjectPids == nil {
++		return fmt.Errorf("injection PID map is not loaded")
++	}
++	pids, err := procs.FindNamespacedPids(pid)
++	if err != nil {
++		return err
++	}
++	key := BpfPidDataT{Pid: uint32(pid), Ns: ns}
++	if len(pids) > 0 {
++		key.Pid = uint32(pids[len(pids)-1])
++	}
++	if previous, ok := p.injectionPIDs[pid]; ok && previous != key {
++		if err := p.bpfObjects.InjectPids.Delete(previous); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
++			return err
++		}
++	}
++	if err := p.bpfObjects.InjectPids.Put(key, uint8(1)); err != nil {
++		return err
++	}
++	if p.injectionPIDs == nil {
++		p.injectionPIDs = map[app.PID]BpfPidDataT{}
++	}
++	p.injectionPIDs[pid] = key
++	return nil
++}
++
++func (p *Tracer) BlockPID(pid app.PID, _ uint32) {
++	p.iterMu.Lock()
++	defer p.iterMu.Unlock()
++	if key, ok := p.injectionPIDs[pid]; ok {
++		if err := p.bpfObjects.InjectPids.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
++			p.log.Warn("cannot revoke context propagation admission", "pid", pid, "error", err)
++			return
++		}
++		delete(p.injectionPIDs, pid)
++	}
++	p.seenPIDs.Remove(pid)
++}
+ 
+ func (p *Tracer) LoadSpecs() ([]*ebpfcommon.SpecBundle, error) {
+ 	spec, err := LoadBpf()
+@@ -318,7 +363,9 @@ func (p *Tracer) GoProbes() map[string][]*ebpfcommon.ProbeDesc {
+ }
+ 
+ func (p *Tracer) KProbes() map[string]ebpfcommon.ProbeDesc {
+-	return nil
++	return map[string]ebpfcommon.ProbeDesc{
++		"tcp_connect": {Start: p.bpfObjects.ObiInjectorTcpConnect, Required: true},
++	}
+ }
+ 
+ // Tracepoints returns the FIONREAD fixup probes; not Required so a failed

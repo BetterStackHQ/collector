@@ -72,10 +72,18 @@ jobs:
         working-directory: ${{ runner.temp }}/obi
         run: go test -race ./pkg/internal/ebpf/tpinjector ./pkg/appolly/discover ./pkg/appolly/discover/exec ./pkg/ebpf/common ./pkg/internal/procs
 
+      - name: Test injector admission on live sockets
+        working-directory: ${{ runner.temp }}/obi
+        run: sudo env "PATH=$PATH" go test -race -tags=privileged_tests ./pkg/internal/ebpf/tpinjector ./pkg/appolly/discover -run '^(TestInjectorPIDFilter|TestMatcherPublishesDeferredDenialsWithoutProcessEvents)$' -count=1
+
       - name: Build production OBI stage
         run: docker build --target obi-builder --file ebpf/Dockerfile .
 
   egress-integrity:
+    strategy:
+      fail-fast: false
+      matrix:
+        tracer: [generic, go]
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
@@ -105,7 +113,7 @@ jobs:
 
       - name: Build egress-integrity payload
         working-directory: ebpf/tests/egress-integrity
-        run: go build -o "$RUNNER_TEMP/egress-integrity" .
+        run: CGO_ENABLED=0 go build -o "$RUNNER_TEMP/egress-integrity" .
 
       - name: Build and extract patched OBI
         run: |
@@ -126,13 +134,14 @@ jobs:
           log_level: debug
           trace_printer: text
           discovery:
+            skip_go_specific_tracers: ${{ matrix.tracer == 'generic' }}
             instrument:
               - exe_path: "*egress-integrity*"
           ebpf:
             context_propagation: headers,tcp
           YAML
 
-          container="obi-egress-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          container="obi-egress-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.tracer }}"
           cleanup() {
             status=$?
             set +e
@@ -155,4 +164,5 @@ jobs:
               /opt/run-under-obi.sh \
                 /opt/ebpf-instrument \
                 /opt/egress-integrity \
-                /opt/obi-test.yml
+                /opt/obi-test.yml \
+                "${{ matrix.tracer }}"
