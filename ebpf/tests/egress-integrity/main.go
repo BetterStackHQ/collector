@@ -617,6 +617,7 @@ func main() {
 		{"upgrade-then-binary", upgradeThenBinary},
 		{"raw-binary", rawBinary},
 		{"positive-control", func() error { return positiveControl(*selfcheck) }},
+		{"go-http-client", func() error { return goHTTPClient(*selfcheck) }},
 		{"sockhash-scoping", func() error { return sockhashScoping(*selfcheck) }},
 		{"deny-child", func() error { return denyChildScenario(*selfcheck) }},
 	}

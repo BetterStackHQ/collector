@@ -24,6 +24,38 @@ bounds are part of the base now. A successful fill can copy less than `msg->size
 after a failed pull; `http1_buf_size` carries that copied length across the gate's
 tail calls so they cannot classify stale bytes beyond it.
 
+## Go discovery admission correction
+
+Patch 015 corrects the admission assumptions in 011 and 012. Go-specific
+tracing registers `PIDTypeGo` in userspace; the generic tracer publishes only
+`PIDTypeKProbes` to `valid_pids` and only records its own connections in
+`sock_pids`. Requiring those maps therefore suppresses socket-level propagation
+for Go-specific tracing, including when no generic tracer is loaded.
+
+The injector now publishes its own namespace/PID allow-list from the common
+tracer's `AllowPID` and retracts it from `BlockPID`. Explicit exclusions are
+checked before admission on every send. Non-excluded workers still inherit
+from a discovered parent in the same PID namespace. The generic tracer's
+filter remains separate so admitting Go cannot enable duplicate generic spans.
+
+A required injector `tcp_connect` kprobe records socket admission in the dialing
+task. The established sockops callback consumes that decision by socket pointer,
+without depending on generic tracing or confusing identical network tuples.
+Pre-existing sockets retain 012's per-process inode-scoped backfill.
+
+The matcher also retries deferred exclusions once per second, independently of
+new process events. Otherwise exclusions discovered before BPF maps load can
+remain unpublished indefinitely on a quiet host.
+
+Go HTTP/1 header injection also retracts its pending socket context using
+sorted ports, matching publication. With a higher server port, the original
+unsorted deletion left the socket injector armed and produced two headers.
+
+The privileged socket tests cover HTTP headers, TCP options, and Go/gRPC with
+Go and generic admission, removal, explicit denials, parent inheritance, denied
+children, and PID filtering disabled. Egress-integrity CI runs separately with
+Go-specific tracing enabled and disabled, including a real Go HTTP client in both port orderings.
+
 ## Current patches
 
 * 008-never-inject-after-http-upgrade.patch
@@ -57,11 +89,14 @@ tail calls so they cannot classify stale bytes beyond it.
   method token, whose seven possible lengths would enter the loop as seven
   states.
 * 011-valid-pid-first.patch
+  Its early gate is retained; 015 replaces its generic-only PID filter.
   Check OBI's discovery filter (`valid_pid`) at the top of
   `obi_packet_extender`. Upstream checks it only on the fall-through route, so
   the existing-trace and Go-gRPC coordination routes could mutate messages of
   processes that were never selected for instrumentation.
 * 012-discovery-scoped-sockhash.patch
+  Its inode-scoped backfill is retained. 015 replaces the original
+  `sock_pids` enrollment dependency described below with injector-owned tracking.
   Make discovery exclusions real at the socket layer. Upstream puts *every*
   outgoing TCP socket in the instrumented cgroup into the `sock_dir` sockhash,
   which is not passive observation: `sock_hash_update` runs `sk_psock_init` ->
@@ -269,3 +304,9 @@ tail calls so they cannot classify stale bytes beyond it.
   Upstream #3232 bypasses `ServiceAttrs()` on the span path, so the former
   per-span clone change and its test are no longer needed. Environment-map
   presizing is unchanged upstream and still needs this patch.
+
+* 015-discovery-admission-for-go.patch
+  Restore socket-level propagation for Go-specific tracing while retaining
+  discovery exclusions. Adds injector-owned PID admission and connect tracking;
+  see the correction above. Also fixes sorted-key cleanup in the Go HTTP/1 probes. The generic PID filter
+  remains unchanged.
