@@ -2,11 +2,12 @@ diff --git a/metrics/target.go b/metrics/target.go
 index 0243c87..5a2d40f 100644
 --- a/metrics/target.go
 +++ b/metrics/target.go
-@@ -6,7 +6,6 @@ import (
+@@ -6,8 +6,7 @@ import (
  	"maps"
  	"net"
  	"net/url"
 -	"strconv"
+ 	"strings"
  	"time"
  
  	"github.com/coroot/coroot-cluster-agent/common"
