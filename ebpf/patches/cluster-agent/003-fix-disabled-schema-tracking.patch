@@ -42,7 +42,7 @@ index f631870..2a57fbe 100644
 +	changeEmitter dbtracker.ChangeEmitter
  }
  
- func NewMetrics(k8s *k8s.K8S) (*Metrics, error) {
+ func NewMetrics(k8s *k8s.K8S, static *config.Static) (*Metrics, error) {
 diff --git a/metrics/schema_tracking_test.go b/metrics/schema_tracking_test.go
 new file mode 100644
 index 0000000..95d11e9
@@ -69,7 +69,7 @@ index 0000000..95d11e9
 +	*flags.CorootURL, _ = url.Parse("http://127.0.0.1:38263")
 +	*flags.MetricsScrapeInterval = 15 * time.Second
 +	*flags.TrackDatabaseChanges = false
-+	ms, err := NewMetrics(nil)
++	ms, err := NewMetrics(nil, nil)
 +	require.NoError(t, err)
 +	// Database constructors use this interface; a typed nil would enable tracking.
 +	var changeEmitter dbtracker.ChangeEmitter = ms.changeEmitter
