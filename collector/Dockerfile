@@ -8,7 +8,7 @@ ARG GO_VERSION=1.26.8
 RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz -o go.tar.gz && \
   tar -C /usr/local -xzf go.tar.gz && rm go.tar.gz
 ENV PATH="/usr/local/go/bin:${PATH}"
-ARG CLUSTER_AGENT_VERSION=v1.10.0
+ARG CLUSTER_AGENT_VERSION=v1.11.4
 RUN git clone --depth 1 --branch ${CLUSTER_AGENT_VERSION} \
   https://github.com/coroot/coroot-cluster-agent.git /tmp/cluster-agent
 WORKDIR /tmp/cluster-agent
