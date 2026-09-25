@@ -8,7 +8,7 @@ ARG GO_VERSION=1.26.8
 RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz -o go.tar.gz && \
   tar -C /usr/local -xzf go.tar.gz && rm go.tar.gz
 ENV PATH="/usr/local/go/bin:${PATH}"
-ARG CLUSTER_AGENT_VERSION=v1.10.0
+ARG CLUSTER_AGENT_VERSION=v1.11.4
 RUN git clone --depth 1 --branch ${CLUSTER_AGENT_VERSION} \
   https://github.com/coroot/coroot-cluster-agent.git /tmp/cluster-agent
 WORKDIR /tmp/cluster-agent
@@ -59,9 +59,9 @@ RUN mkdir -p /versions/0-default \
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
 ENV CLUSTER_COLLECTOR=false
-ENV COLLECTOR_VERSION=1.1.41
+ENV COLLECTOR_VERSION=1.1.42
 ENV VECTOR_VERSION=0.47.0
-ENV CLUSTER_AGENT_VERSION=1.10.0
+ENV CLUSTER_AGENT_VERSION=1.11.4
 ENV OBI_VERSION=0.13.0
 
 # The environment variable TINI_SUBREAPER=true is related to Tini, which is the init system being used in this Docker container.

@@ -1,6 +1,6 @@
 # Cluster agent patches
 
-These patches apply to coroot-cluster-agent v1.10.0 in both image builders.
+These patches apply to coroot-cluster-agent v1.11.4 in both image builders.
 
 * `001`: omit the Postgres startup `statement_timeout` parameter, which poolers can reject. The agent still uses context deadlines for its queries. Upstream has no flag or environment variable for omitting the startup parameter; `PGOPTIONS` does not override an explicit DSN parameter.
 * `002`: preserve the existing database and Kubernetes collection scope. Skip the new MongoDB server-status, current-operation, profiler, replica-config and oplog scans; MySQL active-statement, lock-wait, transaction, InnoDB counter, binlog and group-replication queries; Postgres checkpoint, WAL, wraparound, table-stat and vacuum-progress queries; and the new Argo CD, CloudNativePG and Percona resource watchers. Keep Flux watchers and existing database status, replication, query and size metrics. Additional counters derived from already-collected data remain available.

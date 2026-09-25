@@ -97,10 +97,10 @@ index e623935..e80576a 100644
  	}
 diff --git a/metrics/mongo/monitoring_test.go b/metrics/mongo/monitoring_test.go
 new file mode 100644
-index 0000000..e60c38b
+index 0000000..17c5f96
 --- /dev/null
 +++ b/metrics/mongo/monitoring_test.go
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,71 @@
 +package mongo
 +
 +import (
@@ -131,6 +131,7 @@ index 0000000..e60c38b
 +			mtest.CreateSuccessResponse(bson.E{Key: "databases", Value: bson.A{bson.D{
 +				{Key: "name", Value: "app"}, {Key: "sizeOnDisk", Value: 4096},
 +			}}}),
++			mtest.CreateSuccessResponse(bson.E{Key: "totals", Value: bson.D{}}), // top
 +			mtest.CreateCursorResponse(0, "app.$cmd.listCollections", mtest.FirstBatch,
 +				bson.D{{Key: "name", Value: "orders"}, {Key: "type", Value: "collection"}}),
 +			mtest.CreateCursorResponse(0, "app.orders", mtest.FirstBatch,
@@ -168,14 +169,14 @@ index 0000000..e60c38b
 +				require.Contains(mt, event.Command.String(), "$collStats")
 +			}
 +		}
-+		require.Equal(mt, []string{"ping", "buildInfo", "replSetGetStatus", "listDatabases", "listCollections", "aggregate", "ping"}, commands)
++		require.Equal(mt, []string{"ping", "buildInfo", "replSetGetStatus", "listDatabases", "top", "listCollections", "aggregate", "ping"}, commands)
 +	})
 +}
 diff --git a/metrics/mysql/mysql.go b/metrics/mysql/mysql.go
-index ff20a7e..2a6202e 100644
+index 58c9b30..b1d2de7 100644
 --- a/metrics/mysql/mysql.go
 +++ b/metrics/mysql/mysql.go
-@@ -230,12 +230,6 @@ func (c *Collector) snapshot() {
+@@ -234,12 +234,6 @@ func (c *Collector) snapshot() {
  		c.scrapeErrors[err.Error()] = true
  		return
  	}
@@ -188,7 +189,7 @@ index ff20a7e..2a6202e 100644
  	c.ioByTablePrev = c.ioByTableCurr
  	c.ioByTableCurr, err = c.queryTableIOWaits(ctx)
  	if err != nil {
-@@ -244,17 +238,6 @@ func (c *Collector) snapshot() {
+@@ -248,17 +242,6 @@ func (c *Collector) snapshot() {
  		return
  	}
  
@@ -207,10 +208,10 @@ index ff20a7e..2a6202e 100644
  		c.trackSettingsChanges(ctx)
  	}
 diff --git a/metrics/postgres/collector.go b/metrics/postgres/collector.go
-index 1c83a7a..620be13 100644
+index 28b10e7..7c6a381 100644
 --- a/metrics/postgres/collector.go
 +++ b/metrics/postgres/collector.go
-@@ -240,21 +240,6 @@ func (c *Collector) snapshot() {
+@@ -248,21 +248,6 @@ func (c *Collector) snapshot() {
  		c.logger.Warning(err)
  	}
  
