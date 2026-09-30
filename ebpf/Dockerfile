@@ -1,4 +1,4 @@
-ARG EBPF_AGENT_VERSION=0.1.6
+ARG EBPF_AGENT_VERSION=0.1.7
 FROM ghcr.io/betterstackhq/ebpf-agent:${EBPF_AGENT_VERSION} AS ebpf-agent-source
 
 # Build Node Agent from source with patches
