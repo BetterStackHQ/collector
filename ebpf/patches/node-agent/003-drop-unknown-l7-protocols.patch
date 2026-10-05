@@ -1,0 +1,132 @@
+diff --git a/containers/l7.go b/containers/l7.go
+index 9d84ee7..ccc03de 100644
+--- a/containers/l7.go
++++ b/containers/l7.go
+@@ -15,6 +15,9 @@ type L7Metrics struct {
+ }
+ 
+ func (m *L7Metrics) observe(status, method string, duration time.Duration) {
++	if m == nil {
++		return
++	}
+ 	if m.Requests != nil {
+ 		var err error
+ 		var c prometheus.Counter
+@@ -36,6 +39,31 @@ func (m *L7Metrics) observe(status, method string, duration time.Duration) {
+ 
+ type L7Stats map[l7.Protocol]map[common.DestinationKey]*L7Metrics // protocol -> dst:actual_dst -> metrics
+ 
++// newL7Metrics returns nil for protocols without metric definitions: the zero-value
++// opts would register metrics with an empty name and fail every Gather.
++func newL7Metrics(protocol l7.Protocol, constLabels prometheus.Labels) *L7Metrics {
++	cOpts, ok := L7Requests[protocol]
++	if !ok {
++		return nil
++	}
++	m := &L7Metrics{}
++	labels := []string{"status"}
++	switch protocol {
++	case l7.ProtocolRabbitmq, l7.ProtocolNats:
++		labels = append(labels, "method")
++	default:
++		if hOpts, ok := L7Latency[protocol]; ok {
++			m.Latency = prometheus.NewHistogram(
++				prometheus.HistogramOpts{Name: hOpts.Name, Help: hOpts.Help, ConstLabels: constLabels},
++			)
++		}
++	}
++	m.Requests = prometheus.NewCounterVec(
++		prometheus.CounterOpts{Name: cOpts.Name, Help: cOpts.Help, ConstLabels: constLabels}, labels,
++	)
++	return m
++}
++
+ func (s L7Stats) get(protocol l7.Protocol, key common.DestinationKey) *L7Metrics {
+ 	if protocol == l7.ProtocolHTTP2 {
+ 		protocol = l7.ProtocolHTTP
+@@ -47,23 +75,11 @@ func (s L7Stats) get(protocol l7.Protocol, key common.DestinationKey) *L7Metrics
+ 	}
+ 	m := protoStats[key]
+ 	if m == nil {
+-		m = &L7Metrics{}
+-		protoStats[key] = m
+-		constLabels := map[string]string{"destination": key.DestinationLabelValue(), "actual_destination": key.ActualDestinationLabelValue()}
+-		labels := []string{"status"}
+-		switch protocol {
+-		case l7.ProtocolRabbitmq, l7.ProtocolNats:
+-			labels = append(labels, "method")
+-		default:
+-			hOpts := L7Latency[protocol]
+-			m.Latency = prometheus.NewHistogram(
+-				prometheus.HistogramOpts{Name: hOpts.Name, Help: hOpts.Help, ConstLabels: constLabels},
+-			)
++		constLabels := prometheus.Labels{"destination": key.DestinationLabelValue(), "actual_destination": key.ActualDestinationLabelValue()}
++		if m = newL7Metrics(protocol, constLabels); m == nil {
++			return nil
+ 		}
+-		cOpts := L7Requests[protocol]
+-		m.Requests = prometheus.NewCounterVec(
+-			prometheus.CounterOpts{Name: cOpts.Name, Help: cOpts.Help, ConstLabels: constLabels}, labels,
+-		)
++		protoStats[key] = m
+ 	}
+ 	return m
+ }
+diff --git a/containers/l7_test.go b/containers/l7_test.go
+new file mode 100644
+index 0000000..f3c824e
+--- /dev/null
++++ b/containers/l7_test.go
+@@ -0,0 +1,52 @@
++package containers
++
++import (
++	"testing"
++	"time"
++
++	"github.com/coroot/coroot-node-agent/common"
++	"github.com/coroot/coroot-node-agent/ebpftracer/l7"
++	"github.com/prometheus/client_golang/prometheus"
++	"inet.af/netaddr"
++)
++
++type l7StatsCollector struct{ L7Stats }
++
++func (c l7StatsCollector) Describe(ch chan<- *prometheus.Desc) {
++	ch <- prometheus.NewDesc("l7_stats", "", nil, nil)
++}
++
++func (c l7StatsCollector) Collect(ch chan<- prometheus.Metric) { c.collect(ch) }
++
++// An L7 event with a protocol id that has no metric definition (e.g. a corrupted
++// event) must not register metrics with an empty name: that breaks every later
++// /metrics scrape with `"" is not a valid metric name`.
++func TestL7StatsIgnoresUnknownProtocols(t *testing.T) {
++	stats := L7Stats{}
++	key := common.NewDestinationKey(netaddr.MustParseIPPort("10.0.0.1:443"), netaddr.MustParseIPPort("10.0.0.1:443"), nil)
++
++	for _, protocol := range []l7.Protocol{0, l7.Protocol(200)} {
++		m := stats.get(protocol, key)
++		if m != nil {
++			t.Fatalf("protocol %d: got metrics, want nil", protocol)
++		}
++		m.observe("200", "", time.Millisecond) // nil-safe
++	}
++	stats.get(l7.ProtocolHTTP, key).observe("200", "", time.Millisecond)
++
++	reg := prometheus.NewRegistry()
++	reg.MustRegister(l7StatsCollector{stats})
++	families, err := reg.Gather()
++	if err != nil {
++		t.Fatalf("gather: %v", err)
++	}
++	names := map[string]bool{}
++	for _, f := range families {
++		names[f.GetName()] = true
++	}
++	for _, want := range []string{"container_http_requests_total", "container_http_requests_duration_seconds_total"} {
++		if !names[want] {
++			t.Errorf("missing %s in %v", want, names)
++		}
++	}
++}
