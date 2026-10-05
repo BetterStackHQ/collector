@@ -1,6 +1,6 @@
 diff --git a/bpf/tpinjector/maps/iter_allowed_socks.h b/bpf/tpinjector/maps/iter_allowed_socks.h
 new file mode 100644
-index 0000000..39144e5
+index 0000000000000000000000000000000000000000..39144e5a8605166ee4f499f7bcdfd3cd5fc0994a
 --- /dev/null
 +++ b/bpf/tpinjector/maps/iter_allowed_socks.h
 @@ -0,0 +1,26 @@
@@ -31,18 +31,18 @@ index 0000000..39144e5
 +    __type(value, u8);
 +} iter_allowed_socks SEC(".maps");
 diff --git a/bpf/tpinjector/sock_iter.c b/bpf/tpinjector/sock_iter.c
-index 5585597..48889d0 100644
+index 27a8952c257fa1137d6dc2fdfb09f2ac25771e7d..f9b71ff924ed97ac97ff9a251dfcd145f8cfcea9 100644
 --- a/bpf/tpinjector/sock_iter.c
 +++ b/bpf/tpinjector/sock_iter.c
-@@ -14,6 +14,7 @@
- #include <maps/sock_dir.h>
+@@ -15,6 +15,7 @@
+ #include <maps/socket_cookie.h>
  #include <maps/tracked_sock_cookies.h>
  
 +#include <tpinjector/maps/iter_allowed_socks.h>
  #include <tpinjector/maps/iter_listening_ports.h>
  
  char __license[] SEC("license") = "Dual MIT/GPL";
-@@ -132,6 +133,26 @@ int obi_sk_iter_tcp(struct bpf_iter__tcp *ctx) {
+@@ -133,6 +134,26 @@ int obi_sk_iter_tcp(struct bpf_iter__tcp *ctx) {
          return 0;
      }
  
@@ -67,21 +67,21 @@ index 5585597..48889d0 100644
 +    }
 +
      const u64 cookie = bpf_get_socket_cookie(skc);
- 
-     char src_buf[k_addr_buf_len] = {};
+     bpf_sk_storage_get(
+         &socket_cookie, (struct bpf_sock *)skc, (void *)&cookie, BPF_SK_STORAGE_GET_F_CREATE);
 diff --git a/bpf/tpinjector/tpinjector.c b/bpf/tpinjector/tpinjector.c
-index 078c160..06395ec 100644
+index c54e02f3772052aa5e85e55e10b6f5ae9bd10878..a9cd3d576a343e55b69c45e43bbe675e9869c68d 100644
 --- a/bpf/tpinjector/tpinjector.c
 +++ b/bpf/tpinjector/tpinjector.c
-@@ -36,6 +36,7 @@
- #include <maps/msg_buffers.h>
+@@ -40,6 +40,7 @@
  #include <maps/outgoing_trace_map.h>
  #include <maps/sock_dir.h>
+ #include <maps/socket_cookie.h>
 +#include <maps/sock_pids.h>
  #include <maps/tp_info_mem.h>
  #include <maps/tracked_sock_cookies.h>
  
-@@ -799,8 +800,90 @@ static __always_inline void bpf_sock_ops_set_flags(struct bpf_sock_ops *skops, u
+@@ -806,8 +807,90 @@ static __always_inline void bpf_sock_ops_set_flags(struct bpf_sock_ops *skops, u
      bpf_sock_ops_cb_flags_set(skops, skops->bpf_sock_ops_cb_flags | flags);
  }
  
@@ -170,9 +170,9 @@ index 078c160..06395ec 100644
 +    }
 +
      const u64 cookie = bpf_get_socket_cookie(skops);
+     struct bpf_sock *sk = skops->sk;
  
-     if (bpf_sock_hash_update(skops, &sock_dir, (void *)&cookie, BPF_ANY) == 0) {
-@@ -916,8 +999,10 @@ static __always_inline void bpf_sock_ops_parse_hdr_cb(struct bpf_sock_ops *skops
+@@ -940,8 +1023,10 @@ static __always_inline void bpf_sock_ops_parse_hdr_cb(struct bpf_sock_ops *skops
      bpf_map_update_elem(&incoming_trace_map, &conn, &tp, BPF_ANY);
  }
  
@@ -186,20 +186,21 @@ index 078c160..06395ec 100644
  int obi_sockmap_tracker(struct bpf_sock_ops *skops) {
      struct bpf_sock *sk = skops->sk;
 diff --git a/pkg/internal/ebpf/tpinjector/tpinjector.go b/pkg/internal/ebpf/tpinjector/tpinjector.go
-index 72dfdcd..6b7d48e 100644
+index 8e364aba82599efb24fa421813d95de42a3d2014..2a1d3844e25ed0de6774f42ba12b56059f462c53 100644
 --- a/pkg/internal/ebpf/tpinjector/tpinjector.go
 +++ b/pkg/internal/ebpf/tpinjector/tpinjector.go
-@@ -12,6 +12,9 @@ import (
+@@ -12,7 +12,10 @@ import (
  	"io"
  	"log/slog"
  	"os"
 +	"path/filepath"
+ 	"slices"
 +	"strconv"
 +	"strings"
  	"sync"
  	"syscall"
  	"time"
-@@ -50,16 +53,17 @@ type Tracer struct {
+@@ -54,7 +57,8 @@ type Tracer struct {
  	sockhashOK              bool
  	iterMu                  sync.Mutex
  	itersOnce               sync.Once
@@ -208,6 +209,8 @@ index 72dfdcd..6b7d48e 100644
 +	badNetns                *expirable.LRU[uint64, struct{}]
  	netnsAttempts           *expirable.LRU[uint64, int]
  	backfillDisabled        bool
+ 	closerMu                sync.Mutex
+@@ -62,10 +66,10 @@ type Tracer struct {
  }
  
  const (
@@ -222,7 +225,7 @@ index 72dfdcd..6b7d48e 100644
  	// a namespace that keeps failing is dropped, so one broken container cannot stop the
  	// backfill for every other namespace on the host
  	maxNetnsAttempts = 3
-@@ -71,17 +75,23 @@ func New(cfg *obi.Config) *Tracer {
+@@ -77,17 +81,23 @@ func New(cfg *obi.Config) *Tracer {
  		log:           log,
  		cfg:           cfg,
  		fionreadProbe: sockhashFIONREADProbe,
@@ -250,7 +253,7 @@ index 72dfdcd..6b7d48e 100644
  		return
  	}
  
-@@ -92,11 +102,26 @@ func (p *Tracer) AllowPID(pid app.PID, _ uint32, _ *exec.FileInfo) {
+@@ -98,11 +108,26 @@ func (p *Tracer) AllowPID(pid app.PID, _ uint32, _ *exec.FileInfo) {
  	}
  
  	inode := info.Sys().(*syscall.Stat_t).Ino
@@ -279,7 +282,7 @@ index 72dfdcd..6b7d48e 100644
  		if err := netns.WithNetNS(int(pid), func() error {
  			return it.Run(p.log)
  		}); err != nil {
-@@ -120,7 +145,7 @@ func (p *Tracer) AllowPID(pid app.PID, _ uint32, _ *exec.FileInfo) {
+@@ -126,7 +151,7 @@ func (p *Tracer) AllowPID(pid app.PID, _ uint32, _ *exec.FileInfo) {
  			if attempts >= maxNetnsAttempts {
  				p.log.Warn("giving up on socket backfill for this network namespace",
  					"ino", inode, "attempts", attempts)
@@ -288,7 +291,7 @@ index 72dfdcd..6b7d48e 100644
  			}
  			return
  		}
-@@ -128,7 +153,77 @@ func (p *Tracer) AllowPID(pid app.PID, _ uint32, _ *exec.FileInfo) {
+@@ -134,7 +159,77 @@ func (p *Tracer) AllowPID(pid app.PID, _ uint32, _ *exec.FileInfo) {
  
  	// reached only when every iterator ran; a failure above returns so a later pid retries
  	p.netnsAttempts.Remove(inode)

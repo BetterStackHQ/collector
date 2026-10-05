@@ -62,7 +62,7 @@ ENV CLUSTER_COLLECTOR=false
 ENV COLLECTOR_VERSION=1.1.45
 ENV VECTOR_VERSION=0.47.0
 ENV CLUSTER_AGENT_VERSION=1.11.4
-ENV OBI_VERSION=0.13.0
+ENV OBI_VERSION=0.14.0
 
 # The environment variable TINI_SUBREAPER=true is related to Tini, which is the init system being used in this Docker container.
 # When TINI_SUBREAPER is set to true, it enables Tini's "subreaper" functionality. Here's what that means:
