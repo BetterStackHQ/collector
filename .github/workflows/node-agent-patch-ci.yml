@@ -67,6 +67,8 @@ jobs:
         working-directory: /tmp/node-agent
         run: go vet ./...
 
+      # Link like ebpf/Dockerfile: go-nvml references symbols newer libnvidia-ml
+      # stubs lack, so binaries linking it (the containers tests) need lazy binding.
       - name: go test
         working-directory: /tmp/node-agent
-        run: go test ./...
+        run: go test -ldflags "-extldflags='-Wl,-z,lazy'" ./...
