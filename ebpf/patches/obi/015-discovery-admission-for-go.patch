@@ -1,8 +1,8 @@
 diff --git a/bpf/gotracer/go_nethttp.c b/bpf/gotracer/go_nethttp.c
-index 92db041e..8c545a57 100644
+index bcd23009c494986817aced543f3af83810b13c34..3e7a7af6759a708711b9e2660db15bb13748ba79 100644
 --- a/bpf/gotracer/go_nethttp.c
 +++ b/bpf/gotracer/go_nethttp.c
-@@ -807,10 +807,7 @@ int GUARDED_PROG(obi_uprobe_roundTripReturn, struct pt_regs *, ctx) {
+@@ -839,10 +839,7 @@ int GUARDED_PROG(obi_uprobe_roundTripReturn, struct pt_regs *, ctx) {
      if (info) {
          __builtin_memcpy(&trace->conn, info, sizeof(connection_info_t));
  
@@ -14,7 +14,7 @@ index 92db041e..8c545a57 100644
          bpf_map_delete_elem(&outgoing_trace_map, &e_key);
          bpf_map_delete_elem(&go_ongoing_http, &e_key);
      } else {
-@@ -1097,10 +1094,9 @@ static __always_inline int on_writeSubset_returns(struct pt_regs *ctx,
+@@ -1132,10 +1129,9 @@ static __always_inline int on_writeSubset_returns(struct pt_regs *ctx,
          go_addr_key_from_id(&g_key, (void *)inv->req_goaddr);
          connection_info_t *info = bpf_map_lookup_elem(&ongoing_client_connections, &g_key);
          if (info) {
@@ -30,7 +30,7 @@ index 92db041e..8c545a57 100644
              bpf_dbg_printk(
 diff --git a/bpf/tpinjector/discovery.h b/bpf/tpinjector/discovery.h
 new file mode 100644
-index 00000000..c15984ff
+index 0000000000000000000000000000000000000000..c15984ffc0715e333c3212d8971e8d437ded4e59
 --- /dev/null
 +++ b/bpf/tpinjector/discovery.h
 @@ -0,0 +1,43 @@
@@ -79,7 +79,7 @@ index 00000000..c15984ff
 +}
 diff --git a/bpf/tpinjector/maps/inject_connects.h b/bpf/tpinjector/maps/inject_connects.h
 new file mode 100644
-index 00000000..63c522ce
+index 0000000000000000000000000000000000000000..63c522cee43bf57fd40719894f2407ef8bc5a437
 --- /dev/null
 +++ b/bpf/tpinjector/maps/inject_connects.h
 @@ -0,0 +1,20 @@
@@ -105,7 +105,7 @@ index 00000000..63c522ce
 +} inject_connects SEC(".maps");
 diff --git a/bpf/tpinjector/maps/inject_pids.h b/bpf/tpinjector/maps/inject_pids.h
 new file mode 100644
-index 00000000..f73b3a05
+index 0000000000000000000000000000000000000000..f73b3a05449b24e453339cdbecbbea9f35b0f105
 --- /dev/null
 +++ b/bpf/tpinjector/maps/inject_pids.h
 @@ -0,0 +1,21 @@
@@ -131,7 +131,7 @@ index 00000000..f73b3a05
 +    __uint(pinning, OBI_PIN_INTERNAL);
 +} inject_pids SEC(".maps");
 diff --git a/bpf/tpinjector/tpinjector.c b/bpf/tpinjector/tpinjector.c
-index 71e7d2f0..c79d22e9 100644
+index a9cd3d576a343e55b69c45e43bbe675e9869c68d..af3fdd4876f84e8b221ed19bb9a367cdbabb8f80 100644
 --- a/bpf/tpinjector/tpinjector.c
 +++ b/bpf/tpinjector/tpinjector.c
 @@ -29,7 +29,9 @@
@@ -145,15 +145,15 @@ index 71e7d2f0..c79d22e9 100644
  
  #include <logger/bpf_dbg.h>
  
-@@ -38,7 +40,6 @@
- #include <maps/msg_buffers.h>
+@@ -40,7 +42,6 @@
  #include <maps/outgoing_trace_map.h>
  #include <maps/sock_dir.h>
+ #include <maps/socket_cookie.h>
 -#include <maps/sock_pids.h>
  #include <maps/tp_info_mem.h>
  #include <maps/tracked_sock_cookies.h>
  
-@@ -59,7 +60,7 @@ char __license[] SEC("license") = "Dual MIT/GPL";
+@@ -62,7 +63,7 @@ char __license[] SEC("license") = "Dual MIT/GPL";
  //
  //   obi_packet_extender (sk_msg entry)
  //   │
@@ -162,7 +162,7 @@ index 71e7d2f0..c79d22e9 100644
  //   │                                  │  may touch a byte of its traffic
  //   │                                  │
  //   ├── socket parked → SK_PASS        │  Default-deny: this stream left
-@@ -363,9 +364,9 @@ enum { k_http1_101_check_len = 16 };
+@@ -367,9 +368,9 @@ enum { k_http1_101_check_len = 16 };
  static __always_inline bool is_http1_101_response(const unsigned char *d,
                                                    const unsigned char *end) {
      return d && (void *)d + k_http1_101_check_len <= (void *)end && d[0] == 'H' && d[1] == 'T' &&
@@ -175,7 +175,7 @@ index 71e7d2f0..c79d22e9 100644
  }
  
  // One-shot probe for a connection leaving HTTP/1: a 101 is the last HTTP/1
-@@ -803,89 +804,28 @@ static __always_inline void bpf_sock_ops_set_flags(struct bpf_sock_ops *skops, u
+@@ -807,89 +808,28 @@ static __always_inline void bpf_sock_ops_set_flags(struct bpf_sock_ops *skops, u
      bpf_sock_ops_cb_flags_set(skops, skops->bpf_sock_ops_cb_flags | flags);
  }
  
@@ -281,8 +281,8 @@ index 71e7d2f0..c79d22e9 100644
 +    bpf_map_delete_elem(&inject_connects, &socket);
  
      const u64 cookie = bpf_get_socket_cookie(skops);
- 
-@@ -1002,8 +942,7 @@ static __always_inline void bpf_sock_ops_parse_hdr_cb(struct bpf_sock_ops *skops
+     struct bpf_sock *sk = skops->sk;
+@@ -1023,8 +963,7 @@ static __always_inline void bpf_sock_ops_parse_hdr_cb(struct bpf_sock_ops *skops
      bpf_map_update_elem(&incoming_trace_map, &conn, &tp, BPF_ANY);
  }
  
@@ -292,7 +292,7 @@ index 71e7d2f0..c79d22e9 100644
  // (BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB). We don't track incoming, those would be
  // BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB
  SEC("sockops")
-@@ -1538,33 +1477,8 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1589,33 +1528,8 @@ int obi_packet_extender(struct sk_msg_md *msg) {
  
      const u64 id = bpf_get_current_pid_tgid();
  
@@ -328,7 +328,7 @@ index 71e7d2f0..c79d22e9 100644
          return SK_PASS;
      }
  
-@@ -1751,7 +1665,7 @@ int obi_packet_extender_http1_dispatch(struct sk_msg_md *msg) {
+@@ -1802,7 +1716,7 @@ int obi_packet_extender_http1_dispatch(struct sk_msg_md *msg) {
      }
  
      // The Go-gRPC coordination route now sits behind the entry filter too. For
@@ -338,7 +338,7 @@ index 71e7d2f0..c79d22e9 100644
      // that direction can only remove injections, never duplicate them: the
      // coordination it implements is the *uprobe* telling sk_msg which streams
 diff --git a/pkg/appolly/discover/matcher.go b/pkg/appolly/discover/matcher.go
-index ac2adcf7..786432af 100644
+index 0a59af5e1ab25e4e3be702ca4f9b651fed4eb7f0..4950a10ad9bee3581f1e8b9496f657699e83db88 100644
 --- a/pkg/appolly/discover/matcher.go
 +++ b/pkg/appolly/discover/matcher.go
 @@ -11,6 +11,7 @@ import (
@@ -395,7 +395,7 @@ index ac2adcf7..786432af 100644
  func (m *Matcher) filter(events []Event[ProcessAttrs]) []Event[ProcessMatch] {
 diff --git a/pkg/appolly/discover/matcher_privileged_test.go b/pkg/appolly/discover/matcher_privileged_test.go
 new file mode 100644
-index 00000000..462b9d28
+index 0000000000000000000000000000000000000000..462b9d280f375b7c885a479633b62274c54f87ee
 --- /dev/null
 +++ b/pkg/appolly/discover/matcher_privileged_test.go
 @@ -0,0 +1,78 @@
@@ -479,7 +479,7 @@ index 00000000..462b9d28
 +}
 diff --git a/pkg/internal/ebpf/tpinjector/pid_filter_privileged_test.go b/pkg/internal/ebpf/tpinjector/pid_filter_privileged_test.go
 new file mode 100644
-index 00000000..ffe60de5
+index 0000000000000000000000000000000000000000..ffe60de5950448713d7eaa0a0f3d7b9638b58a01
 --- /dev/null
 +++ b/pkg/internal/ebpf/tpinjector/pid_filter_privileged_test.go
 @@ -0,0 +1,241 @@
@@ -725,10 +725,10 @@ index 00000000..ffe60de5
 +	})
 +}
 diff --git a/pkg/internal/ebpf/tpinjector/tpinjector.go b/pkg/internal/ebpf/tpinjector/tpinjector.go
-index 6b7d48e7..fb27090f 100644
+index 2a1d3844e25ed0de6774f42ba12b56059f462c53..4761604fbf2913d7fb25af7ba38aa16c483cb557 100644
 --- a/pkg/internal/ebpf/tpinjector/tpinjector.go
 +++ b/pkg/internal/ebpf/tpinjector/tpinjector.go
-@@ -29,6 +29,7 @@ import (
+@@ -32,6 +32,7 @@ import (
  	ebpfcommon "go.opentelemetry.io/obi/pkg/ebpf/common"
  	"go.opentelemetry.io/obi/pkg/internal/goexec"
  	"go.opentelemetry.io/obi/pkg/internal/netns"
@@ -736,15 +736,15 @@ index 6b7d48e7..fb27090f 100644
  	"go.opentelemetry.io/obi/pkg/obi"
  	"go.opentelemetry.io/obi/pkg/pipe/msg"
  )
-@@ -57,6 +58,7 @@ type Tracer struct {
- 	badNetns                *expirable.LRU[uint64, struct{}]
- 	netnsAttempts           *expirable.LRU[uint64, int]
+@@ -63,6 +64,7 @@ type Tracer struct {
  	backfillDisabled        bool
+ 	closerMu                sync.Mutex
+ 	detached                bool
 +	injectionPIDs           map[app.PID]BpfPidDataT
  }
  
  const (
-@@ -87,10 +89,15 @@ func New(cfg *obi.Config) *Tracer {
+@@ -93,10 +95,15 @@ func New(cfg *obi.Config) *Tracer {
  // sees every socket in the namespace and cannot attribute one to a process, so
  // the discovered pid's own socket inodes are published to iter_allowed_socks
  // first and retracted afterwards. See bpf/tpinjector/maps/iter_allowed_socks.h.
@@ -761,7 +761,7 @@ index 6b7d48e7..fb27090f 100644
  	if p.backfillDisabled || p.seenPIDs.Contains(pid) {
  		return
  	}
-@@ -226,7 +233,45 @@ func socketInode(target string) (uint64, bool) {
+@@ -232,7 +239,45 @@ func socketInode(target string) (uint64, bool) {
  	return ino, true
  }
  
@@ -808,7 +808,7 @@ index 6b7d48e7..fb27090f 100644
  
  func (p *Tracer) LoadSpecs() ([]*ebpfcommon.SpecBundle, error) {
  	spec, err := LoadBpf()
-@@ -318,7 +363,9 @@ func (p *Tracer) GoProbes() map[string][]*ebpfcommon.ProbeDesc {
+@@ -392,7 +437,9 @@ func (p *Tracer) GoProbes() map[string][]*ebpfcommon.ProbeDesc {
  }
  
  func (p *Tracer) KProbes() map[string]ebpfcommon.ProbeDesc {

@@ -55,12 +55,12 @@ FROM prometheuscommunity/pgbouncer-exporter:v0.12.0 AS pgbouncer-exporter
 FROM prom/mysqld-exporter:v0.20.0 AS mysqld-exporter
 
 # Build OBI from source with patches
-FROM ghcr.io/open-telemetry/obi-generator:0.2.15@sha256:9cbb1b567377d5779b04e6bcdb87431c77a19e797b4630eba30f5417de96ea33 AS obi-builder
+FROM ghcr.io/open-telemetry/obi-generator:0.2.16@sha256:3a8959e5253f2445b782b4f720ed54f6396fce350082486442e0b71ac02ff106 AS obi-builder
 RUN apk add --no-cache bash git make
 ARG TARGETARCH
 ARG CUSTOMIZATION_TAG="betterstack"
-ARG OBI_VERSION="v0.13.0"
-ARG OBI_REVISION="3cc19862cef1abdaaeaa2a6387b462d31822010e"
+ARG OBI_VERSION="v0.14.0"
+ARG OBI_REVISION="13d9b0c3f600a060bd78820a63ebec882b10757e"
 RUN git clone --depth 1 --branch ${OBI_VERSION} \
     https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation.git /tmp/obi && \
     test "$(git -C /tmp/obi rev-parse HEAD)" = "${OBI_REVISION}"

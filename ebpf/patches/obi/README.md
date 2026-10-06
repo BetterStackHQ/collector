@@ -4,20 +4,22 @@ Patches here are applied in lexical order (`NNN-description.patch`) on top of th
 tag pinned by `ARG OBI_VERSION` / `OBI_REVISION` in `ebpf/Dockerfile`. The build and
 `obi-patch-ci.yml` tolerate an empty directory.
 
-## v0.13.0 rebase
+## v0.14.0 rebase
 
-Pinned to `3cc19862cef1abdaaeaa2a6387b462d31822010e`, using the same
-`obi-generator:0.2.15` digest as v0.12.2 (also the v0.13.0 Makefile default).
+Pinned to `13d9b0c3f600a060bd78820a63ebec882b10757e`, using
+`obi-generator:0.2.16` (the v0.14.0 Makefile default). The generator's multi-arch
+digest is pinned in `ebpf/Dockerfile`.
 
 | Patch | Decision | Upstream comparison |
 | --- | --- | --- |
 | 008 | Keep unchanged | No HTTP/1 upgrade parking upstream. |
-| 009 | Remove | [#3257](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3257) gates both HTTP detector paths on a fresh fill. [#3298](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3298) bounds copies by the mapped window; [#3304](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3304) invalidates failed fills for the other readers. |
-| 010 | Restack | Preserve the upstream buffer fixes, move the fill to the entry program, and bound both downstream HTTP/1 scans by the copied window instead of `msg->size`. HTTP/2 stream ownership from #3156 remains intact. |
+| 009 | Already removed | [#3257](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3257) gates both HTTP detector paths on a fresh fill. [#3298](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3298) bounds copies by the mapped window; [#3304](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3304) invalidates failed fills for the other readers. |
+| 010 | Restack | Preserve upstream buffer, socket-cookie, and HTTP/2 ownership changes while retaining the default-deny injection gate and copied-window scan bounds. |
 | 011 | Keep unchanged | Upstream still checks discovery after the existing-trace and Go-gRPC routes. |
-| 012 | Keep unchanged | Upstream still enrolls all outgoing sockets and backfills by network namespace. |
-| 013 | Restack | Adapt the finder hunk to the queue metrics argument. Explicit denials remain necessary; #3170's PID drain period addresses exited allowed processes, not discovery exclusions. |
-| 014 | Retain only map sizing | [#3232](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3232) replaces per-span cloning with `UnsafeServiceAttrs()`, but leaves `envStrsToMap()` presizing unchanged. |
+| 012 | Restack | Preserve upstream socket-cookie handling while retaining discovery-scoped enrollment and inode-scoped backfill. |
+| 013 | Restack | Adapt to the `DynamicSelector` rename and new matcher test callers. Explicit exclusions still take precedence over admitted parents. |
+| 014 | Remove | [#3514](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3514) sizes the environment map with `validEnvCount()`, ignoring empty entries left by `setproctitle`. |
+| 015 | Restack | Preserve upstream socket-cookie includes and tracer detach lifecycle state while retaining injector-owned Go PID admission and connect tracking. |
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
 bounds are part of the base now. A successful fill can copy less than `msg->size`
@@ -297,14 +299,6 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   too. Against pristine+008..012 the scenario reports all four differences from
   one run: the child's socket enrolled in `sock_dir`, one Traceparent on its
   request, 61 bytes arriving as 131, and the socket still enrolled afterwards.
-* 014-no-env-map-presizing.patch
-  Do not presize the environment map from the NUL-split count of
-  `/proc/<pid>/environ`. Processes using `setproctitle` can leave thousands of
-  empty entries, reserving hundreds of KiB for a handful of environment variables.
-  Upstream #3232 bypasses `ServiceAttrs()` on the span path, so the former
-  per-span clone change and its test are no longer needed. Environment-map
-  presizing is unchanged upstream and still needs this patch.
-
 * 015-discovery-admission-for-go.patch
   Restore socket-level propagation for Go-specific tracing while retaining
   discovery exclusions. Adds injector-owned PID admission and connect tracking;

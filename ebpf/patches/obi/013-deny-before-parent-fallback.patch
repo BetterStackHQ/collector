@@ -1,6 +1,6 @@
 diff --git a/bpf/pid/maps/denied_pids.h b/bpf/pid/maps/denied_pids.h
 new file mode 100644
-index 000000000..fb49317f9
+index 0000000000000000000000000000000000000000..fb49317f92170f1d89f816b2e1d95de1e71c75bd
 --- /dev/null
 +++ b/bpf/pid/maps/denied_pids.h
 @@ -0,0 +1,37 @@
@@ -42,7 +42,7 @@ index 000000000..fb49317f9
 +    __uint(pinning, OBI_PIN_INTERNAL);
 +} denied_pids SEC(".maps");
 diff --git a/bpf/pid/pid.h b/bpf/pid/pid.h
-index 7cea1b777..88866c03f 100644
+index 7cea1b777a3d4832a09a0384b9febed36b397950..88866c03ffbc57965b6345b58082c3f4bb477bff 100644
 --- a/bpf/pid/pid.h
 +++ b/bpf/pid/pid.h
 @@ -8,6 +8,7 @@
@@ -87,26 +87,26 @@ index 7cea1b777..88866c03f 100644
  
          if (found_ns_pid) {
 diff --git a/pkg/appolly/discover/finder.go b/pkg/appolly/discover/finder.go
-index 57e39c12c..5b3e7874c 100644
+index 8e72f949acac9ba96b3f5b76ad6946084bd450d4..b26153f92eeea659fe6b7f3a843407e6240ae20c 100644
 --- a/pkg/appolly/discover/finder.go
 +++ b/pkg/appolly/discover/finder.go
-@@ -127,7 +127,7 @@ func (pf *ProcessFinder) Start(ctx context.Context, opts ...ProcessFinderStartOp
+@@ -129,7 +129,7 @@ func (pf *ProcessFinder) Start(ctx context.Context, opts ...ProcessFinderStartOp
  	), swarm.WithID("LanguageDecoratorProvider"))
  
  	criteriaFilteredEvents := msgh.QueueFromConfig[[]Event[ProcessMatch]](pf.cfg, pf.ctxInfo.Metrics, "criteriaFilteredEvents")
--	swi.Add(criteriaMatcherProvider(pf.cfg, langEnrichedEvents, criteriaFilteredEvents, configCriteria, startConfig.dynamicPIDSelector),
-+	swi.Add(criteriaMatcherProvider(pf.cfg, langEnrichedEvents, criteriaFilteredEvents, configCriteria, startConfig.dynamicPIDSelector, pf.ebpfEventContext),
+-	swi.Add(criteriaMatcherProvider(pf.cfg, langEnrichedEvents, criteriaFilteredEvents, configCriteria, startConfig.dynamicSelector),
++	swi.Add(criteriaMatcherProvider(pf.cfg, langEnrichedEvents, criteriaFilteredEvents, configCriteria, startConfig.dynamicSelector, pf.ebpfEventContext),
  		swarm.WithID("CriteriaMatcher"))
  	swi.Add(dynamicMatcherProvider(langEnrichedEvents, criteriaFilteredEvents, appDynamicSelector),
  		swarm.WithID("DynamicMatcher"))
 diff --git a/pkg/appolly/discover/matcher.go b/pkg/appolly/discover/matcher.go
-index c0300ef22..ac2adcf7c 100644
+index 6ce6bbbbce31f59d5f41681ab9ffd837761ca67d..0a59af5e1ab25e4e3be702ca4f9b651fed4eb7f0 100644
 --- a/pkg/appolly/discover/matcher.go
 +++ b/pkg/appolly/discover/matcher.go
 @@ -38,6 +38,7 @@ func criteriaMatcherProvider(
  	output *msg.Queue[[]Event[ProcessMatch]],
  	configCriteria []services.Selector,
- 	dynamicSelector *DynamicPIDSelector,
+ 	dynamicSelector *DynamicSelector,
 +	eventContext *ebpfcommon.EBPFEventContext,
  ) swarm.InstanceFunc {
  	instrumenterNamespace, _ := namespaceFetcherFunc(app.PID(osPidFunc()))
@@ -186,7 +186,7 @@ index c0300ef22..ac2adcf7c 100644
  	if !ok {
  		m.Log.Debug("deleted untracked process. Ignoring", "pid", obj.pid)
 diff --git a/pkg/appolly/discover/matcher_test.go b/pkg/appolly/discover/matcher_test.go
-index c4b28eb99..dce07a516 100644
+index ef23bfa1601d29fb17fb86f5f0681c6a0a2b47ff..eb057948095f4a2e3cebc5695cc04f562ef8406a 100644
 --- a/pkg/appolly/discover/matcher_test.go
 +++ b/pkg/appolly/discover/matcher_test.go
 @@ -50,7 +50,7 @@ func TestMatchersMutuallyExclusive(t *testing.T) {
@@ -216,7 +216,7 @@ index c4b28eb99..dce07a516 100644
  	require.NoError(t, err)
  	go matcherFunc(t.Context())
  	defer filteredProcessesQu.Close()
-@@ -182,7 +182,7 @@ func TestCriteriaMatcherLanguage(t *testing.T) {
+@@ -185,7 +185,7 @@ ebpf:
  	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
  	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
  	filteredProcesses := filteredProcessesQu.Subscribe()
@@ -225,7 +225,7 @@ index c4b28eb99..dce07a516 100644
  	require.NoError(t, err)
  	go matcherFunc(t.Context())
  	defer filteredProcessesQu.Close()
-@@ -232,7 +232,7 @@ func TestCriteriaMatcher_Exclude(t *testing.T) {
+@@ -224,7 +224,7 @@ func TestCriteriaMatcherLanguage(t *testing.T) {
  	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
  	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
  	filteredProcesses := filteredProcessesQu.Subscribe()
@@ -234,7 +234,7 @@ index c4b28eb99..dce07a516 100644
  	require.NoError(t, err)
  	go matcherFunc(t.Context())
  	defer filteredProcessesQu.Close()
-@@ -273,7 +273,7 @@ func TestCriteriaMatcher_Exclude_Metadata(t *testing.T) {
+@@ -274,7 +274,7 @@ func TestCriteriaMatcher_Exclude(t *testing.T) {
  	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
  	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
  	filteredProcesses := filteredProcessesQu.Subscribe()
@@ -243,7 +243,16 @@ index c4b28eb99..dce07a516 100644
  	require.NoError(t, err)
  	go matcherFunc(t.Context())
  	defer filteredProcessesQu.Close()
-@@ -320,7 +320,7 @@ func TestCriteriaMatcher_MetadataWithDeprecatedPathRegexp(t *testing.T) {
+@@ -315,7 +315,7 @@ func TestCriteriaMatcher_Exclude_Metadata(t *testing.T) {
+ 	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
+ 	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
+ 	filteredProcesses := filteredProcessesQu.Subscribe()
+-	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil)(t.Context())
++	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil, nil)(t.Context())
+ 	require.NoError(t, err)
+ 	go matcherFunc(t.Context())
+ 	defer filteredProcessesQu.Close()
+@@ -362,7 +362,7 @@ func TestCriteriaMatcher_MetadataWithDeprecatedPathRegexp(t *testing.T) {
  	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
  	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
  	filteredProcesses := filteredProcessesQu.Subscribe()
@@ -252,7 +261,7 @@ index c4b28eb99..dce07a516 100644
  	require.NoError(t, err)
  	go matcherFunc(t.Context())
  	defer func() {
-@@ -364,7 +364,7 @@ func TestCriteriaMatcher_MustMatchAllAttributes(t *testing.T) {
+@@ -406,7 +406,7 @@ func TestCriteriaMatcher_MustMatchAllAttributes(t *testing.T) {
  	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
  	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
  	filteredProcesses := filteredProcessesQu.Subscribe()
@@ -261,7 +270,7 @@ index c4b28eb99..dce07a516 100644
  	require.NoError(t, err)
  	go matcherFunc(t.Context())
  	defer filteredProcessesQu.Close()
-@@ -419,7 +419,7 @@ func TestCriteriaMatcherMissingPort(t *testing.T) {
+@@ -461,7 +461,7 @@ func TestCriteriaMatcherMissingPort(t *testing.T) {
  	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
  	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
  	filteredProcesses := filteredProcessesQu.Subscribe()
@@ -270,7 +279,7 @@ index c4b28eb99..dce07a516 100644
  	require.NoError(t, err)
  	go matcherFunc(t.Context())
  	defer filteredProcessesQu.Close()
-@@ -461,7 +461,7 @@ func TestCriteriaMatcherExcludedChildDoesNotInheritParentMatch(t *testing.T) {
+@@ -503,7 +503,7 @@ func TestCriteriaMatcherExcludedChildDoesNotInheritParentMatch(t *testing.T) {
  	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
  	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
  	filteredProcesses := filteredProcessesQu.Subscribe()
@@ -279,7 +288,7 @@ index c4b28eb99..dce07a516 100644
  	require.NoError(t, err)
  	go matcherFunc(t.Context())
  	defer filteredProcessesQu.Close()
-@@ -563,7 +563,7 @@ func TestCriteriaMatcherContainersOnly(t *testing.T) {
+@@ -607,7 +607,7 @@ func TestCriteriaMatcherContainersOnly(t *testing.T) {
  	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
  	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
  	filteredProcesses := filteredProcessesQu.Subscribe()
@@ -288,7 +297,7 @@ index c4b28eb99..dce07a516 100644
  	require.NoError(t, err)
  	go matcherFunc(t.Context())
  	defer filteredProcessesQu.Close()
-@@ -702,7 +702,7 @@ func TestInstrumentation_CoexistingWithDeprecatedServices(t *testing.T) {
+@@ -746,7 +746,7 @@ func TestInstrumentation_CoexistingWithDeprecatedServices(t *testing.T) {
  			discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
  			filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
  			filteredProcesses := filteredProcessesQu.Subscribe()
@@ -297,7 +306,7 @@ index c4b28eb99..dce07a516 100644
  			require.NoError(t, err)
  			go matcherFunc(t.Context())
  			defer filteredProcessesQu.Close()
-@@ -737,7 +737,7 @@ func TestCriteriaMatcher_TargetPIDs(t *testing.T) {
+@@ -781,7 +781,7 @@ func TestCriteriaMatcher_TargetPIDs(t *testing.T) {
  		discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
  		filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
  		filteredProcesses := filteredProcessesQu.Subscribe()
@@ -306,7 +315,7 @@ index c4b28eb99..dce07a516 100644
  		require.NoError(t, err)
  		go matcherFunc(t.Context())
  		defer filteredProcessesQu.Close()
-@@ -768,7 +768,7 @@ func TestCriteriaMatcher_TargetPIDs(t *testing.T) {
+@@ -812,7 +812,7 @@ func TestCriteriaMatcher_TargetPIDs(t *testing.T) {
  		discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
  		filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
  		filteredProcesses := filteredProcessesQu.Subscribe()
@@ -315,7 +324,7 @@ index c4b28eb99..dce07a516 100644
  		require.NoError(t, err)
  		go matcherFunc(t.Context())
  		defer filteredProcessesQu.Close()
-@@ -957,7 +957,7 @@ func TestCriteriaMatcher_Granular(t *testing.T) {
+@@ -1001,7 +1001,7 @@ func TestCriteriaMatcher_Granular(t *testing.T) {
  
  	filteredProcesses := filteredProcessesQu.Subscribe()
  
@@ -325,10 +334,10 @@ index c4b28eb99..dce07a516 100644
  	require.NoError(t, err)
  
 diff --git a/pkg/appolly/discover/watcher_kube_test.go b/pkg/appolly/discover/watcher_kube_test.go
-index 62304ba4e..38bbab209 100644
+index 738ed0df58f668e4f1b5850a36fbd2d37665c4d3..05a232484b89a758ae00f47f35de50793ff682c4 100644
 --- a/pkg/appolly/discover/watcher_kube_test.go
 +++ b/pkg/appolly/discover/watcher_kube_test.go
-@@ -205,7 +205,7 @@ func TestWatcherKubeEnricherWithMatcher(t *testing.T) {
+@@ -204,7 +204,7 @@ func TestWatcherKubeEnricherWithMatcher(t *testing.T) {
        version: "v[0-9]*"
  `), &pipeConfig))
  
@@ -337,9 +346,18 @@ index 62304ba4e..38bbab209 100644
  
  	nodesRunner, err := swi.Instance(t.Context())
  	require.NoError(t, err)
+@@ -440,7 +440,7 @@ func TestWatcherKubeEnricherHoldsProcessUntilPodIsKnown(t *testing.T) {
+   exclude_instrument:
+   - k8s_namespace: kube-system
+ `), &pipeConfig))
+-	swi.Add(criteriaMatcherProvider(&pipeConfig, connectQueue, outputQueue, FindingCriteria(&pipeConfig), nil))
++	swi.Add(criteriaMatcherProvider(&pipeConfig, connectQueue, outputQueue, FindingCriteria(&pipeConfig), nil, nil))
+ 
+ 	nodesRunner, err := swi.Instance(t.Context())
+ 	require.NoError(t, err)
 diff --git a/pkg/ebpf/common/denied_pids.go b/pkg/ebpf/common/denied_pids.go
 new file mode 100644
-index 000000000..03e25c633
+index 0000000000000000000000000000000000000000..03e25c633ecc15b38c1b66cf7ec9c47ce6e079fb
 --- /dev/null
 +++ b/pkg/ebpf/common/denied_pids.go
 @@ -0,0 +1,224 @@
