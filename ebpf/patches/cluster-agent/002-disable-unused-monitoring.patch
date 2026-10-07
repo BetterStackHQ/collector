@@ -211,7 +211,7 @@ diff --git a/metrics/postgres/collector.go b/metrics/postgres/collector.go
 index 28b10e7..7c6a381 100644
 --- a/metrics/postgres/collector.go
 +++ b/metrics/postgres/collector.go
-@@ -248,21 +248,6 @@ func (c *Collector) snapshot() {
+@@ -255,21 +255,6 @@ func (c *Collector) snapshot() {
  		c.logger.Warning(err)
  	}
  
@@ -225,7 +225,7 @@ index 28b10e7..7c6a381 100644
 -		c.logger.Warning(err)
 -	}
 -
--	if err = c.getWraparoundStats(ctx, version); err != nil {
+-	if err = c.getWraparoundStats(ctx); err != nil {
 -		c.scrapeErrors[err.Error()] = true
 -		c.logger.Warning(err)
 -	}
