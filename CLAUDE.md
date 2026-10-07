@@ -27,7 +27,7 @@ collector/
   versions/0-default/       # Default Vector config + empty databases.json
   kubernetes-discovery/0-default/
 ebpf/
-  Dockerfile                # Multi-stage: OBI 0.14.0 + Node Agent 1.30.0 + eBPF Agent 0.1.8 + exporters + Debian 13.5-slim
+  Dockerfile                # Multi-stage: OBI 0.14.0 + Node Agent 1.30.0 + eBPF Agent 0.1.9 + exporters + Debian 13.5-slim
   bootstrap_supervisord.conf
   run_supervisord.sh
 swarm/
