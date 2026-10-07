@@ -1,0 +1,24 @@
+diff --git a/metrics/postgres/collector.go b/metrics/postgres/collector.go
+--- a/metrics/postgres/collector.go
++++ b/metrics/postgres/collector.go
+@@ -559,11 +559,6 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
+ 		}
+ 	}
+ 
+-	ch <- counter(dCheckpointsScheduled, c.cpTimed, "timed")
+-	ch <- counter(dCheckpointsScheduled, c.cpRequested, "requested")
+-	ch <- counter(dCheckpoints, c.cpDone)
+-	ch <- counter(dRestartpoints, c.cpRestartsDone)
+-	ch <- counter(dBuffersWritten, c.cpBuffers, "checkpointer")
+ 	if c.cpWalBytes.Valid {
+ 		ch <- gauge(dWalSinceLastCheckpoint, c.cpWalBytes.V)
+ 	}
+@@ -575,8 +570,6 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
+ 			ch <- gauge(dReplicationSlotRetained, s.retained.V, s.name, strconv.FormatBool(s.active), s.walStatus)
+ 		}
+ 	}
+-	ch <- counter(dWalArchivedSegments, c.archArchived)
+-	ch <- counter(dWalArchiveFailures, c.archFailed)
+ 	if w := c.wraparound; w != nil {
+ 		for db, v := range w.xidAge {
+ 			ch <- gauge(dXidAge, v, db)
