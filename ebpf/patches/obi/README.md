@@ -78,6 +78,38 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   frames) were unprotected. The confirmed-HTTP/2 chain is untouched, it is
   already default-deny.
 
+  `Upgrade: h2c` is the exception and does not park. h2c is HTTP/2, not a
+  tunnel, and the request asking for it is still plain HTTP/1.1, so it is
+  injected into. Parking it only cost propagation, and that hit Java's
+  `HttpClient` hardest: with its default version it asks for h2c on every
+  cleartext request, servers refuse, and the keep-alive connection stayed
+  HTTP/1 with no traceparent on any request. Whether the server accepted is
+  still unknowable from egress, and after a 101 the injector's HTTP/2
+  detection can miss a preface split across sends while a DATA payload opens
+  with a complete request line. So the request moves the socket to an h2c gate
+  state instead, in which only a request that itself asks for h2c is mutated.
+  Everything else passes untouched, the HTTP/2 chain included, and drops any
+  TCP option an earlier h2c request left pending on the socket (parking does
+  the same). So an accepted h2c connection keeps the no-propagation it had when
+  the request parked it, and clients that ask once and carry on in HTTP/1.1
+  after a refusal lose propagation on the later requests. The first Upgrade
+  field must be exactly `h2c` followed by CRLF: a list such as
+  `h2c, websocket`, or a field cut off at the end of the copied window, parks.
+  A later Upgrade field is not read, since scanning on blew the verifier's 1M
+  limit; a request offering `h2c` and then a tunnel in a second field lands in
+  the h2c state, where tunnel bytes stay untouched unless one message is itself
+  a complete HTTP/1 request asking for h2c. The egress-integrity
+  `declined-h2c`, `accepted-h2c`, `accepted-h2c-split` and
+  `h2c-and-tunnel-upgrade` scenarios cover these.
+
+  Parking stops injection, not observation. A parked socket, or one that left
+  HTTP/1 through a 101, still gets the read-only `msg_buffers` fill before the
+  program returns: once a socket is in the sockhash the `tcp_sendmsg` kprobe
+  cannot read the payload itself and the generic tracer parses that copy
+  instead. Returning before the fill dropped the client span of every later
+  request on the connection, for example after a refused WebSocket upgrade.
+  The egress-integrity `declined-upgrade` scenario covers this.
+
   The gate's two bounded scans and the dispatch that follows them are three
   separate sk_msg programs (`k_tail_http1_request_line`,
   `k_tail_http1_upgrade`, `k_tail_http1_dispatch`). That is not decoration: the

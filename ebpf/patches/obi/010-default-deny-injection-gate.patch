@@ -1,9 +1,9 @@
 diff --git a/bpf/tpinjector/maps/sk_inject_gate.h b/bpf/tpinjector/maps/sk_inject_gate.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..da2ac5fde7e6768162cbb94c1ae23b79f9d4629f
+index 0000000000000000000000000000000000000000..0b634fbbe420c7cd9580e386d853768eba7d56b4
 --- /dev/null
 +++ b/bpf/tpinjector/maps/sk_inject_gate.h
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,22 @@
 +// Copyright The OpenTelemetry Authors
 +// SPDX-License-Identifier: Apache-2.0
 +
@@ -12,7 +12,8 @@ index 0000000000000000000000000000000000000000..da2ac5fde7e6768162cbb94c1ae23b79
 +#include <bpfcore/vmlinux.h>
 +#include <bpfcore/bpf_helpers.h>
 +
-+// Per-socket verdict of the default-deny injection gate: 0 unknown, 1 parked.
++// Per-socket verdict of the default-deny injection gate: 0 unknown, 1 parked,
++// 2 asked for h2c (see k_inject_gate_* in tpinjector.c).
 +//
 +// Deliberately separate storage from sk_h2_conn_flag: that byte drives the
 +// HTTP/2 preface state machine and every dispatch site reads it as an HTTP/2
@@ -26,7 +27,7 @@ index 0000000000000000000000000000000000000000..da2ac5fde7e6768162cbb94c1ae23b79
 +    __type(value, u8);
 +} sk_inject_gate SEC(".maps");
 diff --git a/bpf/tpinjector/tpinjector.c b/bpf/tpinjector/tpinjector.c
-index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3ddcb14e598 100644
+index 2e87b3e6cdc66c2e857ad02a704b676c71657698..f816d2ef3573bf048aa4affaefa9b145d53b23c7 100644
 --- a/bpf/tpinjector/tpinjector.c
 +++ b/bpf/tpinjector/tpinjector.c
 @@ -50,6 +50,7 @@
@@ -37,13 +38,14 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
  #include <tpinjector/maps/sk_tp_info_pid_map.h>
  
  char __license[] SEC("license") = "Dual MIT/GPL";
-@@ -60,24 +61,45 @@ char __license[] SEC("license") = "Dual MIT/GPL";
+@@ -60,24 +61,47 @@ char __license[] SEC("license") = "Dual MIT/GPL";
  //
  //   obi_packet_extender (sk_msg entry)
  //   │
++//   ├── pull_data + fill_msg_buffers   │  Read-only copy the generic
++//   │                                  │  tracer parses, for every socket
 +//   ├── socket parked → SK_PASS        │  Default-deny: this stream left
 +//   │                                  │  HTTP/1, never touch it again
-+//   ├── pull_data + fill_msg_buffers   │  Committed to processing
 +//   │                                  │
 +//   └── H2 socket / stale buffer?      │  Gate cannot judge those bytes
 +//         ├── yes → http1_dispatch     │
@@ -57,6 +59,7 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
 +//   obi_packet_extender_http1_upgrade
 +//   │                                     Bounded case-insensitive search
 +//   ├── "\r\nupgrade:" → park, SK_PASS    for a request Upgrade field
++//   │     (unless the value is "h2c")
 +//   └── else → http1_dispatch
 +//
 +//   Each scan gets its own program: a tail call ends the program, so the
@@ -92,7 +95,7 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
  //   │                                 │     write_msg_traceparent
  //   │                                 │
  //   └── fall through ─────────────────┴─▶ wrap_http2_traceparent
-@@ -139,6 +161,9 @@ enum {
+@@ -139,6 +163,9 @@ enum {
      k_tail_validate_h2_tp,
      k_tail_detect_h2,
      k_tail_sniff_h2,
@@ -102,7 +105,7 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
  };
  
  int obi_packet_extender_write_msg_tp(struct sk_msg_md *msg);
-@@ -150,10 +175,13 @@ int obi_packet_extender_find_existing_h2_tp(struct sk_msg_md *msg);
+@@ -150,10 +177,13 @@ int obi_packet_extender_find_existing_h2_tp(struct sk_msg_md *msg);
  int obi_packet_extender_validate_h2_tp(struct sk_msg_md *msg);
  int obi_packet_extender_detect_h2(struct sk_msg_md *msg);
  int obi_packet_extender_sniff_h2(struct sk_msg_md *msg);
@@ -117,7 +120,7 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
      __uint(key_size, sizeof(u32));
      __array(values, int(void *));
  } extender_jump_table SEC(".maps") = {
-@@ -168,6 +196,9 @@ struct {
+@@ -168,6 +198,9 @@ struct {
              [k_tail_validate_h2_tp] = (void *)&obi_packet_extender_validate_h2_tp,
              [k_tail_detect_h2] = (void *)&obi_packet_extender_detect_h2,
              [k_tail_sniff_h2] = (void *)&obi_packet_extender_sniff_h2,
@@ -127,7 +130,7 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
          },
  };
  
-@@ -183,6 +214,7 @@ typedef struct tailcall_ctx {
+@@ -183,6 +216,7 @@ typedef struct tailcall_ctx {
      u32 h2_hpack_len;             // HPACK length (frame payload minus prefix and trailing pad)
      u32 h2_scan_pos;              // resume offset for detect_h2 across tail calls
      u32 h2_tp_candidate_pos;      // HPACK scan start or found candidate offset (>= max = none)
@@ -135,17 +138,18 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
      u8 niter;                     // HTTP/1 find-existing scan iteration counter
      u8 h2_frames;                 // H2 frames already injected this packet (capped)
      u8 h2_tp_retries;             // malformed HPACK traceparent candidates retried this packet
-@@ -190,7 +222,9 @@ typedef struct tailcall_ctx {
+@@ -190,7 +224,10 @@ typedef struct tailcall_ctx {
      bool go_grpc_conn;            // Go gRPC egress: use uprobe-stored tps, never create
      bool tp_present;              // frame already carries a traceparent we cannot adopt
      bool scan_exhausted;          // retry budget ran out before the block was walked
 +    bool http1_req;               // gate verdict: this message is an injectable HTTP/1 request
++    bool http1_h2c;               // gate verdict: this request asks for h2c
      u8 opener;                    // first HPACK field byte of the frame being considered
-+    u8 _pad[3];                   // -Wpadded is an error here, keep the tail explicit
++    u8 _pad[2];                   // -Wpadded is an error here, keep the tail explicit
  } tailcall_ctx;
  
  SCRATCH_MEM(tailcall_ctx);
-@@ -349,6 +383,226 @@ static __always_inline bool http1_upgrade_completed(struct sk_msg_md *msg) {
+@@ -349,6 +386,266 @@ static __always_inline bool http1_upgrade_completed(struct sk_msg_md *msg) {
      return is_http1_101_response(msg->data, msg->data_end);
  }
  
@@ -155,13 +159,16 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
 +//
 +// Per-socket verdict recorded in sk_inject_gate. Parking is permanent: it
 +// states that the bytes on this socket are no longer HTTP/1, and nothing on a
-+// TCP stream ever takes that back.
++// TCP stream ever takes that back. The h2c state is set by a request that asked
++// for h2c: whether the server accepted is unknowable from egress, so from then
++// on only a message that itself asks for h2c is certainly still HTTP/1.1.
 +enum {
 +    k_inject_gate_unknown = 0, // nothing decided yet
 +    k_inject_gate_parked = 1,  // never mutate another byte on this socket
++    k_inject_gate_h2c = 2,     // mutate only further h2c upgrade requests
 +};
 +
-+static __always_inline bool sock_is_parked(struct sk_msg_md *msg) {
++static __always_inline u8 sock_gate(struct sk_msg_md *msg) {
 +    struct bpf_sock *sk = msg->sk;
 +
 +    // Without a socket there is nowhere to record a verdict, so a park
@@ -171,26 +178,26 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
 +    // schedule_write_tcp_option and set_h2_sock_state all give up on !sk
 +    // anyway, so nothing that could inject is lost.
 +    if (!sk) {
-+        return true;
++        return k_inject_gate_parked;
 +    }
 +
 +    const u8 *gate = bpf_sk_storage_get(&sk_inject_gate, sk, NULL, 0);
 +
-+    return gate && *gate == k_inject_gate_parked;
++    return gate ? *gate : k_inject_gate_unknown;
 +}
 +
-+static __always_inline void park_socket(struct sk_msg_md *msg) {
++static __always_inline void set_sock_gate(struct sk_msg_md *msg, u8 verdict) {
 +    struct bpf_sock *sk = msg->sk;
 +
 +    if (!sk) {
 +        return;
 +    }
 +
-+    u8 init = k_inject_gate_parked;
-+    u8 *gate = bpf_sk_storage_get(&sk_inject_gate, sk, &init, BPF_SK_STORAGE_GET_F_CREATE);
++    u8 *gate = bpf_sk_storage_get(&sk_inject_gate, sk, &verdict, BPF_SK_STORAGE_GET_F_CREATE);
 +
-+    if (gate) {
-+        *gate = k_inject_gate_parked;
++    // Parked is terminal; nothing may lift a socket out of it.
++    if (gate && *gate != k_inject_gate_parked) {
++        *gate = verdict;
 +    }
 +}
 +
@@ -209,6 +216,9 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
 +    k_http1_version_tail = 9,
 +    // "\r\nupgrade:"
 +    k_http1_upgrade_span = 10,
++    // "\r\nupgrade:h2c\r\n" and "\r\nupgrade: h2c\r\n", the two h2c fields.
++    k_http1_upgrade_h2c_bare_span = 15,
++    k_http1_upgrade_h2c_spaced_span = 16,
 +};
 +
 +_Static_assert((k_http1_gate_scan_max & (k_http1_gate_scan_max - 1)) == 0,
@@ -314,6 +324,13 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
 +    return mismatch == 0;
 +}
 +
++// http1_request_upgrade verdicts.
++enum {
++    k_http1_no_upgrade = 0,
++    k_http1_upgrade_h2c = 1,
++    k_http1_upgrade_tunnel = 2,
++};
++
 +// Case-insensitive search for an Upgrade request header. The scan starts at
 +// offset 0: http1_request_line_ok has already established that the first CRLF
 +// in the message terminates the request line, so the first field this examines
@@ -332,10 +349,23 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
 +// the cost of guessing wrong the other way is a traceparent spliced into
 +// tunnelled bytes, shifting their framing for good.
 +//
++// h2c is the one upgrade that is not a tunnel: after a 101 the client sends the
++// HTTP/2 connection preface and HTTP/2 frames, never HTTP/1. So an h2c request
++// is not parked and is injected like any other: it is still a plain HTTP/1.1
++// request, and refusing it is common. Java's HttpClient asks for h2c on every
++// cleartext request by default, and a server that declines keeps answering in
++// HTTP/1.1 on the same connection. The value has to be exactly "h2c": a list
++// such as "h2c, websocket", or a value cut off at the end of the window, parks.
++// Only the first Upgrade field is read; scanning on for a second one blew the
++// verifier's 1M limit. A request carrying "h2c" and then another protocol in a
++// separate field leaves the socket in the h2c gate state rather than parked, so
++// tunnel bytes stay untouched unless one message is itself a complete HTTP/1
++// request asking for h2c.
++//
 +// Capped like the rest of the gate. An Upgrade field pushed past the cap by a
 +// large cookie leaves the socket unparked, but then every later message still
 +// has to satisfy http1_request_line_ok before anything is mutated.
-+static __always_inline bool http1_request_upgrades(const unsigned char *buf, u32 len) {
++static __always_inline u8 http1_request_upgrade(const unsigned char *buf, u32 len) {
 +    if (len > k_http1_gate_scan_max) {
 +        len = k_http1_gate_scan_max;
 +    }
@@ -358,21 +388,51 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
 +                         (u32)((p[8] | 0x20) ^ 'e') | (u32)(p[9] ^ ':');
 +
 +        if ((crlf | name) == 0) {
-+            return true;
++            // The field must end inside the copied window: past it lie stale
++            // bytes, and a value cut off there is not known to be h2c.
++            if (i + k_http1_upgrade_h2c_bare_span > len) {
++                return k_http1_upgrade_tunnel;
++            }
++            // "h2c" CRLF, with or without the single SP every client sends.
++            const u32 bare = (u32)((p[10] | 0x20) ^ 'h') | (u32)(p[11] ^ '2') |
++                             (u32)((p[12] | 0x20) ^ 'c') | (u32)(p[13] ^ '\r') |
++                             (u32)(p[14] ^ '\n');
++            const u32 spaced = i + k_http1_upgrade_h2c_spaced_span > len
++                                   ? 1
++                                   : (u32)(p[10] ^ ' ') | (u32)((p[11] | 0x20) ^ 'h') |
++                                         (u32)(p[12] ^ '2') | (u32)((p[13] | 0x20) ^ 'c') |
++                                         (u32)(p[14] ^ '\r') | (u32)(p[15] ^ '\n');
++            return (spaced == 0 || bare == 0) ? k_http1_upgrade_h2c : k_http1_upgrade_tunnel;
 +        }
 +        // Empty line: the header block is over and body bytes are not headers.
 +        if ((crlf | (u32)(p[2] ^ '\r') | (u32)(p[3] ^ '\n')) == 0) {
-+            return false;
++            return k_http1_no_upgrade;
 +        }
 +    }
 +
-+    return false;
++    return k_http1_no_upgrade;
 +}
 +
  #ifndef ENOMSG
  #define ENOMSG 42
  #endif
-@@ -1193,41 +1447,48 @@ int obi_packet_extender_sniff_h2(struct sk_msg_md *msg) {
+@@ -1063,6 +1360,15 @@ static __always_inline void schedule_write_tcp_option(struct sk_msg_md *msg, tp_
+     tp_p->written = 1;
+ }
+ 
++// The sockops writer emits whatever schedule_write_tcp_option left on the socket
++// whenever option space next allows, which can be a later message's packet when
++// the reservation failed. A message the gate refuses must not leave one behind.
++static __always_inline void drop_pending_tcp_option(struct sk_msg_md *msg) {
++    if (msg->sk) {
++        bpf_sk_storage_delete(&sk_tp_info_pid_map, msg->sk);
++    }
++}
++
+ static __always_inline void write_http_traceparent(struct sk_msg_md *msg, tp_info_pid_t *tp_pid) {
+     // used for the upcoming tailcall
+     tp_info_pid_t *tp_p = (tp_info_pid_t *)tp_info_mem();
+@@ -1193,41 +1499,48 @@ int obi_packet_extender_sniff_h2(struct sk_msg_md *msg) {
  }
  
  // HTTP/1 only. Caller must skip this for H2 sockets — connection-scoped tp_pid
@@ -439,25 +499,41 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
  }
  
  // Sock_msg program which detects packets where it should add space for
-@@ -1240,6 +1501,15 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1240,6 +1553,13 @@ int obi_packet_extender(struct sk_msg_md *msg) {
          return SK_PASS;
      }
  
-+    // Default-deny entry gate. A parked socket is never mutated again, and the
-+    // check sits ahead of everything: ahead of get_tp_info_pid /
-+    // handle_existing_tp_pid so a leftover trace context cannot resurrect
-+    // injection, and ahead of the protocol_detector route so no byte of a
-+    // parked stream is even classified.
-+    if (sock_is_parked(msg)) {
-+        return SK_PASS;
-+    }
++    // Default-deny entry gate. A parked socket is never mutated again: it gets
++    // only the read-only buffer fill below and returns ahead of get_tp_info_pid
++    // / handle_existing_tp_pid, so a leftover trace context cannot resurrect
++    // injection, and ahead of the protocol_detector route, so the injector
++    // never classifies a byte of a parked stream.
++    bool observe_only = sock_gate(msg) == k_inject_gate_parked;
 +
      // A connection that legally left HTTP/1 via 101 Switching Protocols
      // (kubectl port-forward SPDY/3.1, WebSockets) carries an opaque tunnel
      // from then on: injecting into tunneled bytes that merely resemble an
-@@ -1279,16 +1549,143 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1251,12 +1571,10 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+     const u8 sock_state = h2_sock_state(msg);
+ 
+     if (sock_is_never_inject(sock_state)) {
+-        return SK_PASS;
+-    }
+-
+-    if (sock_state == k_h2_sock_none && http1_upgrade_completed(msg)) {
++        observe_only = true;
++    } else if (!observe_only && sock_state == k_h2_sock_none && http1_upgrade_completed(msg)) {
+         set_h2_sock_state(msg, k_h2_sock_upgraded);
+-        return SK_PASS;
++        observe_only = true;
+     }
+ 
+     tailcall_ctx *t_ctx = tailcall_ctx_mem();
+@@ -1278,17 +1596,179 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+     t_ctx->h2_frames = 0;
      t_ctx->h2_tp_retries = 0;
      t_ctx->go_grpc_conn = false;
++    t_ctx->http1_h2c = false;
  
 -    // skip H2 here — it uses HPACK for per-stream traceparents
 -    tp_info_pid_t *tp_pid = get_tp_info_pid(&e_key);
@@ -480,6 +556,17 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
 +    bpf_clamp_umax(window, k_msg_buffer_size_max);
 +    t_ctx->http1_buf_size = window;
 +
++    // Never injecting into a socket is not the same as never looking at it.
++    // Under sk_msg the tcp_sendmsg kprobe cannot read the payload; the generic
++    // tracer parses the copy fill_msg_buffers just made. Returning before the
++    // fill would blind it for the rest of the connection: a client whose h2c
++    // upgrade the server declined (Java's HttpClient asks on every cleartext
++    // request) stays on HTTP/1 and would emit no client span for any request
++    // after the first.
++    if (observe_only) {
+         return SK_PASS;
+     }
+ 
 +    // Default-deny. Every HTTP/1 mutation downstream — the TCP option scheduled
 +    // by handle_existing_tp_pid, the Traceparent splice, the trace context
 +    // created for either — requires that this very message parses as a complete
@@ -491,9 +578,9 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
 +        t_ctx->http1_req = false;
 +        bpf_tail_call_static(msg, &extender_jump_table, k_tail_http1_dispatch);
 +        bpf_d_printk("tailcall failed [%s]", __FUNCTION__);
-         return SK_PASS;
-     }
- 
++        return SK_PASS;
++    }
++
 +    bpf_tail_call_static(msg, &extender_jump_table, k_tail_http1_request_line);
 +    bpf_d_printk("tailcall failed [%s]", __FUNCTION__);
 +
@@ -539,9 +626,11 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
 +}
 +
 +// k_tail_http1_upgrade — the message is a request; park the socket if it asks
-+// to leave HTTP/1 rather than inject into it. The upgrade request is the last
-+// HTTP/1 message on this socket, and its own bytes are already part of a
-+// handshake the peer may be hashing, so it is passed through as-is too.
++// to leave HTTP/1 for a tunnel rather than inject into it. Such an upgrade
++// request is the last HTTP/1 message on this socket, and its own bytes are
++// already part of a handshake the peer may be hashing, so it is passed through
++// as-is too. An h2c request goes on to dispatch like any other request, which
++// applies the h2c gate state.
 +SEC("sk_msg")
 +int obi_packet_extender_http1_upgrade(struct sk_msg_md *msg) {
 +    tailcall_ctx *t_ctx = tailcall_ctx_mem();
@@ -551,12 +640,16 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
 +    }
 +
 +    const unsigned char *buf = bpf_map_lookup_elem(&msg_buffer_mem, &(u32){0});
++    const u8 upgrade = buf ? http1_request_upgrade(buf, t_ctx->http1_buf_size) : k_http1_no_upgrade;
 +
-+    if (buf && http1_request_upgrades(buf, t_ctx->http1_buf_size)) {
-+        park_socket(msg);
++    if (upgrade == k_http1_upgrade_tunnel) {
++        set_sock_gate(msg, k_inject_gate_parked);
++        drop_pending_tcp_option(msg);
 +        clear_tp_info_pid(&t_ctx->e_key);
 +        return SK_PASS;
 +    }
++
++    t_ctx->http1_h2c = upgrade == k_http1_upgrade_h2c;
 +
 +    bpf_tail_call_static(msg, &extender_jump_table, k_tail_http1_dispatch);
 +    bpf_d_printk("tailcall failed [%s]", __FUNCTION__);
@@ -583,6 +676,23 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
 +    const bool http1_req = t_ctx->http1_req;
 +    const bool h2_sock = is_h2_socket(msg);
 +
++    // A socket that asked for h2c may have been answered with a 101 and carry
++    // HTTP/2 now, which the H2 chain can fail to recognise (a preface split
++    // across sends) while a DATA payload written on its own opens with a
++    // complete request line. Only a request that asks for h2c again is HTTP/1.1
++    // for certain; anything else stays untouched, which costs propagation for
++    // clients that ask once and carry on in HTTP/1.1 after a refusal. The H2
++    // chain is shut out too: an Upgrade field after the first is never read
++    // and may have named a tunnel, so an accepted h2c connection keeps the
++    // no-propagation it had when the request parked it.
++    if (t_ctx->http1_h2c) {
++        set_sock_gate(msg, k_inject_gate_h2c);
++    } else if (sock_gate(msg) == k_inject_gate_h2c) {
++        drop_pending_tcp_option(msg);
++        clear_tp_info_pid(&e_key);
++        return SK_PASS;
++    }
++
 +    // skip H2 here — it uses HPACK for per-stream traceparents
 +    tp_info_pid_t *tp_pid = get_tp_info_pid(&e_key);
 +    if (tp_pid && !h2_sock) {
@@ -605,7 +715,7 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
          // per-stream decision in the h2 chain: inject only streams the uprobe left written=0
          t_ctx->go_grpc_conn = true;
          bpf_tail_call_static(msg, &extender_jump_table, k_tail_detect_h2);
-@@ -1299,17 +1696,12 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1299,17 +1779,12 @@ int obi_packet_extender(struct sk_msg_md *msg) {
          return SK_PASS;
      }
  
@@ -625,7 +735,7 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
          return SK_PASS;
      }
  
-@@ -1317,7 +1709,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1317,7 +1792,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
      bpf_dbg_printk("MSG TO=%llx:%d", conn.d_ip[3], conn.d_port);
      bpf_dbg_printk("MSG SIZE=%u", msg->size);
  
@@ -634,7 +744,7 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..9429ff5cf3b36035100c68c2daeaa3dd
      if (is_http) {
          bpf_dbg_printk("len=%d, s_port=%d", msg->size, msg->local_port);
          init_tp_ctx_parent_tp(t_ctx);
-@@ -1326,6 +1718,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1326,6 +1801,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
      }
  
      wrap_http2_traceparent(msg, &t_ctx->p_conn);

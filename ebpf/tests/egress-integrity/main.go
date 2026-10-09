@@ -489,32 +489,7 @@ func positiveControl(selfcheck bool) error {
 		requests = append(requests, []byte(head+strings.Repeat("x", size-len(head)-len(tail))+tail))
 	}
 
-	expected := 0
-	for _, request := range requests {
-		expected += len(request)
-	}
-
-	ex, err := runExchange("positive-control", expected, func(c *recordingConn) (any, error) {
-		return receiveRequests(c, len(requests))
-	}, func(c *recordingConn) error {
-		reader := bufio.NewReader(c)
-		for _, request := range requests {
-			if err := writeAll(c, request); err != nil {
-				return err
-			}
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				return err
-			}
-			if line != "HTTP/1.1 204 No Content\r\n" {
-				return fmt.Errorf("bad server status line %q", line)
-			}
-			if err := readHeader(reader); err != nil {
-				return err
-			}
-		}
-		return c.CloseWrite()
-	})
+	ex, err := keepAliveExchange("positive-control", requests)
 	if err != nil {
 		return err
 	}
@@ -543,6 +518,196 @@ func positiveControl(selfcheck bool) error {
 		}
 	}
 	return nil
+}
+
+// keepAliveExchange sends each request on one keep-alive connection, waiting for
+// the server's 204 before the next, and collects what the server received.
+func keepAliveExchange(name string, requests [][]byte) (exchange, error) {
+	expected := 0
+	for _, request := range requests {
+		expected += len(request)
+	}
+
+	return runExchange(name, expected, func(c *recordingConn) (any, error) {
+		return receiveRequests(c, len(requests))
+	}, func(c *recordingConn) error {
+		reader := bufio.NewReader(c)
+		for _, request := range requests {
+			if err := writeAll(c, request); err != nil {
+				return err
+			}
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return err
+			}
+			if line != "HTTP/1.1 204 No Content\r\n" {
+				return fmt.Errorf("bad server status line %q", line)
+			}
+			if err := readHeader(reader); err != nil {
+				return err
+			}
+		}
+		return c.CloseWrite()
+	})
+}
+
+// declinedUpgradeRequests is how many requests follow the refused upgrade;
+// run-under-obi.sh expects a client span for each in OBI's trace printer output.
+const declinedUpgradeRequests = 3
+
+// A client that asks to upgrade a keep-alive connection and a server that
+// refuses by answering in HTTP/1.1, so the client goes on sending plain
+// requests on it. The upgrade request parks the socket, so nothing may be
+// spliced into it or anything after it, but parked must not mean unobserved:
+// the generic tracer still has to see the requests that follow.
+func declinedUpgrade() error {
+	requests := [][]byte{
+		[]byte("GET /declined-upgrade HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"),
+	}
+	for i := 1; i <= declinedUpgradeRequests; i++ {
+		requests = append(requests, fmt.Appendf(nil, "GET /after-declined-upgrade-%d HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n", i))
+	}
+
+	ex, err := keepAliveExchange("declined-upgrade", requests)
+	if err != nil {
+		return err
+	}
+	return byteDiff(ex.sent, ex.received)
+}
+
+// h2cUpgradeRequest is what Java's HttpClient sends, at its default version, for
+// every request on a cleartext connection.
+func h2cUpgradeRequest(path string) []byte {
+	return fmt.Appendf(nil, "GET %s HTTP/1.1\r\nConnection: Upgrade, HTTP2-Settings\r\nHost: x\r\nHTTP2-Settings: AAEAAEAAAAIAAAAAAAMAAAAAAAQBAAAAAAUAAEAAAAYABgAA\r\nUpgrade: h2c\r\n\r\n", path)
+}
+
+// A client that asks for h2c on every request of a keep-alive connection and a
+// server that refuses each time, Java's HttpClient against most servers. h2c is
+// not a tunnel, so each of those requests is injected into. The last request
+// does not ask: whether the server accepted an earlier h2c upgrade is unknowable
+// from egress, so it must pass through untouched.
+func declinedH2C(selfcheck bool) error {
+	var requests [][]byte
+	for i := 1; i <= 3; i++ {
+		requests = append(requests, h2cUpgradeRequest(fmt.Sprintf("/declined-h2c-%d", i)))
+	}
+	h2cRequests := len(requests)
+	requests = append(requests, []byte("GET /after-declined-h2c HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n"))
+
+	ex, err := keepAliveExchange("declined-h2c", requests)
+	if err != nil {
+		return err
+	}
+	result, ok := ex.serverValue.(positiveResult)
+	if !ok {
+		return errors.New("missing declined-h2c server result")
+	}
+	clean, traceparents, err := stripTraceparents(ex.received)
+	if err != nil {
+		return err
+	}
+	if err := byteDiff(ex.sent, clean); err != nil {
+		return fmt.Errorf("request mutation after removing Traceparent headers: %w", err)
+	}
+	if !bytes.HasSuffix(ex.received, requests[h2cRequests]) {
+		return errors.New("Traceparent injected into the request that did not ask for h2c")
+	}
+	want := h2cRequests
+	if selfcheck {
+		want = 0
+	}
+	if traceparents != want || result.traceparents != want {
+		return fmt.Errorf("Traceparent count: raw=%d parsed=%d, want=%d", traceparents, result.traceparents, want)
+	}
+	return nil
+}
+
+func h2FrameHeader(length int, frameType, flags byte, stream uint32) []byte {
+	header := make([]byte, 9)
+	header[0], header[1], header[2] = byte(length>>16), byte(length>>8), byte(length)
+	header[3], header[4] = frameType, flags
+	binary.BigEndian.PutUint32(header[5:], stream)
+	return header
+}
+
+// upgradeExchange sends an upgrade request, waits for the server's 101, then
+// sends each of writes as its own message, and checks that nothing but a
+// traceparent inside the upgrade request itself was changed.
+func upgradeExchange(name string, request []byte, response string, writes [][]byte) error {
+	expected := len(request)
+	for _, w := range writes {
+		expected += len(w)
+	}
+
+	ex, err := runExchange(name, expected, func(c *recordingConn) (any, error) {
+		reader := bufio.NewReader(c)
+		if err := readHeader(reader); err != nil {
+			return nil, err
+		}
+		if err := writeAll(c, []byte(response)); err != nil {
+			return nil, err
+		}
+		_, err := io.Copy(io.Discard, reader)
+		return nil, err
+	}, func(c *recordingConn) error {
+		if err := writeAll(c, request); err != nil {
+			return err
+		}
+		if err := readHeader(bufio.NewReader(c)); err != nil {
+			return err
+		}
+		for _, w := range writes {
+			if err := writeAll(c, w); err != nil {
+				return err
+			}
+		}
+		return c.CloseWrite()
+	})
+	if err != nil {
+		return err
+	}
+	allowed := map[int]bool{}
+	for at := range len(request) + 1 {
+		allowed[at] = true
+	}
+	return compareWithAllowedTraceparents(ex.sent, ex.received, allowed)
+}
+
+// A client whose h2c upgrade is accepted, so the connection carries HTTP/2 from
+// the 101 on. Only the upgrade request may gain a traceparent: nothing after it
+// on the socket may be touched, whether the injector's HTTP/2 detection
+// confirms the connection (split=false) or misses it because the preface and
+// the HEADERS frame are split across sends (split=true). Either way the DATA
+// payload, written on its own, opens with a complete HTTP/1 request line.
+func acceptedH2C(split bool) error {
+	preface := []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+	// :method GET, :scheme http, :path /, :authority x, user-agent test-client:
+	// longer than the injector's 16-byte HPACK opener window, so an unguarded
+	// HTTP/2 chain would inject into it.
+	hpack := append([]byte{0x82, 0x86, 0x84, 0x41, 0x01, 'x', 0x0f, 0x2b, 0x0b}, "test-client"...)
+	headers := append(h2FrameHeader(len(hpack), 0x1, 0x5, 3), hpack...) // HEADERS, END_STREAM|END_HEADERS
+	settings := h2FrameHeader(0, 0x4, 0, 0)
+	payload := []byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+	writes := [][]byte{preface, settings, headers}
+	name := "accepted-h2c"
+	if split {
+		writes = [][]byte{preface[:2], preface[2:], settings, headers[:9], headers[9:]}
+		name = "accepted-h2c-split"
+	}
+	writes = append(writes, h2FrameHeader(len(payload), 0x0, 0, 5), payload) // DATA
+	return upgradeExchange(name, h2cUpgradeRequest("/"+name),
+		"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n", writes)
+}
+
+// A request that offers h2c and, in a second Upgrade field, a tunnel protocol,
+// which the server picks. Only the first field is read, so the socket lands in
+// the h2c gate state rather than parked: tunnel bytes that form a complete
+// HTTP/1 request must still pass through untouched.
+func h2cAndTunnelUpgrade() error {
+	return upgradeExchange("h2c-and-tunnel-upgrade",
+		[]byte("GET /both HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: h2c\r\nUpgrade: DERP\r\n\r\n"),
+		"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: DERP\r\n\r\n",
+		[][]byte{{0xde, 0xad, 0xbe, 0xef}, []byte("GET /inside-tunnel HTTP/1.1\r\nHost: x\r\n\r\n")})
 }
 
 func waitForStartFile(path string) error {
@@ -615,6 +780,11 @@ func main() {
 		run  func() error
 	}{
 		{"upgrade-then-binary", upgradeThenBinary},
+		{"declined-upgrade", declinedUpgrade},
+		{"declined-h2c", func() error { return declinedH2C(*selfcheck) }},
+		{"accepted-h2c", func() error { return acceptedH2C(false) }},
+		{"accepted-h2c-split", func() error { return acceptedH2C(true) }},
+		{"h2c-and-tunnel-upgrade", h2cAndTunnelUpgrade},
 		{"raw-binary", rawBinary},
 		{"positive-control", func() error { return positiveControl(*selfcheck) }},
 		{"go-http-client", func() error { return goHTTPClient(*selfcheck) }},
