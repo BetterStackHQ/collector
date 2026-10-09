@@ -78,6 +78,16 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   frames) were unprotected. The confirmed-HTTP/2 chain is untouched, it is
   already default-deny.
 
+  Parking stops injection, not observation. A parked socket, or one that left
+  HTTP/1 through a 101, still gets the read-only `msg_buffers` fill before the
+  program returns: once a socket is in the sockhash the `tcp_sendmsg` kprobe
+  cannot read the payload itself and the generic tracer parses that copy
+  instead. Returning before the fill dropped the client span of every later
+  request on the connection, which hit Java's `HttpClient` hardest: with its
+  default version it asks for h2c on every cleartext request, the server
+  refuses, and the keep-alive connection stays HTTP/1 but went dark after its
+  first request. The egress-integrity `declined-upgrade` scenario covers this.
+
   The gate's two bounded scans and the dispatch that follows them are three
   separate sk_msg programs (`k_tail_http1_request_line`,
   `k_tail_http1_upgrade`, `k_tail_http1_dispatch`). That is not decoration: the

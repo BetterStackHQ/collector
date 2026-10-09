@@ -134,3 +134,20 @@ esac
 touch "$start_file"
 wait "$payload_pid"
 cat "$payload_log"
+
+# declined-upgrade: a socket parked by an Upgrade request must stay observable,
+# so each request after the refused upgrade needs a client span in the trace
+# printer output. Only the generic tracer parses this raw-syscall traffic.
+if [ "$expected_tracer" = generic ]; then
+  span_pattern='HTTPClient\(subType=[0-9]+\) [0-9]+ GET /after-declined-upgrade-'
+  spans=0
+  for _ in {1..30}; do
+    spans=$(grep -cE "$span_pattern" "$obi_log" || true)
+    [ "$spans" -ge 3 ] && break
+    sleep 1
+  done
+  if [ "$spans" -lt 3 ]; then
+    echo "declined-upgrade: OBI printed $spans of 3 client spans for the requests after the refused upgrade"
+    exit 1
+  fi
+fi

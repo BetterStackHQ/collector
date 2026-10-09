@@ -489,32 +489,7 @@ func positiveControl(selfcheck bool) error {
 		requests = append(requests, []byte(head+strings.Repeat("x", size-len(head)-len(tail))+tail))
 	}
 
-	expected := 0
-	for _, request := range requests {
-		expected += len(request)
-	}
-
-	ex, err := runExchange("positive-control", expected, func(c *recordingConn) (any, error) {
-		return receiveRequests(c, len(requests))
-	}, func(c *recordingConn) error {
-		reader := bufio.NewReader(c)
-		for _, request := range requests {
-			if err := writeAll(c, request); err != nil {
-				return err
-			}
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				return err
-			}
-			if line != "HTTP/1.1 204 No Content\r\n" {
-				return fmt.Errorf("bad server status line %q", line)
-			}
-			if err := readHeader(reader); err != nil {
-				return err
-			}
-		}
-		return c.CloseWrite()
-	})
+	ex, err := keepAliveExchange("positive-control", requests)
 	if err != nil {
 		return err
 	}
@@ -543,6 +518,61 @@ func positiveControl(selfcheck bool) error {
 		}
 	}
 	return nil
+}
+
+// keepAliveExchange sends each request on one keep-alive connection, waiting for
+// the server's 204 before the next, and collects what the server received.
+func keepAliveExchange(name string, requests [][]byte) (exchange, error) {
+	expected := 0
+	for _, request := range requests {
+		expected += len(request)
+	}
+
+	return runExchange(name, expected, func(c *recordingConn) (any, error) {
+		return receiveRequests(c, len(requests))
+	}, func(c *recordingConn) error {
+		reader := bufio.NewReader(c)
+		for _, request := range requests {
+			if err := writeAll(c, request); err != nil {
+				return err
+			}
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return err
+			}
+			if line != "HTTP/1.1 204 No Content\r\n" {
+				return fmt.Errorf("bad server status line %q", line)
+			}
+			if err := readHeader(reader); err != nil {
+				return err
+			}
+		}
+		return c.CloseWrite()
+	})
+}
+
+// declinedUpgradeRequests is how many requests follow the refused upgrade;
+// run-under-obi.sh expects a client span for each in OBI's trace printer output.
+const declinedUpgradeRequests = 3
+
+// A client that asks to upgrade a keep-alive connection and a server that
+// refuses by answering in HTTP/1.1, so the client goes on sending plain
+// requests on it. The upgrade request parks the socket, so nothing may be
+// spliced into it or anything after it, but parked must not mean unobserved:
+// the generic tracer still has to see the requests that follow.
+func declinedUpgrade() error {
+	requests := [][]byte{
+		[]byte("GET /declined-upgrade HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"),
+	}
+	for i := 1; i <= declinedUpgradeRequests; i++ {
+		requests = append(requests, fmt.Appendf(nil, "GET /after-declined-upgrade-%d HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n", i))
+	}
+
+	ex, err := keepAliveExchange("declined-upgrade", requests)
+	if err != nil {
+		return err
+	}
+	return byteDiff(ex.sent, ex.received)
 }
 
 func waitForStartFile(path string) error {
@@ -615,6 +645,7 @@ func main() {
 		run  func() error
 	}{
 		{"upgrade-then-binary", upgradeThenBinary},
+		{"declined-upgrade", declinedUpgrade},
 		{"raw-binary", rawBinary},
 		{"positive-control", func() error { return positiveControl(*selfcheck) }},
 		{"go-http-client", func() error { return goHTTPClient(*selfcheck) }},
