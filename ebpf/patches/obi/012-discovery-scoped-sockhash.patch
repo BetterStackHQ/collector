@@ -70,7 +70,7 @@ index 27a8952c257fa1137d6dc2fdfb09f2ac25771e7d..f9b71ff924ed97ac97ff9a251dfcd145
      bpf_sk_storage_get(
          &socket_cookie, (struct bpf_sock *)skc, (void *)&cookie, BPF_SK_STORAGE_GET_F_CREATE);
 diff --git a/bpf/tpinjector/tpinjector.c b/bpf/tpinjector/tpinjector.c
-index 2fb834dbf2b5d9bb9dac965b836bcafda01e571e..4c8143a192a8bedf0b970cc867329926ac2d5080 100644
+index d4adac598287fc9c9cadf42c9c0e6f0be41d3f5e..f146c1d5754fb9715e6b5e00cafbc88fea62eee8 100644
 --- a/bpf/tpinjector/tpinjector.c
 +++ b/bpf/tpinjector/tpinjector.c
 @@ -40,6 +40,7 @@
@@ -81,7 +81,7 @@ index 2fb834dbf2b5d9bb9dac965b836bcafda01e571e..4c8143a192a8bedf0b970cc867329926
  #include <maps/tp_info_mem.h>
  #include <maps/tracked_sock_cookies.h>
  
-@@ -807,8 +808,90 @@ static __always_inline void bpf_sock_ops_set_flags(struct bpf_sock_ops *skops, u
+@@ -849,8 +850,90 @@ static __always_inline void bpf_sock_ops_set_flags(struct bpf_sock_ops *skops, u
      bpf_sock_ops_cb_flags_set(skops, skops->bpf_sock_ops_cb_flags | flags);
  }
  
@@ -172,7 +172,7 @@ index 2fb834dbf2b5d9bb9dac965b836bcafda01e571e..4c8143a192a8bedf0b970cc867329926
      const u64 cookie = bpf_get_socket_cookie(skops);
      struct bpf_sock *sk = skops->sk;
  
-@@ -941,8 +1024,10 @@ static __always_inline void bpf_sock_ops_parse_hdr_cb(struct bpf_sock_ops *skops
+@@ -983,8 +1066,10 @@ static __always_inline void bpf_sock_ops_parse_hdr_cb(struct bpf_sock_ops *skops
      bpf_map_update_elem(&incoming_trace_map, &conn, &tp, BPF_ANY);
  }
  

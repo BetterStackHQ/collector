@@ -131,7 +131,7 @@ index 0000000000000000000000000000000000000000..f73b3a05449b24e453339cdbecbbea9f
 +    __uint(pinning, OBI_PIN_INTERNAL);
 +} inject_pids SEC(".maps");
 diff --git a/bpf/tpinjector/tpinjector.c b/bpf/tpinjector/tpinjector.c
-index 4c8143a192a8bedf0b970cc867329926ac2d5080..4899103e7e1d01bbca4b0a86f6882723ec19f096 100644
+index f146c1d5754fb9715e6b5e00cafbc88fea62eee8..f280bcdab9131da0586b18a854e99521e54fbbf7 100644
 --- a/bpf/tpinjector/tpinjector.c
 +++ b/bpf/tpinjector/tpinjector.c
 @@ -29,7 +29,9 @@
@@ -162,7 +162,7 @@ index 4c8143a192a8bedf0b970cc867329926ac2d5080..4899103e7e1d01bbca4b0a86f6882723
  //   │                                  │  may touch a byte of its traffic
  //   │                                  │
  //   ├── pull_data + fill_msg_buffers   │  Read-only copy the generic
-@@ -368,9 +369,9 @@ enum { k_http1_101_check_len = 16 };
+@@ -370,9 +371,9 @@ enum { k_http1_101_check_len = 16 };
  static __always_inline bool is_http1_101_response(const unsigned char *d,
                                                    const unsigned char *end) {
      return d && (void *)d + k_http1_101_check_len <= (void *)end && d[0] == 'H' && d[1] == 'T' &&
@@ -175,7 +175,7 @@ index 4c8143a192a8bedf0b970cc867329926ac2d5080..4899103e7e1d01bbca4b0a86f6882723
  }
  
  // One-shot probe for a connection leaving HTTP/1: a 101 is the last HTTP/1
-@@ -808,89 +809,28 @@ static __always_inline void bpf_sock_ops_set_flags(struct bpf_sock_ops *skops, u
+@@ -850,89 +851,28 @@ static __always_inline void bpf_sock_ops_set_flags(struct bpf_sock_ops *skops, u
      bpf_sock_ops_cb_flags_set(skops, skops->bpf_sock_ops_cb_flags | flags);
  }
  
@@ -282,7 +282,7 @@ index 4c8143a192a8bedf0b970cc867329926ac2d5080..4899103e7e1d01bbca4b0a86f6882723
  
      const u64 cookie = bpf_get_socket_cookie(skops);
      struct bpf_sock *sk = skops->sk;
-@@ -1024,8 +964,7 @@ static __always_inline void bpf_sock_ops_parse_hdr_cb(struct bpf_sock_ops *skops
+@@ -1066,8 +1006,7 @@ static __always_inline void bpf_sock_ops_parse_hdr_cb(struct bpf_sock_ops *skops
      bpf_map_update_elem(&incoming_trace_map, &conn, &tp, BPF_ANY);
  }
  
@@ -292,7 +292,7 @@ index 4c8143a192a8bedf0b970cc867329926ac2d5080..4899103e7e1d01bbca4b0a86f6882723
  // (BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB). We don't track incoming, those would be
  // BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB
  SEC("sockops")
-@@ -1590,33 +1529,8 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1641,33 +1580,8 @@ int obi_packet_extender(struct sk_msg_md *msg) {
  
      const u64 id = bpf_get_current_pid_tgid();
  
@@ -328,7 +328,7 @@ index 4c8143a192a8bedf0b970cc867329926ac2d5080..4899103e7e1d01bbca4b0a86f6882723
          return SK_PASS;
      }
  
-@@ -1810,7 +1724,7 @@ int obi_packet_extender_http1_dispatch(struct sk_msg_md *msg) {
+@@ -1885,7 +1799,7 @@ int obi_packet_extender_http1_dispatch(struct sk_msg_md *msg) {
      }
  
      // The Go-gRPC coordination route now sits behind the entry filter too. For

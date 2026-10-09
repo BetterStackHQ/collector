@@ -1,5 +1,5 @@
 diff --git a/bpf/tpinjector/tpinjector.c b/bpf/tpinjector/tpinjector.c
-index 3ebaaf2a..2fb834db 100644
+index f816d2ef..d4adac59 100644
 --- a/bpf/tpinjector/tpinjector.c
 +++ b/bpf/tpinjector/tpinjector.c
 @@ -61,6 +61,9 @@ char __license[] SEC("license") = "Dual MIT/GPL";
@@ -12,7 +12,7 @@ index 3ebaaf2a..2fb834db 100644
  //   ├── pull_data + fill_msg_buffers   │  Read-only copy the generic
  //   │                                  │  tracer parses, for every socket
  //   ├── socket parked → SK_PASS        │  Default-deny: this stream left
-@@ -95,8 +98,6 @@ char __license[] SEC("license") = "Dual MIT/GPL";
+@@ -96,8 +99,6 @@ char __license[] SEC("license") = "Dual MIT/GPL";
  //   │     └── detect_h2                │  streams whose stored tp has
  //   │                                  │  written=0 (uprobe miss)
  //   │                                  │
@@ -21,7 +21,7 @@ index 3ebaaf2a..2fb834db 100644
  //   ├── is_h2_socket?                  │  Preface seen / confirmed H2: skip
  //   │     └─ tail-call detect_h2       │  preface check, drive the H2 chain
  //   │                                 │
-@@ -1502,6 +1503,38 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1553,6 +1554,38 @@ int obi_packet_extender(struct sk_msg_md *msg) {
          return SK_PASS;
      }
  
@@ -60,7 +60,7 @@ index 3ebaaf2a..2fb834db 100644
      // Default-deny entry gate. A parked socket is never mutated again: it gets
      // only the read-only buffer fill below and returns ahead of get_tp_info_pid
      // / handle_existing_tp_pid, so a leftover trace context cannot resurrect
-@@ -1532,7 +1565,6 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1583,7 +1616,6 @@ int obi_packet_extender(struct sk_msg_md *msg) {
          return SK_PASS;
      }
  
@@ -68,7 +68,7 @@ index 3ebaaf2a..2fb834db 100644
      const connection_info_t conn = get_connection_info(msg);
      const egress_key_t e_key = make_egress_key(&conn);
  
-@@ -1692,6 +1724,16 @@ int obi_packet_extender_http1_dispatch(struct sk_msg_md *msg) {
+@@ -1767,6 +1799,16 @@ int obi_packet_extender_http1_dispatch(struct sk_msg_md *msg) {
          }
      }
  
@@ -85,7 +85,7 @@ index 3ebaaf2a..2fb834db 100644
      if (is_go_grpc_client_conn(&t_ctx->p_conn)) {
          // already pulled and filled by the entry program
          // per-stream decision in the h2 chain: inject only streams the uprobe left written=0
-@@ -1700,10 +1742,6 @@ int obi_packet_extender_http1_dispatch(struct sk_msg_md *msg) {
+@@ -1775,10 +1817,6 @@ int obi_packet_extender_http1_dispatch(struct sk_msg_md *msg) {
          return SK_PASS;
      }
  
