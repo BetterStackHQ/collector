@@ -1,5 +1,5 @@
 # Canary: unreleased ebpf-agent build, pinned by digest. Not for merge.
-ARG EBPF_AGENT_VERSION=canary@sha256:ab0c7e7ee03d5b1e54c447458b595f9f7c412de82131a9b38f931babd5944e6f
+ARG EBPF_AGENT_VERSION=canary@sha256:3f49a279e7a4efbf04897a816ca249f6a91d6f2a4dea2d20445a7ad16c0bb5f3
 FROM ghcr.io/betterstackhq/ebpf-agent:${EBPF_AGENT_VERSION} AS ebpf-agent-source
 
 # Build Node Agent from source with patches
