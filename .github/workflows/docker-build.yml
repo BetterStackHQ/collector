@@ -1,158 +1,299 @@
 name: Build and Push Docker Image
 
-# This workflow builds and pushes Docker images to GitHub Container Registry:
-# - Pull requests: Tagged as pr-NUMBER (e.g., pr-59)
-# - Main branch: Tagged as canary
-# - Version tags: Tagged as the version and latest
-#
-# Images are pushed to:
-# - GHCR: ghcr.io/<owner>/collector, ghcr.io/<owner>/collector-ebpf
-
 on:
   push:
-    branches:
-      - main
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
   pull_request:
-    branches:
-      - main
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  GAUNTLET_URL: ${{ secrets.GAUNTLET_URL }}
+  GAUNTLET_PROFILE: ${{ vars.GAUNTLET_PROFILE }}
+  GAUNTLET_PROFILE_REVISION: ${{ vars.GAUNTLET_PROFILE_REVISION }}
+  GAUNTLET_CONFIG_BUNDLE_HASH: ${{ vars.GAUNTLET_CONFIG_BUNDLE_HASH }}
 
 jobs:
-  build-collector:
+  # No moving-alias concurrency here: every source SHA builds immutable artifacts.
+  build:
+    name: build-${{ matrix.role }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - role: collector
+            image: collector
+            file: collector/Dockerfile
+          - role: ebpf
+            image: collector-ebpf
+            file: ebpf/Dockerfile
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           submodules: true
-
-      - name: Modify COLLECTOR_VERSION for branch builds
-        if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
+      - name: Select immutable candidate and build version
+        id: identity
+        env:
+          ROLE: ${{ matrix.role }}
+          IMAGE: ${{ matrix.image }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          # Get short SHA (first 7 characters)
-          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-
-          # Determine the suffix based on build type
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            # PR build: add -prX-SHA suffix
-            SUFFIX="-pr${{ github.event.pull_request.number }}-${SHORT_SHA}"
-          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            # Main branch build: add -canary-SHA suffix
-            SUFFIX="-canary-${SHORT_SHA}"
-          fi
-
-          # Modify the Dockerfile to append suffix to COLLECTOR_VERSION
-          sed -i "s/^ENV COLLECTOR_VERSION=\(.*\)/ENV COLLECTOR_VERSION=\1${SUFFIX}/" collector/Dockerfile
-
-          # Show what was changed for debugging
-          echo "Modified COLLECTOR_VERSION:"
-          grep "^ENV COLLECTOR_VERSION=" collector/Dockerfile
-
-      - name: Ensure tag version matches collector version
-        id: ensure-tag-version
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            sed -i "s/^ENV COLLECTOR_VERSION=.*/ENV COLLECTOR_VERSION=${GITHUB_REF#refs\/tags\/v}/" collector/Dockerfile
-            git diff --exit-code
-          fi
-
-      - name: Determine push flag
-        id: repo
-        run: |
-          echo "push=true" >> $GITHUB_OUTPUT
-
-      - name: Set up Docker metadata
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: |
-            ghcr.io/${{ github.repository_owner }}/collector
-          tags: |
-            # For version tags, tag as version and latest
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            # For main branch, tag as canary
-            type=raw,value=canary,enable=${{ github.ref == 'refs/heads/main' }}
-            # For pull requests, tag as pr-NUMBER
-            type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ github.event_name == 'pull_request' }}
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          sha, ref = os.environ['GITHUB_SHA'], os.environ['GITHUB_REF']
+          path = pathlib.Path('collector/Dockerfile')
+          text = path.read_text()
+          versions = re.findall(r'^ENV COLLECTOR_VERSION=(\S+)\s*$', text, re.M)
+          assert len(versions) == 1
+          version = versions[0]
+          pr = os.environ['PR_NUMBER']
+          if pr:
+              version += '-pr' + pr + '-' + sha[:7]
+          elif ref == 'refs/heads/main':
+              version += '-canary-' + sha[:7]
+          else:
+              assert ref == 'refs/tags/v' + version, 'Tag must match checked-in collector version'
+          if os.environ['ROLE'] == 'collector':
+              path.write_text(re.sub(r'^ENV COLLECTOR_VERSION=\S+\s*$', 'ENV COLLECTOR_VERSION=' + version, text, flags=re.M))
+          repository = 'ghcr.io/' + os.environ['GITHUB_REPOSITORY_OWNER'].lower() + '/' + os.environ['IMAGE']
+          tag = 'candidate-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'] + '-' + sha
+          tags = [repository + ':' + tag]
+          if pr:
+              tags.append(repository + ':pr-' + pr)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('repository=' + repository + '\nversion=' + version + '\ntags<<TAGS\n' + '\n'.join(tags) + '\nTAGS\n')
+          PY
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Depot
-        uses: depot/setup-action@v1
-
-      - name: Build and push Docker image
+      - uses: depot/setup-action@v1
+      - name: Build immutable multi-platform candidate
+        id: image
         uses: depot/build-push-action@v1
         with:
           project: ${{ secrets.DEPOT_PROJECT_ID }}
           token: ${{ secrets.DEPOT_API_TOKEN }}
           context: .
-          file: collector/Dockerfile
+          file: ${{ matrix.file }}
           platforms: linux/amd64,linux/arm64
-          push: ${{ steps.repo.outputs.push }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          push: true
+          tags: ${{ steps.identity.outputs.tags }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.identity.outputs.version }}
+      - name: Capture the build action digest immediately
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE_REPOSITORY: ${{ steps.identity.outputs.repository }}
+          IMAGE_ROLE: ${{ matrix.image }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          value = {k: os.environ[v] for k, v in [('repository', 'IMAGE_REPOSITORY'), ('index_digest', 'IMAGE_DIGEST')]}
+          assert re.fullmatch(r'sha256:[0-9a-f]{64}', value['index_digest']), 'Missing build output digest'
+          value['source_sha'] = os.environ['GITHUB_SHA']
+          pathlib.Path('build-' + os.environ['IMAGE_ROLE'] + '.json').write_text(json.dumps(value))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.image }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build-${{ matrix.image }}.json
+          if-no-files-found: error
+          retention-days: 30
 
-  build-ebpf:
+  collector-prerequisites:
+    name: collector-prerequisites
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      CF_ACCESS_CLIENT_ID: ${{ secrets.GAUNTLET_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.GAUNTLET_ACCESS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set runner-local registry auth path
+        run: printf 'REGISTRY_AUTH_FILE=%s/gauntlet-registry.json\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - run: sudo apt-get update && sudo apt-get install -y skopeo
+      - name: Authenticate read-only image inspection
+        env:
+          REGISTRY_USER: ${{ secrets.GAUNTLET_REGISTRY_READ_USER }}
+          REGISTRY_TOKEN: ${{ secrets.GAUNTLET_REGISTRY_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$REGISTRY_USER" && test -n "$REGISTRY_TOKEN"
+          printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$REGISTRY_AUTH_FILE" --username "$REGISTRY_USER" --password-stdin ghcr.io
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: build-*-${{ github.run_id }}-${{ github.run_attempt }}
+          merge-multiple: true
+      - name: Resolve paired build outputs and the actual Dockerfile agent pin
+        run: |
+          set -euo pipefail
+          collector=$(python3 -c 'import json,os; x=json.load(open("build-collector.json")); assert x["source_sha"]==os.environ["GITHUB_SHA"]; print(x["repository"]+"@"+x["index_digest"])')
+          ebpf=$(python3 -c 'import json,os; x=json.load(open("build-collector-ebpf.json")); assert x["source_sha"]==os.environ["GITHUB_SHA"]; print(x["repository"]+"@"+x["index_digest"])')
+          python3 .github/scripts/gauntlet.py bundle --kind collector --repository "$GITHUB_REPOSITORY" --source-sha "$GITHUB_SHA" \
+            --image "collector=$collector" --image "collector-ebpf=$ebpf" --dockerfile ebpf/Dockerfile --output candidate.json
+      - name: Execute registry version and built-platform identity prerequisites
+        run: python3 .github/scripts/gauntlet.py prerequisite --candidate candidate.json --ref "$GITHUB_REF" --output collector-prerequisites.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: collector-prerequisites-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            candidate.json
+            collector-prerequisites.json
+          if-no-files-found: error
+          retention-days: 30
+
+  gauntlet-receipt:
+    name: gauntlet-receipt
+    needs: [build, collector-prerequisites]
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-id: ${{ steps.receipt.outputs.artifact-id }}
+      run-attempt: ${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: collector-prerequisites-${{ github.run_id }}-${{ github.run_attempt }}
+      - run: |
+          python3 .github/scripts/gauntlet.py receipt --candidate candidate.json --provider github \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --ref "$GITHUB_REF" \
+            --summary collector-prerequisites.json --output gauntlet-receipt.json
+      - uses: actions/upload-artifact@v4
+        id: receipt
+        with:
+          name: gauntlet-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: gauntlet-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+  gauntlet-submit:
+    name: gauntlet-submit
+    needs: gauntlet-receipt
+    runs-on: ubuntu-latest
+    env:
+      CF_ACCESS_CLIENT_ID: ${{ secrets.GAUNTLET_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.GAUNTLET_ACCESS_CLIENT_SECRET }}
+      RECEIPT_ARTIFACT_ID: ${{ needs.gauntlet-receipt.outputs.artifact-id }}
+      RECEIPT_RUN_ATTEMPT: ${{ needs.gauntlet-receipt.outputs.run-attempt }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: collector-prerequisites-${{ github.run_id }}-${{ needs.gauntlet-receipt.outputs.run-attempt }}
+      - name: Submit once and leave main verdict delivery to the service
+        run: |
+          python3 .github/scripts/gauntlet.py submit --candidate candidate.json --provider github \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$RECEIPT_RUN_ATTEMPT" \
+            --artifact-id "$RECEIPT_ARTIFACT_ID" --output submission.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gauntlet-submission-${{ github.run_id }}
+          overwrite: true
+          path: submission.json
+          if-no-files-found: error
+          retention-days: 90
+
+  canary:
+    name: canary
+    if: github.ref == 'refs/heads/main'
+    needs: gauntlet-submit
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
+    concurrency:
+      group: collector-alias-writes
+      cancel-in-progress: false
+      queue: max
+    env:
+      CF_ACCESS_CLIENT_ID: ${{ secrets.GAUNTLET_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.GAUNTLET_ACCESS_CLIENT_SECRET }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
-          submodules: true
+          fetch-depth: 0
+      - name: Set runner-local registry auth path
+        run: printf 'REGISTRY_AUTH_FILE=%s/gauntlet-registry.json\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - run: sudo apt-get update && sudo apt-get install -y skopeo
+      - uses: actions/download-artifact@v4
+        with:
+          name: gauntlet-submission-${{ github.run_id }}
+      - name: Authenticate alias writes
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$REGISTRY_AUTH_FILE" --username "$REGISTRY_USER" --password-stdin ghcr.io
+      - name: Recheck main tip once at canary pair publication start
+        run: python3 .github/scripts/gauntlet.py promote --submission submission.json --tag canary
 
-      - name: Determine push flag
-        id: repo
+  gauntlet:
+    name: gauntlet
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: gauntlet-submit
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    # No package/release write permission or registry-write secret in the waiter.
+    env:
+      CF_ACCESS_CLIENT_ID: ${{ secrets.GAUNTLET_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.GAUNTLET_ACCESS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: gauntlet-submission-${{ github.run_id }}
+      - run: python3 .github/scripts/gauntlet.py wait --submission submission.json --timeout-seconds 19800
+
+  publish:
+    name: publish
+    needs: gauntlet
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+      packages: write
+    concurrency:
+      group: collector-alias-writes
+      cancel-in-progress: false
+      queue: max
+    env:
+      CF_ACCESS_CLIENT_ID: ${{ secrets.GAUNTLET_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.GAUNTLET_ACCESS_CLIENT_SECRET }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Set runner-local registry auth path
+        run: printf 'REGISTRY_AUTH_FILE=%s/gauntlet-registry.json\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Preserve the existing docs-script release gate
         run: |
-          echo "push=true" >> $GITHUB_OUTPUT
-
-      - name: Set up Docker metadata
-        id: meta
-        uses: docker/metadata-action@v6
+          set -euo pipefail
+          run=$(gh run list --workflow 'Check scripts from docs' --branch "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" --event push --limit 1 --json databaseId --jq '.[0].databaseId')
+          [[ "$run" =~ ^[0-9]+$ ]]
+          gh run watch "$run" --exit-status
+      - run: sudo apt-get update && sudo apt-get install -y skopeo
+      - uses: actions/download-artifact@v4
         with:
-          images: |
-            ghcr.io/${{ github.repository_owner }}/collector-ebpf
-          tags: |
-            # For version tags, tag as version and latest
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            # For main branch, tag as canary
-            type=raw,value=canary,enable=${{ github.ref == 'refs/heads/main' }}
-            # For pull requests, tag as pr-NUMBER
-            type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ github.event_name == 'pull_request' }}
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Depot
-        uses: depot/setup-action@v1
-
-      - name: Build and push Docker image
-        uses: depot/build-push-action@v1
-        with:
-          project: ${{ secrets.DEPOT_PROJECT_ID }}
-          token: ${{ secrets.DEPOT_API_TOKEN }}
-          context: .
-          file: ebpf/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: ${{ steps.repo.outputs.push }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          name: gauntlet-submission-${{ github.run_id }}
+      - name: Authenticate gated release writes
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$REGISTRY_AUTH_FILE" --username "$REGISTRY_USER" --password-stdin ghcr.io
+      - name: Recheck exact eligibility and retag final tested bytes without rebuilding
+        run: python3 .github/scripts/gauntlet.py promote --submission submission.json --tag "$GITHUB_REF_NAME"
+      - name: Create GitHub release only after gated registry publication
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
