@@ -1,0 +1,94 @@
+diff --git a/ebpftracer/ebpf/tcp/conntrack.c b/ebpftracer/ebpf/tcp/conntrack.c
+index 46d30a3..125150a 100644
+--- a/ebpftracer/ebpf/tcp/conntrack.c
++++ b/ebpftracer/ebpf/tcp/conntrack.c
+@@ -37,9 +37,16 @@ struct ipPort {
+     __u16 port;
+ };
+ 
++// The connection as its socket sees it: the original-direction tuple, before DNAT
++// rewrites the destination and before SNAT rewrites the source.
++struct conn_tuple {
++    struct ipPort src;
++    struct ipPort dst;
++};
++
+ struct {
+     __uint(type, BPF_MAP_TYPE_LRU_HASH);
+-    __uint(key_size, sizeof(struct ipPort));
++    __uint(key_size, sizeof(struct conn_tuple));
+     __uint(value_size, sizeof(struct ipPort));
+     __uint(max_entries, 10240);
+ } actual_destinations SEC(".maps");
+@@ -53,23 +60,39 @@ int handle_ct(struct pt_regs *ctx, struct nf_conn conn)
+     if (repl.dst.protonum != IPPROTO_TCP) {
+         return 0;
+     }
+-    struct ipPort src = {};
++    struct conn_tuple key = {};
+     struct ipPort actualDst = {};
+-    if (repl.src.l3num == AF_INET) {
+-        src.ip[10] = 0xff;
+-        src.ip[11] = 0xff;
+-        __builtin_memcpy(&src.ip[12], &repl.dst.addr.ip, 4);
+-
++    int dnat = 0;
++    if (orig.src.l3num == AF_INET) {
++        key.src.ip[10] = 0xff;
++        key.src.ip[11] = 0xff;
++        __builtin_memcpy(&key.src.ip[12], &orig.src.addr.ip, 4);
++        key.dst.ip[10] = 0xff;
++        key.dst.ip[11] = 0xff;
++        __builtin_memcpy(&key.dst.ip[12], &orig.dst.addr.ip, 4);
+         actualDst.ip[10] = 0xff;
+         actualDst.ip[11] = 0xff;
+         __builtin_memcpy(&actualDst.ip[12], &repl.src.addr.ip, 4);
+-    } else if (repl.src.l3num == AF_INET6) {
+-        __builtin_memcpy(&src.ip, &repl.dst.addr.ip, 16);
++        dnat = orig.dst.addr.ip[0] != repl.src.addr.ip[0];
++    } else if (orig.src.l3num == AF_INET6) {
++        __builtin_memcpy(&key.src.ip, &orig.src.addr.ip, 16);
++        __builtin_memcpy(&key.dst.ip, &orig.dst.addr.ip, 16);
+         __builtin_memcpy(&actualDst.ip, &repl.src.addr.ip, 16);
++        dnat = orig.dst.addr.ip[0] != repl.src.addr.ip[0] || orig.dst.addr.ip[1] != repl.src.addr.ip[1] ||
++               orig.dst.addr.ip[2] != repl.src.addr.ip[2] || orig.dst.addr.ip[3] != repl.src.addr.ip[3];
++    } else {
++        return 0;
+     }
+-    src.port = bpf_ntohs(repl.dst.port);
++    key.src.port = bpf_ntohs(orig.src.port);
++    key.dst.port = bpf_ntohs(orig.dst.port);
+     actualDst.port = bpf_ntohs(repl.src.port);
+-    bpf_map_update_elem(&actual_destinations, &src, &actualDst, BPF_ANY);
++    if (!dnat && actualDst.port == key.dst.port) {
++        // Not DNATed: the destination is the actual one. Drop what an earlier flow with
++        // the same tuple may have left behind.
++        bpf_map_delete_elem(&actual_destinations, &key);
++        return 0;
++    }
++    bpf_map_update_elem(&actual_destinations, &key, &actualDst, BPF_ANY);
+     return 0;
+ }
+ 
+diff --git a/ebpftracer/ebpf/tcp/state.c b/ebpftracer/ebpf/tcp/state.c
+index 4dd07b8..3ab9474 100644
+--- a/ebpftracer/ebpf/tcp/state.c
++++ b/ebpftracer/ebpf/tcp/state.c
+@@ -193,11 +193,13 @@ int inet_sock_set_state(void *ctx)
+     __builtin_memcpy(&e.saddr, &args.saddr_v6, sizeof(e.saddr));
+     __builtin_memcpy(&e.daddr, &args.daddr_v6, sizeof(e.saddr));
+ 
+-    struct ipPort src = {};
+-    __builtin_memcpy(&src.ip, &args.saddr_v6, sizeof(args.saddr_v6));
+-    src.port = args.sport;
++    struct conn_tuple ct = {};
++    __builtin_memcpy(&ct.src.ip, &args.saddr_v6, sizeof(args.saddr_v6));
++    ct.src.port = args.sport;
++    __builtin_memcpy(&ct.dst.ip, &args.daddr_v6, sizeof(args.daddr_v6));
++    ct.dst.port = args.dport;
+ 
+-    struct ipPort *actualDst = bpf_map_lookup_elem(&actual_destinations, &src);
++    struct ipPort *actualDst = bpf_map_lookup_elem(&actual_destinations, &ct);
+     if (actualDst) {
+         e.aport = actualDst->port;
+         __builtin_memcpy(&e.aaddr, &actualDst->ip, sizeof(e.aaddr));
