@@ -1,7 +1,28 @@
 ARG EBPF_AGENT_IMAGE=ghcr.io/betterstackhq/ebpf-agent:0.1.10@sha256:824b451ffb71c474f9e5c982146078384a30fee637dfdd6e4d7ada8a73cc0d25
+ARG NODE_AGENT_VERSION=v1.30.0
 FROM ${EBPF_AGENT_IMAGE} AS ebpf-agent-source
 
-# Build Node Agent from source with patches
+# Node Agent source with our patches
+FROM --platform=$BUILDPLATFORM debian:13.5 AS node-agent-source
+RUN apt-get update && apt-get install -y git
+ARG NODE_AGENT_VERSION
+RUN git clone --depth 1 --branch ${NODE_AGENT_VERSION} \
+    https://github.com/coroot/coroot-node-agent.git /tmp/node-agent
+WORKDIR /tmp/node-agent
+COPY ebpf/patches/node-agent/*.patch ./
+RUN git apply *.patch
+
+# Regenerate Node Agent's embedded eBPF programs (ebpftracer/ebpf.go) from the patched C
+# sources by running the RUN steps of upstream's ebpftracer/Dockerfile on its own base image.
+# The output covers every target architecture, so it is built once on the build platform.
+FROM --platform=$BUILDPLATFORM alpine:3.14 AS node-agent-ebpf
+COPY --from=node-agent-source /tmp/node-agent/ebpftracer /tmp/ebpftracer
+RUN grep -qx 'FROM alpine:3.14' /tmp/ebpftracer/Dockerfile || \
+    { echo "upstream ebpftracer/Dockerfile changed its base image; update this stage" >&2; exit 1; }
+RUN cp -r /tmp/ebpftracer/ebpf /tmp/ebpf && cd /tmp/ebpf && \
+    sh -ec "$(sed -e ':a' -e '/\\$/N; s/\\\n//; ta' /tmp/ebpftracer/Dockerfile | sed -n 's/^RUN //p')"
+
+# Build Node Agent
 FROM debian:13.5 AS node-agent-builder
 RUN apt-get update && apt-get install -y \
     curl git build-essential pkg-config libsystemd-dev
@@ -10,12 +31,10 @@ RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architectu
     tar -C /usr/local -xzf go.tar.gz && rm go.tar.gz
 ENV PATH="/usr/local/go/bin:${PATH}"
 ARG CUSTOMIZATION_TAG="betterstack"
-ARG NODE_AGENT_VERSION=v1.30.0
-RUN git clone --depth 1 --branch ${NODE_AGENT_VERSION} \
-    https://github.com/coroot/coroot-node-agent.git /tmp/node-agent
+ARG NODE_AGENT_VERSION
+COPY --from=node-agent-source /tmp/node-agent /tmp/node-agent
+COPY --from=node-agent-ebpf /tmp/ebpf/ebpf.go /tmp/node-agent/ebpftracer/ebpf.go
 WORKDIR /tmp/node-agent
-COPY ebpf/patches/node-agent/*.patch ./
-RUN git apply *.patch
 RUN CGO_ENABLED=1 go build -mod=readonly \
     -ldflags "-extldflags='-Wl,-z,lazy' -X 'github.com/coroot/coroot-node-agent/flags.Version=${NODE_AGENT_VERSION}-${CUSTOMIZATION_TAG}'" \
     -o /usr/bin/coroot-node-agent .
