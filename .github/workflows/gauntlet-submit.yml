@@ -1,0 +1,80 @@
+name: Submit advisory gauntlet
+
+on:
+  workflow_run:
+    workflows: [Build and Push Docker Image]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  gauntlet-submit:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      GAUNTLET_URL: ${{ secrets.GAUNTLET_URL }}
+      GAUNTLET_PROFILE: ${{ vars.GAUNTLET_PROFILE }}
+      GAUNTLET_PROFILE_REVISION: ${{ vars.GAUNTLET_PROFILE_REVISION }}
+      GAUNTLET_CONFIG_BUNDLE_HASH: ${{ vars.GAUNTLET_CONFIG_BUNDLE_HASH }}
+      CF_ACCESS_CLIENT_ID: ${{ secrets.GAUNTLET_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.GAUNTLET_ACCESS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Validate upstream source identity
+        run: |
+          python3 - <<'PY'
+          import os, re
+          assert re.fullmatch(r'[0-9a-f]{40}', os.environ['SOURCE_SHA'])
+          branch = os.environ['SOURCE_BRANCH']
+          assert branch == 'main' or re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?', branch)
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write('SOURCE_REF=' + ('refs/heads/main' if branch == 'main' else 'refs/tags/' + branch) + '\n')
+          PY
+      - name: Set runner-local registry auth path
+        run: printf 'REGISTRY_AUTH_FILE=%s/gauntlet-registry.json\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - run: sudo apt-get update && sudo apt-get install -y skopeo
+      - name: Authenticate read-only image inspection
+        env:
+          REGISTRY_USER: ${{ secrets.GAUNTLET_REGISTRY_READ_USER }}
+          REGISTRY_TOKEN: ${{ secrets.GAUNTLET_REGISTRY_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$REGISTRY_USER" && test -n "$REGISTRY_TOKEN"
+          printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$REGISTRY_AUTH_FILE" --username "$REGISTRY_USER" --password-stdin ghcr.io
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+          pattern: build-*-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          merge-multiple: true
+      - name: Resolve exact upstream build outputs and the Dockerfile agent pin
+        run: |
+          set -euo pipefail
+          collector=$(python3 -c 'import json,os; x=json.load(open("build-collector.json")); assert x["source_sha"]==os.environ["SOURCE_SHA"]; print(x["repository"]+"@"+x["index_digest"])')
+          ebpf=$(python3 -c 'import json,os; x=json.load(open("build-collector-ebpf.json")); assert x["source_sha"]==os.environ["SOURCE_SHA"]; print(x["repository"]+"@"+x["index_digest"])')
+          python3 .github/scripts/gauntlet.py bundle --kind collector --repository "$GITHUB_REPOSITORY" --source-sha "$SOURCE_SHA" \
+            --image "collector=$collector" --image "collector-ebpf=$ebpf" --dockerfile ebpf/Dockerfile --output candidate.json
+      - name: Verify registry versions and built-platform identities
+        run: python3 .github/scripts/gauntlet.py prerequisite --candidate candidate.json --ref "$SOURCE_REF"
+      - name: Submit advisory run without waiting for a verdict
+        run: python3 .github/scripts/gauntlet.py submit --candidate candidate.json --output submission.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gauntlet-submission-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            candidate.json
+            submission.json
+          if-no-files-found: error
+          retention-days: 90
