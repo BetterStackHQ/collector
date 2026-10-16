@@ -1,4 +1,4 @@
-ARG EBPF_AGENT_IMAGE=ghcr.io/betterstackhq/ebpf-agent:0.1.10@sha256:824b451ffb71c474f9e5c982146078384a30fee637dfdd6e4d7ada8a73cc0d25
+ARG EBPF_AGENT_IMAGE=ghcr.io/betterstackhq/ebpf-agent:0.1.11@sha256:bdc2a9acf64dc235a5b50e74e421608badbd234168597602a8e9352cefbf94ae
 ARG NODE_AGENT_VERSION=v1.30.0
 FROM ${EBPF_AGENT_IMAGE} AS ebpf-agent-source
 
