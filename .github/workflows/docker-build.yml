@@ -10,15 +10,27 @@ on:
 permissions:
   contents: read
 
-env:
-  GAUNTLET_URL: ${{ secrets.GAUNTLET_URL }}
-  GAUNTLET_PROFILE: ${{ vars.GAUNTLET_PROFILE }}
-  GAUNTLET_PROFILE_REVISION: ${{ vars.GAUNTLET_PROFILE_REVISION }}
-  GAUNTLET_CONFIG_BUNDLE_HASH: ${{ vars.GAUNTLET_CONFIG_BUNDLE_HASH }}
-
 jobs:
-  # No moving-alias concurrency here: every source SHA builds immutable artifacts.
+  registry-prerequisites:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify the pinned agent before building candidates
+        run: python3 .github/scripts/check_ebpf_image.py
+
+  # Alias publication stays independent of the separate advisory workflow.
   build:
+    needs: registry-prerequisites
+    if: ${{ !cancelled() && (needs.registry-prerequisites.result == 'success' || github.event_name == 'pull_request') }}
     name: build-${{ matrix.role }}
     runs-on: ubuntu-latest
     permissions:
@@ -67,6 +79,10 @@ jobs:
           tags = [repository + ':' + tag]
           if pr:
               tags.append(repository + ':pr-' + pr)
+          elif ref == 'refs/heads/main':
+              tags.append(repository + ':canary')
+          else:
+              tags.extend([repository + ':' + version, repository + ':latest'])
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write('repository=' + repository + '\nversion=' + version + '\ntags<<TAGS\n' + '\n'.join(tags) + '\nTAGS\n')
           PY
@@ -110,190 +126,3 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  collector-prerequisites:
-    name: collector-prerequisites
-    if: github.event_name == 'push'
-    needs: build
-    runs-on: ubuntu-latest
-    env:
-      CF_ACCESS_CLIENT_ID: ${{ secrets.GAUNTLET_ACCESS_CLIENT_ID }}
-      CF_ACCESS_CLIENT_SECRET: ${{ secrets.GAUNTLET_ACCESS_CLIENT_SECRET }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set runner-local registry auth path
-        run: printf 'REGISTRY_AUTH_FILE=%s/gauntlet-registry.json\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
-      - run: sudo apt-get update && sudo apt-get install -y skopeo
-      - name: Authenticate read-only image inspection
-        env:
-          REGISTRY_USER: ${{ secrets.GAUNTLET_REGISTRY_READ_USER }}
-          REGISTRY_TOKEN: ${{ secrets.GAUNTLET_REGISTRY_READ_TOKEN }}
-        run: |
-          set -euo pipefail
-          test -n "$REGISTRY_USER" && test -n "$REGISTRY_TOKEN"
-          printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$REGISTRY_AUTH_FILE" --username "$REGISTRY_USER" --password-stdin ghcr.io
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: build-*-${{ github.run_id }}-${{ github.run_attempt }}
-          merge-multiple: true
-      - name: Resolve paired build outputs and the actual Dockerfile agent pin
-        run: |
-          set -euo pipefail
-          collector=$(python3 -c 'import json,os; x=json.load(open("build-collector.json")); assert x["source_sha"]==os.environ["GITHUB_SHA"]; print(x["repository"]+"@"+x["index_digest"])')
-          ebpf=$(python3 -c 'import json,os; x=json.load(open("build-collector-ebpf.json")); assert x["source_sha"]==os.environ["GITHUB_SHA"]; print(x["repository"]+"@"+x["index_digest"])')
-          python3 .github/scripts/gauntlet.py bundle --kind collector --repository "$GITHUB_REPOSITORY" --source-sha "$GITHUB_SHA" \
-            --image "collector=$collector" --image "collector-ebpf=$ebpf" --dockerfile ebpf/Dockerfile --output candidate.json
-      - name: Execute registry version and built-platform identity prerequisites
-        run: python3 .github/scripts/gauntlet.py prerequisite --candidate candidate.json --ref "$GITHUB_REF" --output collector-prerequisites.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: collector-prerequisites-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            candidate.json
-            collector-prerequisites.json
-          if-no-files-found: error
-          retention-days: 30
-
-  gauntlet-receipt:
-    name: gauntlet-receipt
-    needs: [build, collector-prerequisites]
-    runs-on: ubuntu-latest
-    outputs:
-      artifact-id: ${{ steps.receipt.outputs.artifact-id }}
-      run-attempt: ${{ github.run_attempt }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
-        with:
-          name: collector-prerequisites-${{ github.run_id }}-${{ github.run_attempt }}
-      - run: |
-          python3 .github/scripts/gauntlet.py receipt --candidate candidate.json --provider github \
-            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --ref "$GITHUB_REF" \
-            --summary collector-prerequisites.json --output gauntlet-receipt.json
-      - uses: actions/upload-artifact@v4
-        id: receipt
-        with:
-          name: gauntlet-receipt-${{ github.run_id }}-${{ github.run_attempt }}
-          path: gauntlet-receipt.json
-          if-no-files-found: error
-          retention-days: 90
-
-  gauntlet-submit:
-    name: gauntlet-submit
-    needs: gauntlet-receipt
-    runs-on: ubuntu-latest
-    env:
-      CF_ACCESS_CLIENT_ID: ${{ secrets.GAUNTLET_ACCESS_CLIENT_ID }}
-      CF_ACCESS_CLIENT_SECRET: ${{ secrets.GAUNTLET_ACCESS_CLIENT_SECRET }}
-      RECEIPT_ARTIFACT_ID: ${{ needs.gauntlet-receipt.outputs.artifact-id }}
-      RECEIPT_RUN_ATTEMPT: ${{ needs.gauntlet-receipt.outputs.run-attempt }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
-        with:
-          name: collector-prerequisites-${{ github.run_id }}-${{ needs.gauntlet-receipt.outputs.run-attempt }}
-      - name: Submit once and leave main verdict delivery to the service
-        run: |
-          python3 .github/scripts/gauntlet.py submit --candidate candidate.json --provider github \
-            --run-id "$GITHUB_RUN_ID" --run-attempt "$RECEIPT_RUN_ATTEMPT" \
-            --artifact-id "$RECEIPT_ARTIFACT_ID" --output submission.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: gauntlet-submission-${{ github.run_id }}
-          overwrite: true
-          path: submission.json
-          if-no-files-found: error
-          retention-days: 90
-
-  canary:
-    name: canary
-    if: github.ref == 'refs/heads/main'
-    needs: gauntlet-submit
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    concurrency:
-      group: collector-alias-writes
-      cancel-in-progress: false
-      queue: max
-    env:
-      CF_ACCESS_CLIENT_ID: ${{ secrets.GAUNTLET_ACCESS_CLIENT_ID }}
-      CF_ACCESS_CLIENT_SECRET: ${{ secrets.GAUNTLET_ACCESS_CLIENT_SECRET }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - name: Set runner-local registry auth path
-        run: printf 'REGISTRY_AUTH_FILE=%s/gauntlet-registry.json\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
-      - run: sudo apt-get update && sudo apt-get install -y skopeo
-      - uses: actions/download-artifact@v4
-        with:
-          name: gauntlet-submission-${{ github.run_id }}
-      - name: Authenticate alias writes
-        env:
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REGISTRY_USER: ${{ github.actor }}
-        run: printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$REGISTRY_AUTH_FILE" --username "$REGISTRY_USER" --password-stdin ghcr.io
-      - name: Recheck main tip once at canary pair publication start
-        run: python3 .github/scripts/gauntlet.py promote --submission submission.json --tag canary
-
-  gauntlet:
-    name: gauntlet
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: gauntlet-submit
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    # No package/release write permission or registry-write secret in the waiter.
-    env:
-      CF_ACCESS_CLIENT_ID: ${{ secrets.GAUNTLET_ACCESS_CLIENT_ID }}
-      CF_ACCESS_CLIENT_SECRET: ${{ secrets.GAUNTLET_ACCESS_CLIENT_SECRET }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
-        with:
-          name: gauntlet-submission-${{ github.run_id }}
-      - run: python3 .github/scripts/gauntlet.py wait --submission submission.json --timeout-seconds 19800
-
-  publish:
-    name: publish
-    needs: gauntlet
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: read
-      packages: write
-    concurrency:
-      group: collector-alias-writes
-      cancel-in-progress: false
-      queue: max
-    env:
-      CF_ACCESS_CLIENT_ID: ${{ secrets.GAUNTLET_ACCESS_CLIENT_ID }}
-      CF_ACCESS_CLIENT_SECRET: ${{ secrets.GAUNTLET_ACCESS_CLIENT_SECRET }}
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - name: Set runner-local registry auth path
-        run: printf 'REGISTRY_AUTH_FILE=%s/gauntlet-registry.json\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
-      - name: Preserve the existing docs-script release gate
-        run: |
-          set -euo pipefail
-          run=$(gh run list --workflow 'Check scripts from docs' --branch "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" --event push --limit 1 --json databaseId --jq '.[0].databaseId')
-          [[ "$run" =~ ^[0-9]+$ ]]
-          gh run watch "$run" --exit-status
-      - run: sudo apt-get update && sudo apt-get install -y skopeo
-      - uses: actions/download-artifact@v4
-        with:
-          name: gauntlet-submission-${{ github.run_id }}
-      - name: Authenticate gated release writes
-        env:
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REGISTRY_USER: ${{ github.actor }}
-        run: printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$REGISTRY_AUTH_FILE" --username "$REGISTRY_USER" --password-stdin ghcr.io
-      - name: Recheck exact eligibility and retag final tested bytes without rebuilding
-        run: python3 .github/scripts/gauntlet.py promote --submission submission.json --tag "$GITHUB_REF_NAME"
-      - name: Create GitHub release only after gated registry publication
-        run: |
-          set -euo pipefail
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
