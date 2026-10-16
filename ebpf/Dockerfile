@@ -1,4 +1,4 @@
-ARG EBPF_AGENT_VERSION=0.1.10
+ARG EBPF_AGENT_VERSION=0.1.11
 ARG NODE_AGENT_VERSION=v1.30.0
 FROM ghcr.io/betterstackhq/ebpf-agent:${EBPF_AGENT_VERSION} AS ebpf-agent-source
 
