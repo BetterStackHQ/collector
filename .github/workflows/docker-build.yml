@@ -1,158 +1,128 @@
 name: Build and Push Docker Image
 
-# This workflow builds and pushes Docker images to GitHub Container Registry:
-# - Pull requests: Tagged as pr-NUMBER (e.g., pr-59)
-# - Main branch: Tagged as canary
-# - Version tags: Tagged as the version and latest
-#
-# Images are pushed to:
-# - GHCR: ghcr.io/<owner>/collector, ghcr.io/<owner>/collector-ebpf
-
 on:
   push:
-    branches:
-      - main
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
   pull_request:
-    branches:
-      - main
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
-  build-collector:
+  registry-prerequisites:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
-
+      packages: read
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-        with:
-          submodules: true
-
-      - name: Modify COLLECTOR_VERSION for branch builds
-        if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
-        run: |
-          # Get short SHA (first 7 characters)
-          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-
-          # Determine the suffix based on build type
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            # PR build: add -prX-SHA suffix
-            SUFFIX="-pr${{ github.event.pull_request.number }}-${SHORT_SHA}"
-          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            # Main branch build: add -canary-SHA suffix
-            SUFFIX="-canary-${SHORT_SHA}"
-          fi
-
-          # Modify the Dockerfile to append suffix to COLLECTOR_VERSION
-          sed -i "s/^ENV COLLECTOR_VERSION=\(.*\)/ENV COLLECTOR_VERSION=\1${SUFFIX}/" collector/Dockerfile
-
-          # Show what was changed for debugging
-          echo "Modified COLLECTOR_VERSION:"
-          grep "^ENV COLLECTOR_VERSION=" collector/Dockerfile
-
-      - name: Ensure tag version matches collector version
-        id: ensure-tag-version
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            sed -i "s/^ENV COLLECTOR_VERSION=.*/ENV COLLECTOR_VERSION=${GITHUB_REF#refs\/tags\/v}/" collector/Dockerfile
-            git diff --exit-code
-          fi
-
-      - name: Determine push flag
-        id: repo
-        run: |
-          echo "push=true" >> $GITHUB_OUTPUT
-
-      - name: Set up Docker metadata
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: |
-            ghcr.io/${{ github.repository_owner }}/collector
-          tags: |
-            # For version tags, tag as version and latest
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            # For main branch, tag as canary
-            type=raw,value=canary,enable=${{ github.ref == 'refs/heads/main' }}
-            # For pull requests, tag as pr-NUMBER
-            type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ github.event_name == 'pull_request' }}
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
+      - uses: actions/checkout@v7
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify the pinned agent before building candidates
+        run: python3 .github/scripts/check_ebpf_image.py
 
-      - name: Set up Depot
-        uses: depot/setup-action@v1
-
-      - name: Build and push Docker image
+  # Alias publication stays independent of the separate advisory workflow.
+  build:
+    needs: registry-prerequisites
+    if: ${{ !cancelled() && (needs.registry-prerequisites.result == 'success' || github.event_name == 'pull_request') }}
+    name: build-${{ matrix.role }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - role: collector
+            image: collector
+            file: collector/Dockerfile
+          - role: ebpf
+            image: collector-ebpf
+            file: ebpf/Dockerfile
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Select immutable candidate and build version
+        id: identity
+        env:
+          ROLE: ${{ matrix.role }}
+          IMAGE: ${{ matrix.image }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          sha, ref = os.environ['GITHUB_SHA'], os.environ['GITHUB_REF']
+          path = pathlib.Path('collector/Dockerfile')
+          text = path.read_text()
+          versions = re.findall(r'^ENV COLLECTOR_VERSION=(\S+)\s*$', text, re.M)
+          assert len(versions) == 1
+          version = versions[0]
+          pr = os.environ['PR_NUMBER']
+          if pr:
+              version += '-pr' + pr + '-' + sha[:7]
+          elif ref == 'refs/heads/main':
+              version += '-canary-' + sha[:7]
+          else:
+              assert ref == 'refs/tags/v' + version, 'Tag must match checked-in collector version'
+          if os.environ['ROLE'] == 'collector':
+              path.write_text(re.sub(r'^ENV COLLECTOR_VERSION=\S+\s*$', 'ENV COLLECTOR_VERSION=' + version, text, flags=re.M))
+          repository = 'ghcr.io/' + os.environ['GITHUB_REPOSITORY_OWNER'].lower() + '/' + os.environ['IMAGE']
+          tag = 'candidate-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'] + '-' + sha
+          tags = [repository + ':' + tag]
+          if pr:
+              tags.append(repository + ':pr-' + pr)
+          elif ref == 'refs/heads/main':
+              tags.append(repository + ':canary')
+          else:
+              tags.extend([repository + ':' + version, repository + ':latest'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('repository=' + repository + '\nversion=' + version + '\ntags<<TAGS\n' + '\n'.join(tags) + '\nTAGS\n')
+          PY
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: depot/setup-action@v1
+      - name: Build immutable multi-platform candidate
+        id: image
         uses: depot/build-push-action@v1
         with:
           project: ${{ secrets.DEPOT_PROJECT_ID }}
           token: ${{ secrets.DEPOT_API_TOKEN }}
           context: .
-          file: collector/Dockerfile
+          file: ${{ matrix.file }}
           platforms: linux/amd64,linux/arm64
-          push: ${{ steps.repo.outputs.push }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-  build-ebpf:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-        with:
-          submodules: true
-
-      - name: Determine push flag
-        id: repo
+          push: true
+          tags: ${{ steps.identity.outputs.tags }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.identity.outputs.version }}
+      - name: Capture the build action digest immediately
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE_REPOSITORY: ${{ steps.identity.outputs.repository }}
+          IMAGE_ROLE: ${{ matrix.image }}
         run: |
-          echo "push=true" >> $GITHUB_OUTPUT
-
-      - name: Set up Docker metadata
-        id: meta
-        uses: docker/metadata-action@v6
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          value = {k: os.environ[v] for k, v in [('repository', 'IMAGE_REPOSITORY'), ('index_digest', 'IMAGE_DIGEST')]}
+          assert re.fullmatch(r'sha256:[0-9a-f]{64}', value['index_digest']), 'Missing build output digest'
+          value['source_sha'] = os.environ['GITHUB_SHA']
+          pathlib.Path('build-' + os.environ['IMAGE_ROLE'] + '.json').write_text(json.dumps(value))
+          PY
+      - uses: actions/upload-artifact@v4
         with:
-          images: |
-            ghcr.io/${{ github.repository_owner }}/collector-ebpf
-          tags: |
-            # For version tags, tag as version and latest
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            # For main branch, tag as canary
-            type=raw,value=canary,enable=${{ github.ref == 'refs/heads/main' }}
-            # For pull requests, tag as pr-NUMBER
-            type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ github.event_name == 'pull_request' }}
+          name: build-${{ matrix.image }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build-${{ matrix.image }}.json
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Depot
-        uses: depot/setup-action@v1
-
-      - name: Build and push Docker image
-        uses: depot/build-push-action@v1
-        with:
-          project: ${{ secrets.DEPOT_PROJECT_ID }}
-          token: ${{ secrets.DEPOT_API_TOKEN }}
-          context: .
-          file: ebpf/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: ${{ steps.repo.outputs.push }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}

@@ -2,3 +2,5 @@
 .vscode
 .byebug_history
 .claude/
+__pycache__/
+*.py[cod]

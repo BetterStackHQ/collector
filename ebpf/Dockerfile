@@ -1,6 +1,6 @@
-ARG EBPF_AGENT_VERSION=0.1.11
+ARG EBPF_AGENT_IMAGE=ghcr.io/betterstackhq/ebpf-agent:0.1.11@sha256:bdc2a9acf64dc235a5b50e74e421608badbd234168597602a8e9352cefbf94ae
 ARG NODE_AGENT_VERSION=v1.30.0
-FROM ghcr.io/betterstackhq/ebpf-agent:${EBPF_AGENT_VERSION} AS ebpf-agent-source
+FROM ${EBPF_AGENT_IMAGE} AS ebpf-agent-source
 
 # Node Agent source with our patches
 FROM --platform=$BUILDPLATFORM debian:13.5 AS node-agent-source
