@@ -23,8 +23,6 @@ jobs:
       SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
       GAUNTLET_URL: ${{ secrets.GAUNTLET_URL }}
       GAUNTLET_PROFILE: ${{ vars.GAUNTLET_PROFILE }}
-      GAUNTLET_PROFILE_REVISION: ${{ vars.GAUNTLET_PROFILE_REVISION }}
-      GAUNTLET_CONFIG_BUNDLE_HASH: ${{ vars.GAUNTLET_CONFIG_BUNDLE_HASH }}
       CF_ACCESS_CLIENT_ID: ${{ secrets.GAUNTLET_ACCESS_CLIENT_ID }}
       CF_ACCESS_CLIENT_SECRET: ${{ secrets.GAUNTLET_ACCESS_CLIENT_SECRET }}
     steps:

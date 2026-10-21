@@ -91,13 +91,16 @@ versions, including the collector runtime environment version.
 
 The client submits `{"candidate": candidate}` without provider receipts,
 provider API credentials or an attestation exchange. The candidate retains its
-kind, CI origin, source repository/SHA, profile/revision, exact image and component
-identities, and configuration bundle hash. Submission is idempotent on the
-canonical repository, source SHA, bundle hash and profile revision.
+kind, CI origin, source repository/SHA, profile name, exact image and component
+identities. Before verification and submission the client looks the profile up
+by name in `GET /api/profiles`, requires exactly one match of the candidate's kind,
+and fills the profile revision and configuration bundle hash from the server.
+Submission is idempotent on the canonical repository, source SHA, bundle hash and
+profile revision.
 
 | Location | Required advisory values |
 |---|---|
-| Repository variables | `GAUNTLET_PROFILE`, `GAUNTLET_PROFILE_REVISION`, `GAUNTLET_CONFIG_BUNDLE_HASH`: exact deployed profile identity, without defaults |
+| Repository variables | `GAUNTLET_PROFILE`: deployed profile name, without default |
 | Repository secrets | `GAUNTLET_URL`: HTTPS service origin only; `GAUNTLET_ACCESS_CLIENT_ID`, `GAUNTLET_ACCESS_CLIENT_SECRET`: Access service credentials permitted to trigger/read runs |
 | Repository secrets | `GAUNTLET_REGISTRY_READ_USER`, `GAUNTLET_REGISTRY_READ_TOKEN`: read-only access to both candidate packages and the pinned component package |
 

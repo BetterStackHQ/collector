@@ -96,16 +96,18 @@ def api(method, path, body=None, headers=None):
 
 
 def profile(candidate):
-    require(candidate["profile"] == environment("GAUNTLET_PROFILE")
-            and candidate["profile_revision"] == environment("GAUNTLET_PROFILE_REVISION")
-            and candidate["bundle"]["config_bundle_hash"] == environment("GAUNTLET_CONFIG_BUNDLE_HASH"),
-            "retained candidate differs from required profile/configuration")
-    expected = (candidate["profile"], candidate["profile_revision"], candidate["kind"],
-                candidate["bundle"]["config_bundle_hash"])
+    # Resolve the deployed profile by name; a retained candidate may only repeat the server's identity.
+    require(candidate["profile"] == environment("GAUNTLET_PROFILE"), "retained candidate differs from required profile")
     matches = [p for p in api("GET", "/api/profiles")["profiles"]
-               if (p["name"], p["revision"], p["kind"], p["config_bundle_hash"]) == expected]
-    require(len(matches) == 1, "configured profile/revision/config is unavailable or obsolete")
-    return matches[0]
+               if p["name"] == candidate["profile"] and p["kind"] == candidate["kind"]]
+    require(len(matches) == 1, "named profile is unavailable or ambiguous for this kind")
+    found, bundle = matches[0], candidate["bundle"]
+    require(found["revision"] and found["config_bundle_hash"]
+            and candidate["profile_revision"] in (None, found["revision"])
+            and bundle["config_bundle_hash"] in (None, found["config_bundle_hash"]),
+            "retained candidate differs from current profile/configuration")
+    candidate["profile_revision"], bundle["config_bundle_hash"] = found["revision"], found["config_bundle_hash"]
+    return found
 
 
 def registry(repository, reference, *, config=False):
@@ -184,16 +186,15 @@ def make_bundle(args):
         repository, _, index = agent_pin(args.dockerfile)
         components["agent"] = resolve(repository, index)
     candidate = {"kind": args.kind, "origin": "ci", "repository": args.repository, "source_sha": args.source_sha,
-                 "profile": environment("GAUNTLET_PROFILE"), "profile_revision": environment("GAUNTLET_PROFILE_REVISION"),
-                 "bundle": {"images": images, "components": components,
-                            "config_bundle_hash": environment("GAUNTLET_CONFIG_BUNDLE_HASH")}}
-    profile(candidate)
+                 "profile": environment("GAUNTLET_PROFILE"), "profile_revision": None,
+                 "bundle": {"images": images, "components": components, "config_bundle_hash": None}}
     save(args.output, candidate)
 
 
 def prerequisite(args):
     candidate = load(args.candidate)
     require(candidate["kind"] == "collector", "collector prerequisite only")
+    profile(candidate)
     repository, version, index = agent_pin(args.dockerfile)
     included = resolve(repository, index)
     require(included == candidate["bundle"]["components"]["agent"], "agent Dockerfile pin differs from bundle")

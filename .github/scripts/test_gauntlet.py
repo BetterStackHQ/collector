@@ -84,11 +84,15 @@ class ClientChecks(unittest.TestCase):
                                       image=[role + "=" + value["repository"] + "@" + value["index_digest"]
                                              for role, value in candidate()["bundle"]["images"].items()],
                                       dockerfile=str(dockerfile), output=output)
-            with patch.dict(os.environ, {"GAUNTLET_PROFILE": "collector", "GAUNTLET_PROFILE_REVISION": "profile-1",
-                                         "GAUNTLET_CONFIG_BUNDLE_HASH": "config-1", "EBPF_AGENT_IMAGE": "wrong"}), \
-                    patch.object(g, "profile"), patch.object(g, "resolve", side_effect=lambda repo, ref: {**image, "repository": repo, "index_digest": ref}):
+            with patch.dict(os.environ, {"GAUNTLET_PROFILE": "collector", "EBPF_AGENT_IMAGE": "wrong"}), \
+                    patch.object(g, "api") as api, \
+                    patch.object(g, "resolve", side_effect=lambda repo, ref: {**image, "repository": repo, "index_digest": ref}):
                 g.make_bundle(args)
-            self.assertEqual(g.load(output)["bundle"]["components"]["agent"]["index_digest"], pin)
+            api.assert_not_called()
+            bundled = g.load(output)
+            self.assertEqual(bundled["bundle"]["components"]["agent"]["index_digest"], pin)
+            self.assertEqual((bundled["profile"], bundled["profile_revision"], bundled["bundle"]["config_bundle_hash"]),
+                             ("collector", None, None))
 
     def test_post_has_longer_bounded_timeout_and_http_auth_is_not_transient(self):
         connection = Mock()
@@ -128,11 +132,27 @@ class ClientChecks(unittest.TestCase):
                     g.submit(args)
                 self.assertEqual(api.call_count, attempts)
 
-    def test_retained_profile_must_match_current_required_configuration(self):
-        with patch.dict(os.environ, {"GAUNTLET_PROFILE": "collector", "GAUNTLET_PROFILE_REVISION": "profile-1",
-                                    "GAUNTLET_CONFIG_BUNDLE_HASH": "other-config"}), patch.object(g, "api") as api:
-            with self.assertRaisesRegex(ValueError, "required profile/configuration"):
-                g.profile(candidate())
+    def test_profile_resolves_by_name_and_kind_and_fails_closed(self):
+        server = {"name": "collector", "kind": "collector", "revision": "profile-1", "config_bundle_hash": "config-1"}
+        resolved = candidate()
+        resolved["profile_revision"] = resolved["bundle"]["config_bundle_hash"] = None
+        others = [{**server, "name": "other"}, {**server, "kind": "agent", "revision": "agent-1"}]
+        with patch.dict(os.environ, {"GAUNTLET_PROFILE": "collector"}):
+            with patch.object(g, "api", return_value={"profiles": [server, *others]}):
+                self.assertEqual(g.profile(resolved), server)
+                self.assertEqual(resolved, candidate())
+                g.profile(resolved)  # retained values equal to the server's are accepted
+            for profiles in ([], [{**server, "kind": "agent"}], [server, {**server, "revision": "profile-2"}]):
+                with self.subTest(profiles=profiles), patch.object(g, "api", return_value={"profiles": profiles}), \
+                        self.assertRaisesRegex(ValueError, "unavailable or ambiguous"):
+                    g.profile(candidate())
+            for retained in ({"profile_revision": "profile-0"},
+                             {"bundle": {**candidate()["bundle"], "config_bundle_hash": "other-config"}}):
+                with self.subTest(retained=retained), patch.object(g, "api", return_value={"profiles": [server]}), \
+                        self.assertRaisesRegex(ValueError, "current profile/configuration"):
+                    g.profile(candidate() | retained)
+            with patch.object(g, "api") as api, self.assertRaisesRegex(ValueError, "required profile"):
+                g.profile(candidate() | {"profile": "other"})
             api.assert_not_called()
 
     def test_registry_rejects_untrusted_identity_before_running_commands(self):
@@ -169,7 +189,7 @@ class ClientChecks(unittest.TestCase):
             for config in (good, {**good, "Labels": {**good["Labels"], "org.opencontainers.image.revision": OTHER}},
                            {**good, "Labels": {**good["Labels"], "org.opencontainers.image.version": "wrong"}},
                            {**good, "Env": []}):
-                with self.subTest(config=config), patch.object(g, "load", return_value=c), \
+                with self.subTest(config=config), patch.object(g, "load", return_value=c), patch.object(g, "profile") as profile, \
                         patch.object(g, "agent_pin", return_value=(image["repository"], "1.2.3", image["index_digest"])), \
                         patch.object(g, "resolve", side_effect=lambda repo, ref: next(
                             item for item in [image, *c["bundle"]["images"].values()] if item["repository"] == repo)), \
@@ -177,6 +197,7 @@ class ClientChecks(unittest.TestCase):
                             [agent_config if value["repository"] == image["repository"] else config])):
                     if config == good:
                         g.prerequisite(args)
+                        profile.assert_called_once_with(c)
                     else:
                         with self.assertRaises(ValueError):
                             g.prerequisite(args)
