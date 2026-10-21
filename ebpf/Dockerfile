@@ -110,10 +110,13 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Download AWS RDS CA bundle and update system CA store
+# Download AWS RDS CA bundle and update system CA store; fail the build if the
+# roots behind the compromised eMudhra intermediates are still trusted
 RUN curl -sS https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
     -o /usr/local/share/ca-certificates/aws-rds.crt \
-    && update-ca-certificates
+    && update-ca-certificates \
+    && ! test -e /etc/ssl/certs/emSign_ECC_Root_CA_-_G3.pem \
+    && ! test -e /etc/ssl/certs/Comodo_AAA_Services_root.pem
 
 # Create necessary directories
 RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /enrichment /bootstrap
