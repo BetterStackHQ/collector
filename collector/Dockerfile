@@ -34,10 +34,15 @@ RUN apt-get update && apt-get install -y \
   ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
-# Download AWS RDS CA bundle and update system CA store
-RUN curl -sS https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+# Download AWS RDS CA bundle and update system CA store; fail the build if the
+# roots behind the compromised eMudhra intermediates are still trusted
+RUN apt-get update && apt-get install -y --only-upgrade ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && curl -sS https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
   -o /usr/local/share/ca-certificates/aws-rds.crt \
-  && update-ca-certificates
+  && update-ca-certificates \
+  && ! test -e /etc/ssl/certs/emSign_ECC_Root_CA_-_G3.pem \
+  && ! test -e /etc/ssl/certs/Comodo_AAA_Services_root.pem
 
 # Copy Vector from vector image
 COPY --from=vector --chmod=755 /usr/bin/vector /usr/local/bin/vector
@@ -59,7 +64,7 @@ RUN mkdir -p /versions/0-default \
 # Set environment variables
 ENV BASE_URL=https://telemetry.betterstack.com
 ENV CLUSTER_COLLECTOR=false
-ENV COLLECTOR_VERSION=1.1.50
+ENV COLLECTOR_VERSION=1.1.51
 ENV VECTOR_VERSION=0.47.0
 ENV CLUSTER_AGENT_VERSION=1.11.5
 ENV OBI_VERSION=0.14.0
