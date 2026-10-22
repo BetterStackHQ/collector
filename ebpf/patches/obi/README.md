@@ -21,6 +21,7 @@ digest is pinned in `ebpf/Dockerfile`.
 | 014 | Remove | [#3514](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3514) sizes the environment map with `validEnvCount()`, ignoring empty entries left by `setproctitle`. |
 | 015 | Restack | Preserve upstream socket-cookie includes and tracer detach lifecycle state while retaining injector-owned Go PID admission and connect tracking. |
 | 017 | New | Names MongoDB spans from cut-short captures and adds `db.query.text`. Upstream candidate; no upstream equivalent yet. |
+| 018 | New | Accepts the whole int32 range of MongoDB request ids. Upstream candidate; no upstream equivalent yet. |
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
 bounds are part of the base now. A successful fill can copy less than `msg->size`
@@ -390,3 +391,18 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   typical find or insert's shape but not a long aggregation pipeline. The
   unit tests use messages captured from the mongodb npm 6.12 and pymongo 4.15
   drivers, cut at the capture sizes, and a fuzz target covers the walk.
+* 018-mongo-request-ids.patch
+  Accept MongoDB request ids from the whole int32 range. The OP_MSG header
+  check rejected any message whose `requestID` or `responseTo` was negative,
+  as if the wire protocol promised them positive; it only promises an int32.
+  pymongo draws its ids at random from that range, so half of its requests
+  failed the check and lost their span, replies included, whatever the
+  command. The other drivers count their ids up from a small number, so
+  this only ever affected pymongo; what they share with it is 017's cut
+  document sequence, which is where pymongo, the Java, C#, Ruby and PHP
+  drivers carry an insert's documents, and that is why inserts from all of
+  them were mostly missing while Node's, with documents in the body, were
+  not. The pairing of a reply with its request already keys on the full
+  int32, so nothing else changes; the fuzz invariant that encoded the old
+  rule is updated, and a test uses a pymongo find captured with a negative
+  id.
