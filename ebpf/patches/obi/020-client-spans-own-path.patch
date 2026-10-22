@@ -1,0 +1,572 @@
+diff --git a/pkg/appolly/app/request/metric_attributes.go b/pkg/appolly/app/request/metric_attributes.go
+index 10bfb03e9..7967ad5f4 100644
+--- a/pkg/appolly/app/request/metric_attributes.go
++++ b/pkg/appolly/app/request/metric_attributes.go
+@@ -4,6 +4,7 @@
+ package request // import "go.opentelemetry.io/obi/pkg/appolly/app/request"
+ 
+ import (
++	"net"
+ 	"strconv"
+ 	"strings"
+ 
+@@ -258,6 +259,29 @@ func HostFromSchemeHost(span *Span) string {
+ 	return ""
+ }
+ 
++// hostNamesPort reports whether a host string already carries a port. A bare
++// IPv6 literal, which the header parser hands over without its brackets, does
++// not, however many colons it has.
++func hostNamesPort(host string) bool {
++	if net.ParseIP(strings.Trim(host, "[]")) != nil {
++		return strings.HasPrefix(host, "[") && strings.LastIndexByte(host, ':') > strings.LastIndexByte(host, ']')
++	}
++	return strings.IndexByte(host, ':') >= 0
++}
++
++// HTTPClientAuthority is what url.full names as the authority: the Host header
++// as the client sent it, port included, or the resolved server when the
++// request carried no header. The port is the header's, never the
++// connection's: through a forward proxy or a socket-level load balancer the
++// connection's port is not the URL's.
++func HTTPClientAuthority(span *Span) string {
++	host := HTTPClientHost(span)
++	if span.HostHeaderPort <= 0 || host == "" || hostNamesPort(host) {
++		return host
++	}
++	return net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(span.HostHeaderPort))
++}
++
+ func HTTPClientHost(span *Span) string {
+ 	if host := HostFromSchemeHost(span); host != "" {
+ 		return host
+diff --git a/pkg/appolly/app/request/span.go b/pkg/appolly/app/request/span.go
+index c1668e505..a5c0b9f7a 100644
+--- a/pkg/appolly/app/request/span.go
++++ b/pkg/appolly/app/request/span.go
+@@ -1517,30 +1517,33 @@ const (
+ // and SpanPromGetters in pkg/appolly/app/request/span_getters_providers.go and
+ // getDefinitions in pkg/export/attributes/attr_defs.go
+ type Span struct {
+-	Type           EventType      `json:"type"`
+-	SpanKind       trace.SpanKind `json:"-"`
+-	Flags          uint8          `json:"-"`
+-	ProtoVersion   ProtoVersion   `json:"-"`
+-	UserAgent      string         `json:"-"`
+-	Method         string         `json:"-"`
+-	Path           string         `json:"-"`
+-	FullPath       string         `json:"-"`
+-	Route          string         `json:"-"`
+-	Peer           string         `json:"peer"`
+-	PeerPort       int            `json:"peerPort,string"`
+-	Host           string         `json:"host"`
+-	HostPort       int            `json:"hostPort,string"`
+-	Status         int            `json:"-"`
+-	ResponseLength int64          `json:"-"`
+-	ContentLength  int64          `json:"-"`
+-	DBBatchSize    int            `json:"-"`
+-	RequestStart   int64          `json:"-"`
+-	Start          int64          `json:"-"`
+-	End            int64          `json:"-"`
+-	Service        svc.Attrs      `json:"-"`
+-	TraceID        trace.TraceID  `json:"traceID"`
+-	SpanID         trace.SpanID   `json:"spanID"`
+-	ParentSpanID   trace.SpanID   `json:"parentSpanID"`
++	Type         EventType      `json:"type"`
++	SpanKind     trace.SpanKind `json:"-"`
++	Flags        uint8          `json:"-"`
++	ProtoVersion ProtoVersion   `json:"-"`
++	UserAgent    string         `json:"-"`
++	Method       string         `json:"-"`
++	Path         string         `json:"-"`
++	FullPath     string         `json:"-"`
++	Route        string         `json:"-"`
++	Peer         string         `json:"peer"`
++	PeerPort     int            `json:"peerPort,string"`
++	Host         string         `json:"host"`
++	HostPort     int            `json:"hostPort,string"`
++	// HostHeaderPort is the port the request's Host header named, if any; it
++	// belongs to the URL and may differ from the connection's HostPort.
++	HostHeaderPort int           `json:"-"`
++	Status         int           `json:"-"`
++	ResponseLength int64         `json:"-"`
++	ContentLength  int64         `json:"-"`
++	DBBatchSize    int           `json:"-"`
++	RequestStart   int64         `json:"-"`
++	Start          int64         `json:"-"`
++	End            int64         `json:"-"`
++	Service        svc.Attrs     `json:"-"`
++	TraceID        trace.TraceID `json:"traceID"`
++	SpanID         trace.SpanID  `json:"spanID"`
++	ParentSpanID   trace.SpanID  `json:"parentSpanID"`
+ 	// ParentConditional marks a parent that may already have finished when this
+ 	// span started: BPF cannot tell at that moment, so the pipeline settles the
+ 	// link against the parent span's real end timestamp before export.
+diff --git a/pkg/ebpf/common/http_transform.go b/pkg/ebpf/common/http_transform.go
+index d7a18f148..4b7165b31 100644
+--- a/pkg/ebpf/common/http_transform.go
++++ b/pkg/ebpf/common/http_transform.go
+@@ -53,13 +53,15 @@ func removeQuery(url string) string {
+ 
+ type HTTPInfo struct {
+ 	BPFHTTPInfo
+-	Method       string
+-	URL          string
+-	Host         string
+-	Peer         string
+-	HeaderHost   string
+-	Body         string
+-	ProtoVersion request.ProtoVersion
++	Method     string
++	URL        string
++	Host       string
++	Peer       string
++	HeaderHost string
++	// HeaderHostPort is the port the Host header named, 0 when it named none.
++	HeaderHostPort int
++	Body           string
++	ProtoVersion   request.ProtoVersion
+ }
+ 
+ // misses serviceID
+@@ -94,8 +96,9 @@ func httpInfoToSpanLegacy(info *HTTPInfo) request.Span {
+ 			UserPID:   app.PID(info.Pid.UserPid),
+ 			Namespace: info.Pid.Ns,
+ 		},
+-		Statement:    scheme + request.SchemeHostSeparator + info.HeaderHost,
+-		ProtoVersion: info.ProtoVersion,
++		Statement:      scheme + request.SchemeHostSeparator + info.HeaderHost,
++		HostHeaderPort: info.HeaderHostPort,
++		ProtoVersion:   info.ProtoVersion,
+ 	}
+ 
+ 	markResponseObservation(&span, &info.BPFHTTPInfo)
+@@ -170,8 +173,9 @@ func httpRequestResponseToSpan(parseCtx *EBPFParseContext, event *BPFHTTPInfo, r
+ 
+ 	reqType := request.EventType(event.Type)
+ 	headerHost := req.Host
++	headerHostPort := 0
+ 	if headerHost == "" && reqType == request.EventTypeHTTPClient {
+-		headerHost, _ = httpHostFromBuf(event.Buf[:])
++		headerHost, headerHostPort = httpHostFromBuf(event.Buf[:])
+ 	}
+ 
+ 	// FullPath matches net/url.URL.String() (full URL or request-target), not RequestURI().
+@@ -202,7 +206,8 @@ func httpRequestResponseToSpan(parseCtx *EBPFParseContext, event *BPFHTTPInfo, r
+ 			UserPID:   app.PID(event.Pid.UserPid),
+ 			Namespace: event.Pid.Ns,
+ 		},
+-		Statement: scheme + request.SchemeHostSeparator + headerHost,
++		Statement:      scheme + request.SchemeHostSeparator + headerHost,
++		HostHeaderPort: max(headerHostPort, 0),
+ 	}
+ 
+ 	markResponseObservation(&httpSpan, event)
+@@ -619,10 +624,14 @@ func httpRequestToSpan(event *BPFHTTPInfo, requestBuffer *largebuf.LargeBuffer)
+ 	result.ProtoVersion = request.HTTPProtoVersionFromRequestLine(raw)
+ 
+ 	if request.EventType(result.Type) == request.EventTypeHTTPClient && !parsedHost {
+-		bufHost, _ = httpHostFromBuf(raw)
++		bufHost, bufPort = httpHostFromBuf(raw)
+ 	}
+ 
+ 	result.HeaderHost = bufHost
++	// The port the header named goes with the host into url.full; the
++	// connection's port is not the URL's through a proxy or a socket-level
++	// load balancer.
++	result.HeaderHostPort = max(bufPort, 0)
+ 
+ 	return httpInfoToSpanLegacy(&result)
+ }
+@@ -686,7 +695,11 @@ func httpHostFromBuf(req []byte) (string, int) {
+ 		return string(hostPort), -1
+ 	}
+ 
+-	port, _ := strconv.Atoi(portStr)
++	// A port outside the TCP range is not a port: keep the host, report none.
++	port, err := strconv.Atoi(portStr)
++	if err != nil || port < 1 || port > 65535 {
++		return host, 0
++	}
+ 
+ 	return host, port
+ }
+diff --git a/pkg/ebpf/common/http_transform_test.go b/pkg/ebpf/common/http_transform_test.go
+index bd79e8d15..dd732d22e 100644
+--- a/pkg/ebpf/common/http_transform_test.go
++++ b/pkg/ebpf/common/http_transform_test.go
+@@ -244,20 +244,21 @@ func TestToRequestTraceNoConnection(t *testing.T) {
+ 
+ 	// change the expected port just before testing
+ 	expected := request.Span{
+-		Host:         "localhost",
+-		Peer:         "",
+-		Path:         "/hello",
+-		FullPath:     "/hello",
+-		Method:       "GET",
+-		ProtoVersion: request.ProtoVersionHTTP11,
+-		Type:         request.EventTypeHTTP,
+-		Start:        123456,
+-		RequestStart: 123450,
+-		End:          789012,
+-		Status:       200,
+-		HostPort:     7033,
+-		Service:      svc.Attrs{},
+-		Statement:    "http;localhost",
++		Host:           "localhost",
++		Peer:           "",
++		Path:           "/hello",
++		FullPath:       "/hello",
++		Method:         "GET",
++		ProtoVersion:   request.ProtoVersionHTTP11,
++		Type:           request.EventTypeHTTP,
++		Start:          123456,
++		RequestStart:   123450,
++		End:            789012,
++		Status:         200,
++		HostPort:       7033,
++		HostHeaderPort: 7033,
++		Service:        svc.Attrs{},
++		Statement:      "http;localhost",
+ 	}
+ 	assert.Equal(t, expected, result)
+ }
+@@ -398,6 +399,66 @@ func TestMethodURLParsing(t *testing.T) {
+ 	assert.Empty(t, httpURLFromBuf(i.Buf[:]))
+ }
+ 
++// The Host header's port is kept apart from the host: url.full needs it, while
++// server.address and name resolution keep seeing the bare host.
++func TestHTTPRequestToSpanKeepsHostHeaderPort(t *testing.T) {
++	newClientEvent := func(buf string) *BPFHTTPInfo {
++		event := makeBPFInfoWithBuf([]uint8(buf))
++		event.Type = uint8(request.EventTypeHTTPClient)
++		event.ConnInfo.S_port = 34567
++		event.ConnInfo.D_port = 4000
++		return &event
++	}
++
++	t.Run("port named by the header", func(t *testing.T) {
++		event := newClientEvent("POST /reserve HTTP/1.1\r\nHost: inventory:4000\r\n\r\n")
++		span := httpRequestToSpan(event, largebuf.NewLargeBufferFrom(event.Buf[:]))
++		assert.Equal(t, "http;inventory", span.Statement)
++		assert.Equal(t, 4000, span.HostHeaderPort)
++		assert.Equal(t, 4000, span.HostPort)
++	})
++
++	t.Run("no port in the header", func(t *testing.T) {
++		event := newClientEvent("POST /reserve HTTP/1.1\r\nHost: inventory\r\n\r\n")
++		span := httpRequestToSpan(event, largebuf.NewLargeBufferFrom(event.Buf[:]))
++		assert.Equal(t, "http;inventory", span.Statement)
++		assert.Equal(t, 0, span.HostHeaderPort)
++	})
++
++	t.Run("ipv6 literal", func(t *testing.T) {
++		event := newClientEvent("GET /stock/3 HTTP/1.1\r\nHost: [2001:db8::1]:8080\r\n\r\n")
++		span := httpRequestToSpan(event, largebuf.NewLargeBufferFrom(event.Buf[:]))
++		assert.Equal(t, "http;2001:db8::1", span.Statement)
++		assert.Equal(t, 8080, span.HostHeaderPort)
++	})
++
++	t.Run("a port outside the TCP range is not a port", func(t *testing.T) {
++		event := newClientEvent("POST /reserve HTTP/1.1\r\nHost: inventory:70000\r\n\r\n")
++		span := httpRequestToSpan(event, largebuf.NewLargeBufferFrom(event.Buf[:]))
++		assert.Equal(t, "http;inventory", span.Statement)
++		assert.Equal(t, 0, span.HostHeaderPort)
++	})
++
++	t.Run("payload parser falls back to the buffer for an empty Host", func(t *testing.T) {
++		event := newClientEvent("POST /reserve HTTP/1.1\r\nHost: inventory:4000\r\n\r\n")
++		req := &http.Request{Method: http.MethodPost, URL: &url.URL{Path: "/reserve"}, Body: io.NopCloser(strings.NewReader(""))}
++		resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(nil))}
++		span := httpRequestResponseToSpan(nil, event, req, resp)
++		assert.Equal(t, "http;inventory", span.Statement)
++		assert.Equal(t, 4000, span.HostHeaderPort)
++	})
++
++	t.Run("no connection info takes host and port from the header", func(t *testing.T) {
++		event := newClientEvent("POST /reserve HTTP/1.1\r\nHost: inventory:4000\r\n\r\n")
++		event.ConnInfo.S_port, event.ConnInfo.D_port = 0, 0
++		span := httpRequestToSpan(event, largebuf.NewLargeBufferFrom(event.Buf[:]))
++		assert.Equal(t, "inventory", span.Host)
++		assert.Equal(t, 4000, span.HostPort)
++		assert.Equal(t, 4000, span.HostHeaderPort)
++		assert.Equal(t, "http;inventory", span.Statement)
++	})
++}
++
+ func TestHTTPRequestToSpanMethodFromSSLBuffer(t *testing.T) {
+ 	newSSLEvent := func(buf []uint8) *BPFHTTPInfo {
+ 		event := makeBPFInfoWithBuf(buf)
+diff --git a/pkg/export/otel/tracesgen/tracesgen.go b/pkg/export/otel/tracesgen/tracesgen.go
+index 9ed1afb68..390027994 100644
+--- a/pkg/export/otel/tracesgen/tracesgen.go
++++ b/pkg/export/otel/tracesgen/tracesgen.go
+@@ -794,7 +794,7 @@ func traceAttributesSelectorInternal(span *request.Span, optionalAttrs map[attr.
+ 		}
+ 		url := urlPath
+ 		if span.HasOriginalHost() {
+-			url = request.URLFull(scheme, host, urlPath)
++			url = request.URLFull(scheme, request.HTTPClientAuthority(span), urlPath)
+ 		}
+ 
+ 		transport := httpClientTransportScope(span.SubType)
+diff --git a/pkg/export/otel/tracesgen/url_full_test.go b/pkg/export/otel/tracesgen/url_full_test.go
+new file mode 100644
+index 000000000..808bd1d5e
+--- /dev/null
++++ b/pkg/export/otel/tracesgen/url_full_test.go
+@@ -0,0 +1,51 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package tracesgen
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++
++	"go.opentelemetry.io/obi/pkg/appolly/app/request"
++	attr "go.opentelemetry.io/obi/pkg/export/attributes/names"
++)
++
++// url.full carries the authority the client put in its Host header, port
++// included: a call to inventory:4000 is http://inventory:4000/reserve. The
++// connection's port is never consulted; through a forward proxy or a
++// socket-level load balancer it is not the URL's port.
++func TestTraceAttributesSelector_URLFullAuthority(t *testing.T) {
++	for _, tc := range []struct {
++		name       string
++		statement  string
++		headerPort int
++		connPort   int
++		want       string
++	}{
++		{"port named by the header", "http;inventory", 4000, 4000, "http://inventory:4000/reserve"},
++		{"no port in the header", "http;inventory", 0, 4000, "http://inventory/reserve"},
++		{"header kept whole by the payload parser", "http;inventory:4000", 0, 4000, "http://inventory:4000/reserve"},
++		{"default port spelled out", "http;inventory", 80, 80, "http://inventory:80/reserve"},
++		{"https", "https;inventory", 8443, 8443, "https://inventory:8443/reserve"},
++		{"ipv6 literal with port", "http;2001:db8::1", 8080, 8080, "http://[2001:db8::1]:8080/reserve"},
++		{"ipv6 literal", "http;[2001:db8::1]", 0, 8080, "http://[2001:db8::1]/reserve"},
++		// a CONNECT tunnel: the header names the origin, the connection a proxy
++		{"forward proxy", "https;api.example.com", 0, 3128, "https://api.example.com/reserve"},
++		{"socket-level load balancing", "http;inventory", 0, 8080, "http://inventory/reserve"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			span := &request.Span{
++				Type: request.EventTypeHTTPClient, Method: "POST", Path: "/reserve",
++				Host: "10.0.0.5", HostPort: tc.connPort, HostHeaderPort: tc.headerPort, Status: 200,
++				Statement: tc.statement,
++			}
++			selected := AttrsToMap(TraceAttributesSelector(span, map[attr.Name]struct{}{}))
++			val, ok := selected.Get("url.full")
++			require.True(t, ok, tc.want)
++			assert.Equal(t, tc.want, val.Str())
++		})
++	}
++}
+diff --git a/pkg/internal/transform/route/parameters.go b/pkg/internal/transform/route/parameters.go
+index fc857b371..9c2fc6e9e 100644
+--- a/pkg/internal/transform/route/parameters.go
++++ b/pkg/internal/transform/route/parameters.go
+@@ -5,6 +5,17 @@ package route // import "go.opentelemetry.io/obi/pkg/internal/transform/route"
+ 
+ import "strings"
+ 
++// HasCatchAll reports whether a route pattern has a segment that swallows the
++// rest of the path: Django's <path:name>, FastAPI's {name:path}, {*name} or *.
++func HasCatchAll(pattern string) bool {
++	for _, part := range strings.Split(pattern, "/") {
++		if tail, ok := routeParam(part); ok && tail {
++			return true
++		}
++	}
++	return false
++}
++
+ func validPartialRoute(parts []string) bool {
+ 	for i, part := range parts {
+ 		if tail, ok := routeParam(part); ok && tail && i != len(parts)-1 {
+diff --git a/pkg/internal/transform/route/parameters_test.go b/pkg/internal/transform/route/parameters_test.go
+index 61b640c9d..f80f29e87 100644
+--- a/pkg/internal/transform/route/parameters_test.go
++++ b/pkg/internal/transform/route/parameters_test.go
+@@ -9,6 +9,23 @@ import (
+ 	"github.com/stretchr/testify/assert"
+ )
+ 
++func TestHasCatchAll(t *testing.T) {
++	for pattern, want := range map[string]bool{
++		"/<path:url>":             true,
++		"/api/<path:rest>":        true,
++		"/files/{file_path:path}": true,
++		"/{*path}":                true,
++		"/static/*":               true,
++		"/users/{id}":             false,
++		"/<int:id>/edit":          false,
++		"/:id":                    false,
++		"/orders":                 false,
++		"/":                       false,
++	} {
++		assert.Equal(t, want, HasCatchAll(pattern), pattern)
++	}
++}
++
+ func TestIsInlineConstrainedParam(t *testing.T) {
+ 	tests := []struct {
+ 		name  string
+diff --git a/pkg/transform/routes.go b/pkg/transform/routes.go
+index 592524a97..0b0c92421 100644
+--- a/pkg/transform/routes.go
++++ b/pkg/transform/routes.go
+@@ -8,6 +8,7 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"log/slog"
++	"strings"
+ 
+ 	"go.opentelemetry.io/obi/pkg/appolly/app/request"
+ 	"go.opentelemetry.io/obi/pkg/appolly/app/svc"
+@@ -210,7 +211,7 @@ func (rn *routerNode) provideRoutes(_ context.Context) (swarm.RunFunc, error) {
+ 					}
+ 
+ 					if s.Route == "" && s.Service.HarvestedRouteMatcher != nil {
+-						s.Route = s.Service.HarvestedRouteMatcher.Find(s.Path)
++						s.Route = harvestedRoute(s)
+ 					}
+ 				}
+ 
+@@ -221,6 +222,45 @@ func (rn *routerNode) provideRoutes(_ context.Context) (swarm.RunFunc, error) {
+ 	}, nil
+ }
+ 
++// harvestedRoute names a span from the routes harvested out of the process's
++// source. Those are mostly the process's own endpoints, which say nothing
++// about the paths it calls on other services, but some describe outgoing
++// calls too (a Spring Feign client's annotated interface), so a client span
++// may still take a harvested route: just not a catch-all. A pattern without a
++// single literal segment, Django's <path:url> or a bare /{slug}, matches any
++// path at all, and applied to outgoing calls it named every one of them the
++// same. Such a pattern names incoming requests only.
++func harvestedRoute(span *request.Span) string {
++	pattern := span.Service.HarvestedRouteMatcher.Find(span.Path)
++	if pattern == "" || !span.IsClientSpan() {
++		return pattern
++	}
++	// A harvested route mostly describes a request the process serves. One
++	// without a literal segment, or with a catch-all segment, matches any
++	// outgoing call and says nothing about it; a Feign-style /users/{id}
++	// still names the call it describes.
++	if routeHasLiteralSegment(pattern) && !route.HasCatchAll(pattern) {
++		return pattern
++	}
++	return ""
++}
++
++// routeHasLiteralSegment reports whether a route pattern pins at least one
++// path segment to a fixed value rather than a placeholder.
++func routeHasLiteralSegment(route string) bool {
++	for _, segment := range strings.Split(route, "/") {
++		if segment == "" {
++			continue
++		}
++		switch segment[0] {
++		case '{', '<', ':', '*':
++			continue
++		}
++		return true
++	}
++	return false
++}
++
+ func (rn *routerNode) provideDirectionalRoutes() (swarm.RunFunc, error) {
+ 	policies := rn.config.DirectionalPolicies()
+ 	rn.incomingRoutePolicy = svc.NewRoutePolicy(policies.Incoming)
+@@ -287,7 +327,7 @@ func (rn *routerNode) applyDirectionalPolicy(span *request.Span) {
+ 		span.Route = policy.Matcher.Find(span.Path)
+ 	}
+ 	if span.Route == "" && span.IsHTTPSpan() && span.Service.HarvestedRouteMatcher != nil {
+-		span.Route = span.Service.HarvestedRouteMatcher.Find(span.Path)
++		span.Route = harvestedRoute(span)
+ 	}
+ 	if span.Route != "" {
+ 		return
+diff --git a/pkg/transform/routes_test.go b/pkg/transform/routes_test.go
+index f835a1d2c..69c909007 100644
+--- a/pkg/transform/routes_test.go
++++ b/pkg/transform/routes_test.go
+@@ -322,6 +322,71 @@ func TestDirectionalRoutesPerServiceOverrides(t *testing.T) {
+ 	assert.Equal(t, "/harvested/{id}", spans[3].Route)
+ }
+ 
++// A catch-all among a process's harvested routes names its incoming requests
++// only: Django's <path:url> must not rename every call the service makes,
++// while a harvested route with a literal segment (a Feign client's template)
++// still names an outgoing call.
++func TestHarvestedCatchAllDoesNotNameClientSpans(t *testing.T) {
++	patterns := []string{"/orders", "/users/{id}", "/api/<path:rest>", "/<path:url>"}
++	// Django's url patterns are harvested whole; most other frameworks' routes
++	// come as fragments the partial matcher composes. The rule holds for both.
++	for matcherName, service := range map[string]svc.Attrs{
++		"complete": {HarvestedRouteMatcher: route.NewMatcher(patterns)},
++		"partial":  {HarvestedRouteMatcher: route.NewPartialRouteMatcher(patterns)},
++	} {
++		for name, cfg := range map[string]*RoutesConfig{
++			"legacy":      {Unmatch: UnmatchHeuristic},
++			"directional": {Directional: &services.DirectionalRoutePolicies{Incoming: services.RoutePolicy{Unmatch: services.UnmatchHeuristic}, Outgoing: services.RoutePolicy{Unmatch: services.UnmatchHeuristic}}},
++		} {
++			t.Run(matcherName+"/"+name, func(t *testing.T) {
++				input := msg.NewQueue[[]request.Span](msg.ChannelBufferLen(10))
++				output := msg.NewQueue[[]request.Span](msg.ChannelBufferLen(10))
++				router, err := RoutesProvider(cfg, input, output)(t.Context())
++				require.NoError(t, err)
++				out := output.Subscribe()
++				defer input.Close()
++				go router(t.Context())
++
++				input.Send([]request.Span{
++					{Type: request.EventTypeHTTP, Method: "GET", Path: "/orders", Service: service},
++					{Type: request.EventTypeHTTP, Method: "GET", Path: "/about/team", Service: service},
++					{Type: request.EventTypeHTTPClient, Method: "POST", Path: "/reserve", Service: service},
++					{Type: request.EventTypeHTTPClient, Method: "GET", Path: "/stock/3", Service: service},
++					{Type: request.EventTypeHTTPClient, Method: "GET", Path: "/users/42", Service: service},
++					{Type: request.EventTypeHTTP, Method: "GET", Path: "/api/orders/7", Service: service},
++					{Type: request.EventTypeHTTPClient, Method: "GET", Path: "/api/orders/7", Service: service},
++				})
++				spans := testutil.ReadChannel(t, out, testTimeout)
++				require.Len(t, spans, 7)
++				assert.Equal(t, "/orders", spans[0].Route)
++				assert.Equal(t, "/<path:url>", spans[1].Route, "incoming requests are named by the harvested routes")
++				assert.Equal(t, "/reserve", spans[2].Route, "an outgoing call keeps its own path")
++				assert.Equal(t, "/stock/*", spans[3].Route, "or its heuristic clustering")
++				assert.Equal(t, "/users/{id}", spans[4].Route, "a harvested route with a literal segment still names a call")
++				assert.Equal(t, "/api/<path:rest>", spans[5].Route, "a prefixed catch-all names incoming requests")
++				assert.Equal(t, "/api/orders/*", spans[6].Route, "but not the calls a gateway forwards")
++			})
++		}
++	}
++}
++
++func TestRouteHasLiteralSegment(t *testing.T) {
++	for route, want := range map[string]bool{
++		"/<path:url>":       false,
++		"/{slug}":           false,
++		"/:path*":           false,
++		"/*":                false,
++		"/":                 false,
++		"/users/{id}":       true,
++		"/api/<path:rest>":  true,
++		"/{tenant}/orders":  true,
++		"/@:username/posts": true,
++		"/orders":           true,
++	} {
++		assert.Equal(t, want, routeHasLiteralSegment(route), route)
++	}
++}
++
+ func TestDirectionalRoutesRuleOnlyPolicyScope(t *testing.T) {
+ 	baseline := services.DirectionalRoutePolicies{
+ 		Incoming: services.RoutePolicy{Unmatch: services.UnmatchUnset},
