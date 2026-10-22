@@ -734,6 +734,10 @@ func main() {
 	bystanderPort := flag.Int("bystander", 0, "internal: run as the non-discovered client of sockhash-scoping")
 	bystanderSpawner := flag.Int("bystander-spawner", 0, "internal: pid of the process that reparented us")
 	denyChildPort := flag.Int("deny-child", 0, "internal: run as the excluded direct child of deny-child")
+	ownCgroupPort := flag.Int("own-cgroup-client", 0, "internal: run as the client in the instrumentation's cgroup of own-cgroup")
+	earlyRole := flag.String("own-cgroup-early-role", "", "internal: parent, own-client, root-client or own-listener of the connections older than OBI")
+	earlyGate := flag.String("early-gate", "", "internal: file whose appearance releases the early requests")
+	earlyPort := flag.Int("early-port", 0, "internal: the early parent's port, for its clients")
 	flag.Parse()
 
 	// The sockhash-scoping scenario re-executes this binary from a path OBI's
@@ -757,6 +761,38 @@ func main() {
 	if *denyChildPort != 0 {
 		if err := denyChild(*denyChildPort); err != nil {
 			fmt.Fprintln(os.Stderr, "deny-child:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// The own-cgroup scenario runs this binary from the instrumentation's own
+	// cgroup; that copy takes this branch.
+	if *ownCgroupPort != 0 {
+		if err := ownCgroupClient(*ownCgroupPort); err != nil {
+			fmt.Fprintln(os.Stderr, "own-cgroup:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// run-under-obi.sh starts this binary before OBI as the parent of the
+	// own-cgroup scenario's early connections, and the parent runs it again
+	// for each end of those connections.
+	if *earlyRole != "" {
+		var err error
+		switch *earlyRole {
+		case "parent":
+			err = ownCgroupEarly(*earlyGate)
+		case "own-client", "root-client":
+			err = ownCgroupEarlyClient(*earlyRole, *earlyPort, *earlyGate)
+		case "own-listener":
+			err = ownCgroupEarlyListener(*earlyGate)
+		default:
+			err = fmt.Errorf("unknown role %q", *earlyRole)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "own-cgroup-early %s: %v\n", *earlyRole, err)
 			os.Exit(1)
 		}
 		return
@@ -790,6 +826,7 @@ func main() {
 		{"go-http-client", func() error { return goHTTPClient(*selfcheck) }},
 		{"sockhash-scoping", func() error { return sockhashScoping(*selfcheck) }},
 		{"deny-child", func() error { return denyChildScenario(*selfcheck) }},
+		{"own-cgroup", func() error { return ownCgroupScenario(*selfcheck) }},
 	}
 	for _, scenario := range scenarios {
 		progressScenario.Store(scenario.name)
