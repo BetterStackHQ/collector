@@ -1,0 +1,1176 @@
+diff --git a/pkg/ebpf/common/mongo_bson_partial.go b/pkg/ebpf/common/mongo_bson_partial.go
+new file mode 100644
+index 000000000..ee51aad9f
+--- /dev/null
++++ b/pkg/ebpf/common/mongo_bson_partial.go
+@@ -0,0 +1,358 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package ebpfcommon // import "go.opentelemetry.io/obi/pkg/ebpf/common"
++
++import (
++	"bytes"
++	"encoding/binary"
++	"math"
++	"strconv"
++	"strings"
++	"unicode/utf8"
++
++	"go.mongodb.org/mongo-driver/v2/bson"
++)
++
++// Reading what a cut-short capture still holds.
++//
++// The generic TCP tracer hands the parser the first bytes of a message, not the
++// message: 256 of a request and 128 of a reply (k_tcp_max_len, k_tcp_res_len)
++// unless buffer_sizes.tcp raises them. A find reply
++// with ten documents, or a request that carries a session, a cluster time and
++// a read preference on top of its filter, is longer than that, and
++// bson.Unmarshal refuses a document whose declared length exceeds the bytes it
++// is given. The command name and the collection are the first element of the
++// request body, "$db" is near the end, and "ok" is the last field of a reply;
++// so the part that names the span is almost always present, and the part that
++// is missing is almost always data. This walk decodes a BSON document prefix
++// element by element, keeping every element that is complete and descending
++// into embedded documents and arrays the same way, and reports whether it ran
++// out of bytes.
++
++const (
++	bsonTypeDouble        = 0x01
++	bsonTypeString        = 0x02
++	bsonTypeDocument      = 0x03
++	bsonTypeArray         = 0x04
++	bsonTypeBinary        = 0x05
++	bsonTypeUndefined     = 0x06
++	bsonTypeObjectID      = 0x07
++	bsonTypeBool          = 0x08
++	bsonTypeDateTime      = 0x09
++	bsonTypeNull          = 0x0A
++	bsonTypeRegex         = 0x0B
++	bsonTypeDBPointer     = 0x0C
++	bsonTypeJavaScript    = 0x0D
++	bsonTypeSymbol        = 0x0E
++	bsonTypeCodeWithScope = 0x0F
++	bsonTypeInt32         = 0x10
++	bsonTypeTimestamp     = 0x11
++	bsonTypeInt64         = 0x12
++	bsonTypeDecimal128    = 0x13
++	bsonTypeMinKey        = 0xFF
++	bsonTypeMaxKey        = 0x7F
++)
++
++// bsonOpaque stands in for a value whose content the span never needs.
++type bsonOpaque struct {
++	Type byte
++}
++
++// Deeper than any real command; what is below is data, kept opaque. Bounds the
++// stack an adversarial document can cost.
++const bsonMaxDepth = 32
++
++// bsonPrefix decodes the complete top-level elements of a BSON document that
++// buf may hold only the beginning of. The returned document is what
++// bson.Unmarshal would have produced for those elements, as far as the span
++// needs values: strings, numbers and booleans are decoded, embedded documents
++// and arrays are walked, anything else is opaque. truncated reports that the
++// document continued past buf, in which case the last embedded document or
++// array may itself be a prefix.
++func bsonPrefix(buf []byte) (doc bson.D, truncated bool) {
++	return bsonPrefixAt(buf, 0)
++}
++
++func bsonPrefixAt(buf []byte, depth int) (doc bson.D, truncated bool) {
++	if len(buf) < 4 {
++		return nil, true
++	}
++	declared := int(int32(binary.LittleEndian.Uint32(buf)))
++	if declared < 5 {
++		return nil, true
++	}
++	if declared > len(buf) {
++		truncated = true
++	} else {
++		buf = buf[:declared]
++	}
++
++	off := 4
++	for off < len(buf) {
++		elementType := buf[off]
++		if elementType == 0 {
++			// the terminator: a complete document
++			return doc, truncated
++		}
++		off++
++		keyEnd := bytes.IndexByte(buf[off:], 0)
++		if keyEnd < 0 {
++			return doc, true
++		}
++		key := string(buf[off : off+keyEnd])
++		off += keyEnd + 1
++
++		value, size, complete := bsonValue(elementType, buf[off:], depth)
++		if value != nil || complete {
++			doc = append(doc, bson.E{Key: key, Value: value})
++		}
++		if !complete {
++			return doc, true
++		}
++		off += size
++	}
++	return doc, true
++}
++
++// bsonValue decodes one element value of the given type from the start of b.
++// It returns the value, how many bytes it took, and whether all of it was
++// there. A cut embedded document or array still yields its readable prefix,
++// with complete false.
++func bsonValue(elementType byte, b []byte, depth int) (value any, size int, complete bool) {
++	fixed := func(n int, v func([]byte) any) (any, int, bool) {
++		if len(b) < n {
++			return nil, 0, false
++		}
++		return v(b[:n]), n, true
++	}
++	opaque := func([]byte) any { return bsonOpaque{Type: elementType} }
++
++	switch elementType {
++	case bsonTypeDouble:
++		return fixed(8, func(v []byte) any { return math.Float64frombits(binary.LittleEndian.Uint64(v)) })
++	case bsonTypeString, bsonTypeJavaScript, bsonTypeSymbol:
++		if len(b) < 4 {
++			return nil, 0, false
++		}
++		n := int(int32(binary.LittleEndian.Uint32(b)))
++		if n < 1 || len(b) < 4+n {
++			return nil, 0, false
++		}
++		s := string(b[4 : 4+n-1])
++		switch elementType {
++		case bsonTypeJavaScript:
++			return bson.JavaScript(s), 4 + n, true
++		case bsonTypeSymbol:
++			return bson.Symbol(s), 4 + n, true
++		default:
++			return s, 4 + n, true
++		}
++	case bsonTypeDocument, bsonTypeArray:
++		if len(b) < 4 {
++			return nil, 0, false
++		}
++		n := int(int32(binary.LittleEndian.Uint32(b)))
++		if n < 5 {
++			return nil, 0, false
++		}
++		if depth >= bsonMaxDepth {
++			if n > len(b) {
++				return nil, 0, false
++			}
++			return bsonOpaque{Type: elementType}, n, true
++		}
++		if n > len(b) {
++			sub, _ := bsonPrefixAt(b, depth+1)
++			return bsonContainer(elementType, sub), len(b), false
++		}
++		sub, cut := bsonPrefixAt(b[:n], depth+1)
++		return bsonContainer(elementType, sub), n, !cut
++	case bsonTypeBinary:
++		if len(b) < 5 {
++			return nil, 0, false
++		}
++		n := int(int32(binary.LittleEndian.Uint32(b)))
++		if n < 0 || len(b) < 5+n {
++			return nil, 0, false
++		}
++		return bsonOpaque{Type: elementType}, 5 + n, true
++	case bsonTypeUndefined, bsonTypeNull, bsonTypeMinKey, bsonTypeMaxKey:
++		return bsonOpaque{Type: elementType}, 0, true
++	case bsonTypeObjectID:
++		return fixed(12, opaque)
++	case bsonTypeBool:
++		return fixed(1, func(v []byte) any { return v[0] != 0 })
++	case bsonTypeDateTime:
++		return fixed(8, func(v []byte) any { return bson.DateTime(binary.LittleEndian.Uint64(v)) })
++	case bsonTypeTimestamp:
++		return fixed(8, opaque)
++	case bsonTypeInt32:
++		return fixed(4, func(v []byte) any { return int32(binary.LittleEndian.Uint32(v)) })
++	case bsonTypeInt64:
++		return fixed(8, func(v []byte) any { return int64(binary.LittleEndian.Uint64(v)) })
++	case bsonTypeDecimal128:
++		return fixed(16, opaque)
++	case bsonTypeRegex:
++		pattern := bytes.IndexByte(b, 0)
++		if pattern < 0 {
++			return nil, 0, false
++		}
++		options := bytes.IndexByte(b[pattern+1:], 0)
++		if options < 0 {
++			return nil, 0, false
++		}
++		return bsonOpaque{Type: elementType}, pattern + 1 + options + 1, true
++	case bsonTypeDBPointer:
++		if len(b) < 4 {
++			return nil, 0, false
++		}
++		n := int(int32(binary.LittleEndian.Uint32(b)))
++		if n < 1 || len(b) < 4+n+12 {
++			return nil, 0, false
++		}
++		return bsonOpaque{Type: elementType}, 4 + n + 12, true
++	case bsonTypeCodeWithScope:
++		if len(b) < 4 {
++			return nil, 0, false
++		}
++		n := int(int32(binary.LittleEndian.Uint32(b)))
++		if n < 4 || len(b) < n {
++			return nil, 0, false
++		}
++		return bsonOpaque{Type: elementType}, n, true
++	default:
++		// not BSON after all; stop here
++		return nil, 0, false
++	}
++}
++
++func bsonContainer(elementType byte, doc bson.D) any {
++	if elementType != bsonTypeArray {
++		return doc
++	}
++	arr := make(bson.A, 0, len(doc))
++	for _, e := range doc {
++		arr = append(arr, e.Value)
++	}
++	return arr
++}
++
++// What db.query.text says about a command.
++//
++// The shape of the command, with every value replaced by "?": field names and
++// operators tell a reader which query is slow, the values would tell them
++// whose. The collection a collection command names stays, it is the target
++// rather than data; the first value of any other command (a user name for
++// createUser, free text for logApplicationMessage) does not. Field names are
++// kept as SQL identifiers are, including ones an application derives from
++// data. Session and routing fields say nothing about the query and are left
++// out.
++
++const mongoQueryTextMaxLen = 2048
++
++var mongoQueryNoise = map[string]struct{}{
++	"lsid":                 {},
++	"$clusterTime":         {},
++	"$db":                  {},
++	"$readPreference":      {},
++	"txnNumber":            {},
++	"autocommit":           {},
++	"startTransaction":     {},
++	"apiVersion":           {},
++	"apiStrict":            {},
++	"apiDeprecationErrors": {},
++}
++
++// mongoQueryText renders a request body for db.query.text. partial marks a
++// body the capture cut short, which the text ends with an ellipsis for.
++func mongoQueryText(body bson.D, partial bool) string {
++	if len(body) == 0 {
++		return ""
++	}
++	var sb strings.Builder
++	sb.WriteByte('{')
++	first := true
++	for i, e := range body {
++		if _, noise := mongoQueryNoise[e.Key]; noise {
++			continue
++		}
++		if !first {
++			sb.WriteString(", ")
++		}
++		first = false
++		sb.WriteString(strconv.Quote(e.Key))
++		sb.WriteString(": ")
++		if i == 0 && namesACollection(e.Key) {
++			if collection, ok := e.Value.(string); ok {
++				sb.WriteString(strconv.Quote(collection))
++				continue
++			}
++		}
++		writeMongoQueryValue(&sb, e.Value)
++	}
++	sb.WriteByte('}')
++	if partial {
++		sb.WriteString("…")
++	}
++	text := sb.String()
++	if len(text) > mongoQueryTextMaxLen {
++		n := mongoQueryTextMaxLen
++		// never cut a character in half: the attribute has to stay valid UTF-8
++		for n > 0 && !utf8.RuneStart(text[n]) {
++			n--
++		}
++		text = text[:n] + "…"
++	}
++	return text
++}
++
++// collectionAdminCommands name a collection in their first value without
++// touching its data, like the CRUD commands isCollectionCommand lists.
++var collectionAdminCommands = map[string]struct{}{
++	"create":           {},
++	"drop":             {},
++	"createIndexes":    {},
++	"dropIndexes":      {},
++	"listIndexes":      {},
++	"collStats":        {},
++	"validate":         {},
++	"renameCollection": {},
++	"killCursors":      {},
++}
++
++func namesACollection(command string) bool {
++	if isCollectionCommand(command) {
++		return true
++	}
++	_, ok := collectionAdminCommands[command]
++	return ok
++}
++
++func writeMongoQueryValue(sb *strings.Builder, value any) {
++	switch v := value.(type) {
++	case bson.D:
++		sb.WriteByte('{')
++		for i, e := range v {
++			if i > 0 {
++				sb.WriteString(", ")
++			}
++			sb.WriteString(strconv.Quote(e.Key))
++			sb.WriteString(": ")
++			writeMongoQueryValue(sb, e.Value)
++		}
++		sb.WriteByte('}')
++	case bson.A:
++		// the first element shows the shape, the rest would repeat it
++		sb.WriteByte('[')
++		if len(v) > 0 {
++			writeMongoQueryValue(sb, v[0])
++			if len(v) > 1 {
++				sb.WriteString(", ...")
++			}
++		}
++		sb.WriteByte(']')
++	default:
++		sb.WriteByte('?')
++	}
++}
+diff --git a/pkg/ebpf/common/mongo_bson_partial_test.go b/pkg/ebpf/common/mongo_bson_partial_test.go
+new file mode 100644
+index 000000000..14b6e4849
+--- /dev/null
++++ b/pkg/ebpf/common/mongo_bson_partial_test.go
+@@ -0,0 +1,424 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package ebpfcommon
++
++import (
++	"bytes"
++	"encoding/binary"
++	"encoding/hex"
++	"strconv"
++	"strings"
++	"testing"
++	"unicode/utf8"
++
++	"github.com/hashicorp/golang-lru/v2/expirable"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"go.mongodb.org/mongo-driver/v2/bson"
++)
++
++// real driver messages captured with strace on the test host (mongodb npm 6.12, pymongo 4.15, MongoDB 8.2)
++const (
++	nodeInsertReq  = "d20000002601000000000000dd0700000000000000bd00000002696e7365727400060000006974656d730004646f63756d656e7473005f00000003300057000000027479706500060000006f7264657200027469746c650011000000776964676574207769643020233133330010717479000300000009617400bc0b9163a1010000075f6964006ada0044b414565ddd8e81c20000086f7264657265640001036c736964001e000000056964001000000004b20d29d4ff5d4eb3b062fd8859d893900002246462000500000073686f700000"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 // 210 bytes
++	nodeInsertResp = "2d000000b602000026010000dd070000000000000018000000106e0001000000016f6b00000000000000f03f00"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           // 45 bytes
++	nodeFindReq    = "b40000002701000000000000dd07000000000000009f0000000266696e6400060000006974656d73000366696c7465720032000000027479706500060000006f7264657200037469746c6500160000000224726567657800050000007769643000000003736f7274000d00000010617400ffffffff00106c696d6974000a000000036c736964001e000000056964001000000004b20d29d4ff5d4eb3b062fd8859d893900002246462000500000073686f700000"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             // 180 bytes
++	nodeFindResp   = "e2030000b702000027010000dd0700000000000000cd03000003637572736f7200b40300000466697273744261746368008403000003300057000000075f6964006ada0044b414565ddd8e81c2027479706500060000006f7264657200027469746c650011000000776964676574207769643020233133330010717479000300000009617400bc0b9163a10100000003310057000000075f6964006ada0036b414565ddd8e81bb027479706500060000006f7264657200027469746c650011000000776964676574207769643020233132360010717479000100000009617400eed49063a10100000003320057000000075f6964006ada0028b414565ddd8e81b4027479706500060000006f7264657200027469746c6500110000007769646765742077696430202331313900107174790004000000096174001f9e9063a10100000003330057000000075f6964006ada001ab414565ddd8e81ad027479706500060000006f7264657200027469746c6500110000007769646765742077696430202331313200107174790002000000096174004e679063a10100000003340057000000075f6964006ada000cb414565ddd8e81a6027479706500060000006f7264657200027469746c6500110000007769646765742077696430202331303500107174790000000000096174007a309063a10100000003350056000000075f6964006ad9fffeb414565ddd8e819f027479706500060000006f7264657200027469746c6500100000007769646765742077696430202339380010717479000300000009617400aaf98f63a10100000003360056000000075f6964006ad9fff0b414565ddd8e8198027479706500060000006f7264657200027469746c6500100000007769646765742077696430202339310010717479000100000009617400dac28f63a10100000003370056000000075f6964006ad9ffe2b414565ddd8e8191027479706500060000006f7264657200027469746c6500100000007769646765742077696430202338340010717479000400000009617400088c8f63a10100000003380056000000075f6964006ad9ffd4b414565ddd8e818a027479706500060000006f7264657200027469746c650010000000776964676574207769643020233737001071747900020000000961740036558f63a10100000003390056000000075f6964006ad9ffc6b414565ddd8e8183027479706500060000006f7264657200027469746c6500100000007769646765742077696430202337300010717479000000000009617400651e8f63a10100000000126964000000000000000000026e73000b00000073686f702e6974656d730000016f6b00000000000000f03f00" // 994 bytes
++	pyInsertReq    = "d000000030ff016000000000dd07000000000000005500000002696e73657274000800000070796974656d7300086f7264657265640001036c736964001e0000000569640010000000045c13a074803b4fbaa3bea99914a56b980002246462000500000073686f7000000165000000646f63756d656e74730057000000075f6964006ada004a16ef8a4ccbd405b3027479706500060000006f7264657200027469746c65001100000077696467657420776964342023313136001071747900010000000961740087219163a101000000"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     // 208 bytes
++)
++
++// What the generic tracer hands the parser unless buffer_sizes.tcp raises
++// it: k_tcp_max_len bytes of a request and k_tcp_res_len of a reply
++// (bpf/common/common.h).
++const (
++	tcpCaptureLen      = 256
++	tcpReplyCaptureLen = 128
++)
++
++func fixture(t *testing.T, h string) []byte {
++	t.Helper()
++	b, err := hex.DecodeString(h)
++	require.NoError(t, err)
++	return b
++}
++
++func captured(t *testing.T, h string) []byte {
++	b := fixture(t, h)
++	if len(b) > tcpCaptureLen {
++		b = b[:tcpCaptureLen]
++	}
++	return b
++}
++
++func capturedReply(t *testing.T, h string) []byte {
++	b := fixture(t, h)
++	if len(b) > tcpReplyCaptureLen {
++		b = b[:tcpReplyCaptureLen]
++	}
++	return b
++}
++
++// A driver that reads the whole reply at once hands the parser a cut find
++// reply: ten documents come before "ok". The span is still named by its
++// request, with the query's shape.
++func TestMongoNodeFindReplyCutByCapture(t *testing.T) {
++	cache := expirable.NewLRU[MongoRequestKey, *MongoRequestValue](10, nil, 0)
++	conn := getConnInfo()
++
++	_, more, err := ProcessMongoEvent(captured(t, nodeFindReq), StartTime, EndTime, conn, cache)
++	require.NoError(t, err)
++	assert.True(t, more)
++
++	reply := capturedReply(t, nodeFindResp)
++	require.Len(t, reply, tcpReplyCaptureLen, "the reply is longer than the capture")
++	req, more, err := ProcessMongoEvent(reply, StartTime, EndTime, conn, cache)
++	require.NoError(t, err)
++	assert.False(t, more)
++	require.NotNil(t, req)
++	assert.True(t, req.ResponseSections[0].Partial)
++
++	info, err := getMongoInfo(req)
++	require.NoError(t, err)
++	assert.Equal(t, "find", info.OpName)
++	assert.Equal(t, "items", info.Collection)
++	assert.Equal(t, "shop", info.DB)
++	assert.True(t, info.Success, "a reply cut before its ok field is a success whose data was not captured")
++	assert.Equal(t, `{"find": "items", "filter": {"type": ?, "title": {"$regex": ?}}, "sort": {"at": ?}, "limit": ?}`, info.Query)
++}
++
++// The request itself cut inside the filter, as a longer command would be:
++// the span keeps its name and collection, the query text says it was cut,
++// and the database is not known.
++func TestMongoFindRequestCutByCapture(t *testing.T) {
++	cache := expirable.NewLRU[MongoRequestKey, *MongoRequestValue](10, nil, 0)
++	conn := getConnInfo()
++
++	raw := fixture(t, nodeFindReq)
++	// everything up to and including the filter document; "sort" is next
++	cut := raw[:bytes.Index(raw, []byte("sort"))-1]
++	_, more, err := ProcessMongoEvent(cut, StartTime, EndTime, conn, cache)
++	require.NoError(t, err)
++	assert.True(t, more)
++	req, _, err := ProcessMongoEvent(capturedReply(t, nodeFindResp), StartTime, EndTime, conn, cache)
++	require.NoError(t, err)
++	require.NotNil(t, req)
++	assert.True(t, req.RequestSections[0].Partial)
++
++	info, err := getMongoInfo(req)
++	require.NoError(t, err)
++	assert.Equal(t, "find", info.OpName)
++	assert.Equal(t, "items", info.Collection)
++	assert.Empty(t, info.DB)
++	assert.Equal(t, `{"find": "items", "filter": {"type": ?, "title": {"$regex": ?}}}…`, info.Query)
++}
++
++func TestMongoNodeInsertWithDocumentsInBody(t *testing.T) {
++	cache := expirable.NewLRU[MongoRequestKey, *MongoRequestValue](10, nil, 0)
++	conn := getConnInfo()
++
++	_, _, err := ProcessMongoEvent(captured(t, nodeInsertReq), StartTime, EndTime, conn, cache)
++	require.NoError(t, err)
++	req, _, err := ProcessMongoEvent(capturedReply(t, nodeInsertResp), StartTime, EndTime, conn, cache)
++	require.NoError(t, err)
++	require.NotNil(t, req)
++
++	info, err := getMongoInfo(req)
++	require.NoError(t, err)
++	assert.Equal(t, "insert", info.OpName)
++	assert.Equal(t, "items", info.Collection)
++	assert.Equal(t, "shop", info.DB)
++	assert.True(t, info.Success)
++	assert.Equal(t, `{"insert": "items", "documents": [{"type": ?, "title": ?, "qty": ?, "at": ?, "_id": ?}], "ordered": ?}`, info.Query)
++}
++
++// pymongo sends the documents of an insert as a kind-1 section, which the
++// parser skips; the body still names the command.
++func TestMongoPymongoInsertWithDocumentSequence(t *testing.T) {
++	cache := expirable.NewLRU[MongoRequestKey, *MongoRequestValue](10, nil, 0)
++	conn := getConnInfo()
++	// pymongo picks random request ids; this one happens to be positive
++	_, more, err := ProcessMongoEvent(captured(t, pyInsertReq), StartTime, EndTime, conn, cache)
++	require.NoError(t, err)
++	assert.True(t, more)
++	key := MongoRequestKey{connInfo: conn, requestID: 1610743600}
++	req, ok := cache.Peek(key)
++	require.True(t, ok)
++	info, err := getMongoInfo(req)
++	require.NoError(t, err)
++	assert.Equal(t, "insert", info.OpName)
++	assert.Equal(t, "pyitems", info.Collection)
++	assert.Equal(t, "shop", info.DB)
++	assert.Equal(t, `{"insert": "pyitems", "ordered": ?}`, info.Query)
++}
++
++func TestMongoGetMoreNamesItsCollection(t *testing.T) {
++	body := bson.D{{Key: "getMore", Value: int64(8012345)}, {Key: "collection", Value: "items"}, {Key: "batchSize", Value: int32(100)}, {Key: "$db", Value: "shop"}}
++	info, err := getMongoInfo(&MongoRequestValue{RequestSections: []mongoSection{{Type: sectionTypeBody, Body: body}}})
++	require.NoError(t, err)
++	assert.Equal(t, "getMore", info.OpName)
++	assert.Equal(t, "items", info.Collection)
++	assert.Equal(t, `{"getMore": ?, "collection": ?, "batchSize": ?}`, info.Query)
++}
++
++// An error reply names itself up front, so it survives the cut.
++func TestMongoCutErrorReplyIsAFailure(t *testing.T) {
++	body := bson.D{{Key: "ok", Value: 0.0}, {Key: "errmsg", Value: "ns not found"}, {Key: "code", Value: int32(26)}, {Key: "codeName", Value: "NamespaceNotFound"}}
++	info, err := getMongoInfo(&MongoRequestValue{
++		RequestSections:  []mongoSection{{Type: sectionTypeBody, Body: bson.D{{Key: "find", Value: "items"}}}},
++		ResponseSections: []mongoSection{{Type: sectionTypeBody, Body: body, Partial: true}},
++	})
++	require.NoError(t, err)
++	assert.False(t, info.Success)
++	assert.Equal(t, 26, info.ErrorCode)
++
++	// cut before "ok" is seen but with the error message visible
++	info, err = getMongoInfo(&MongoRequestValue{
++		RequestSections:  []mongoSection{{Type: sectionTypeBody, Body: bson.D{{Key: "find", Value: "items"}}}},
++		ResponseSections: []mongoSection{{Type: sectionTypeBody, Body: bson.D{{Key: "errmsg", Value: "ns not found"}}, Partial: true}},
++	})
++	require.NoError(t, err)
++	assert.False(t, info.Success)
++}
++
++// A complete reply without "ok" is not a MongoDB reply the parser understands.
++func TestMongoCompleteReplyWithoutOkIsRejected(t *testing.T) {
++	_, err := getMongoInfo(&MongoRequestValue{
++		RequestSections:  []mongoSection{{Type: sectionTypeBody, Body: bson.D{{Key: "find", Value: "items"}}}},
++		ResponseSections: []mongoSection{{Type: sectionTypeBody, Body: bson.D{{Key: "n", Value: int32(1)}}}},
++	})
++	require.ErrorIs(t, err, errMongoNoOkField)
++}
++
++func TestBsonPrefixMatchesUnmarshalOnCompleteDocuments(t *testing.T) {
++	doc := bson.D{
++		{Key: "find", Value: "items"},
++		{Key: "filter", Value: bson.D{{Key: "type", Value: "order"}, {Key: "title", Value: bson.D{{Key: "$regex", Value: "wid"}}}}},
++		{Key: "sort", Value: bson.D{{Key: "at", Value: int32(-1)}}},
++		{Key: "limit", Value: int64(10)},
++		{Key: "ok", Value: 1.0},
++		{Key: "flag", Value: true},
++		{Key: "ids", Value: bson.A{int32(1), int32(2)}},
++	}
++	raw, err := bson.Marshal(doc)
++	require.NoError(t, err)
++
++	got, truncated := bsonPrefix(raw)
++	assert.False(t, truncated)
++	assert.Equal(t, doc, got)
++}
++
++func TestBsonPrefixStopsAtTheCut(t *testing.T) {
++	doc := bson.D{
++		{Key: "find", Value: "items"},
++		{Key: "filter", Value: bson.D{{Key: "type", Value: "order"}, {Key: "title", Value: "a long title that gets cut"}}},
++		{Key: "$db", Value: "shop"},
++	}
++	raw, err := bson.Marshal(doc)
++	require.NoError(t, err)
++
++	for cut := 0; cut < len(raw); cut++ {
++		got, truncated := bsonPrefix(raw[:cut])
++		assert.True(t, truncated, "cut at %d", cut)
++		if cut > 4+1+5+4+6 {
++			// past the first element, the command name is there
++			require.NotEmpty(t, got, "cut at %d", cut)
++			assert.Equal(t, bson.E{Key: "find", Value: "items"}, got[0], "cut at %d", cut)
++		}
++		// only the document terminator may be missing for "$db" to be complete
++		if cut < len(raw)-1 {
++			for _, e := range got {
++				assert.NotEqual(t, "$db", e.Key, "a cut string must not be reported, cut at %d", cut)
++			}
++		}
++	}
++}
++
++func TestBsonPrefixStopsAtUnknownType(t *testing.T) {
++	raw, err := bson.Marshal(bson.D{{Key: "find", Value: "items"}, {Key: "x", Value: int32(1)}})
++	require.NoError(t, err)
++	// corrupt the second element's type byte
++	raw[4+1+5+4+6] = 0x42
++	got, truncated := bsonPrefix(raw)
++	assert.True(t, truncated)
++	assert.Equal(t, bson.D{{Key: "find", Value: "items"}}, got)
++}
++
++func TestMongoQueryTextCapsItsLength(t *testing.T) {
++	var doc bson.D
++	doc = append(doc, bson.E{Key: "find", Value: "items"})
++	for i := 0; i < 500; i++ {
++		doc = append(doc, bson.E{Key: "field_number_" + string(rune('a'+i%26)) + "_padding_padding", Value: int32(i)})
++	}
++	text := mongoQueryText(doc, false)
++	assert.LessOrEqual(t, len(text), mongoQueryTextMaxLen+len("…"))
++	assert.True(t, len(text) > mongoQueryTextMaxLen)
++}
++
++// The walk reads untrusted bytes with a declared length it cannot trust; it
++// must neither index past the buffer nor loop.
++func FuzzBsonPrefix(f *testing.F) {
++	for _, h := range []string{nodeFindReq, nodeFindResp, nodeInsertReq, pyInsertReq} {
++		raw, err := hex.DecodeString(h)
++		if err != nil {
++			f.Fatal(err)
++		}
++		body := raw[21:]
++		for prefix := 0; prefix <= len(body); prefix += 7 {
++			f.Add(body[:prefix])
++		}
++		f.Add(body)
++	}
++	f.Add([]byte{5, 0, 0, 0, 0})
++	f.Add([]byte{0xff, 0xff, 0xff, 0x7f, 0x02, 'a', 0, 0xff, 0xff, 0xff, 0x7f})
++
++	f.Fuzz(func(t *testing.T, body []byte) {
++		if len(body) > 4096 {
++			return
++		}
++		doc, truncated := bsonPrefix(body)
++		text := mongoQueryText(doc, truncated)
++		if len(text) > mongoQueryTextMaxLen+len("…") {
++			t.Fatalf("query text of %d bytes", len(text))
++		}
++		section := mongoSection{Type: sectionTypeBody, Body: doc, Partial: truncated}
++		_, _ = getMongoInfo(&MongoRequestValue{RequestSections: []mongoSection{section}, ResponseSections: []mongoSection{section}})
++	})
++}
++
++// pymongo spells the legacy heartbeat "ismaster"; it is not a span either.
++func TestMongoLowercaseIsMasterIsAHeartbeat(t *testing.T) {
++	body := bson.D{{Key: "ismaster", Value: int32(1)}, {Key: "helloOk", Value: true}, {Key: "$db", Value: "admin"}}
++	_, err := getMongoInfo(&MongoRequestValue{RequestSections: []mongoSection{{Type: sectionTypeBody, Body: body}}})
++	require.ErrorIs(t, err, errMongoHeartbeatIgnored)
++}
++
++// pymongo, Java and C# send an insert's documents as a kind-1 section after
++// the body; one longer than the capture used to fail the whole message.
++func TestMongoDocumentSequenceCutByCapture(t *testing.T) {
++	body, err := bson.Marshal(bson.D{{Key: "insert", Value: "pyitems"}, {Key: "ordered", Value: true}, {Key: "$db", Value: "shop"}})
++	require.NoError(t, err)
++	document, err := bson.Marshal(bson.D{{Key: "title", Value: strings.Repeat("x", 300)}})
++	require.NoError(t, err)
++	sequence := append([]byte("documents\x00"), document...)
++	sequence = binary.LittleEndian.AppendUint32(nil, uint32(4+len(sequence)))[:4:4]
++	sequence = append(sequence, []byte("documents\x00")...)
++	sequence = append(sequence, document...)
++
++	msg := new(bytes.Buffer)
++	_ = binary.Write(msg, binary.LittleEndian, msgHeader{MessageLength: int32(msgHeaderSize + int32Size + 1 + len(body) + 1 + len(sequence)), RequestID: 7, OpCode: opMsg})
++	_ = binary.Write(msg, binary.LittleEndian, int32(0))
++	msg.WriteByte(byte(sectionTypeBody))
++	msg.Write(body)
++	msg.WriteByte(byte(sectionTypeDocumentSequence))
++	msg.Write(sequence)
++	raw := msg.Bytes()
++	require.Greater(t, len(raw), tcpCaptureLen)
++
++	cache := expirable.NewLRU[MongoRequestKey, *MongoRequestValue](10, nil, 0)
++	conn := getConnInfo()
++	_, more, err := ProcessMongoEvent(raw[:tcpCaptureLen], StartTime, EndTime, conn, cache)
++	require.NoError(t, err)
++	assert.True(t, more)
++	req, ok := cache.Peek(MongoRequestKey{connInfo: conn, requestID: 7})
++	require.True(t, ok)
++	require.Len(t, req.RequestSections, 2)
++	assert.True(t, req.RequestSections[1].Partial)
++	info, err := getMongoInfo(req)
++	require.NoError(t, err)
++	assert.Equal(t, "insert", info.OpName)
++	assert.Equal(t, "pyitems", info.Collection)
++	assert.Equal(t, "shop", info.DB)
++
++	// the same with no section bytes past the kind byte at all
++	cutAtKind := raw[:msgHeaderSize+int32Size+1+len(body)+1]
++	cache.Purge()
++	_, _, err = ProcessMongoEvent(cutAtKind, StartTime, EndTime, conn, cache)
++	require.NoError(t, err)
++}
++
++// Only a collection command keeps its first value; anything else is data.
++func TestMongoQueryTextKeepsOnlyCollectionNames(t *testing.T) {
++	assert.Equal(t, `{"createUser": ?, "pwd": ?, "roles": [{"role": ?, "db": ?}]}`,
++		mongoQueryText(bson.D{{Key: "createUser", Value: "alice"}, {Key: "pwd", Value: "s3cret"}, {Key: "roles", Value: bson.A{bson.D{{Key: "role", Value: "readWrite"}, {Key: "db", Value: "shop"}}}}}, false))
++	assert.Equal(t, `{"logApplicationMessage": ?}`, mongoQueryText(bson.D{{Key: "logApplicationMessage", Value: "free text"}}, false))
++	assert.Equal(t, `{"createIndexes": "items", "indexes": [{"key": {"title": ?}, "name": ?}]}`,
++		mongoQueryText(bson.D{{Key: "createIndexes", Value: "items"}, {Key: "indexes", Value: bson.A{bson.D{{Key: "key", Value: bson.D{{Key: "title", Value: int32(1)}}}, {Key: "name", Value: "title_1"}}}}}, false))
++	assert.Equal(t, `{"aggregate": ?, "pipeline": [{"$currentOp": {}}]}`,
++		mongoQueryText(bson.D{{Key: "aggregate", Value: int32(1)}, {Key: "pipeline", Value: bson.A{bson.D{{Key: "$currentOp", Value: bson.D{}}}}}}, false))
++	// a regex pattern is a value, not shown
++	assert.Equal(t, `{"find": "items", "filter": {"title": ?}}`,
++		mongoQueryText(bson.D{{Key: "find", Value: "items"}, {Key: "filter", Value: bson.D{{Key: "title", Value: bsonOpaque{Type: bsonTypeRegex}}}}}, false))
++}
++
++func TestMongoQueryTextCapStaysValidUTF8(t *testing.T) {
++	for pad := 0; pad < 8; pad++ {
++		doc := bson.D{{Key: "find", Value: "items"}, {Key: strings.Repeat("p", pad), Value: int32(1)}}
++		for i := 0; i < 400; i++ {
++			doc = append(doc, bson.E{Key: "ключ_" + strconv.Itoa(i), Value: int32(i)})
++		}
++		text := mongoQueryText(doc, true)
++		assert.True(t, utf8.ValidString(text), "pad %d", pad)
++		assert.LessOrEqual(t, len(text), mongoQueryTextMaxLen+len("…"))
++		assert.True(t, strings.HasSuffix(text, "…"))
++	}
++}
++
++// A reply cut after "ok: 0" but before the error's message is still a
++// failure, one that says why it has no details.
++func TestMongoErrorReplyCutAfterOk(t *testing.T) {
++	info, err := getMongoInfo(&MongoRequestValue{
++		RequestSections:  []mongoSection{{Type: sectionTypeBody, Body: bson.D{{Key: "find", Value: "items"}}}},
++		ResponseSections: []mongoSection{{Type: sectionTypeBody, Body: bson.D{{Key: "ok", Value: 0.0}}, Partial: true}},
++	})
++	require.NoError(t, err)
++	assert.False(t, info.Success)
++	span := TCPToMongoToSpan(&TCPRequestInfo{}, info)
++	assert.Equal(t, 1, span.Status)
++	assert.Empty(t, span.DBError.ErrorCode)
++	assert.Equal(t, "error reply cut before its message", span.DBError.Description)
++}
++
++// A reply that is not a body section is not a reply the parser understands.
++func TestMongoReplyWithSequenceSectionIsRejected(t *testing.T) {
++	_, err := getMongoInfo(&MongoRequestValue{
++		RequestSections:  []mongoSection{{Type: sectionTypeBody, Body: bson.D{{Key: "find", Value: "items"}}}},
++		ResponseSections: []mongoSection{{Type: sectionTypeDocumentSequence}},
++	})
++	require.ErrorIs(t, err, errMongoFirstSectionNotBody)
++}
++
++// A complete body the library rejects is salvaged, but it was not cut.
++func TestMongoUnreadableCompleteBodyIsNotPartial(t *testing.T) {
++	raw, err := bson.Marshal(bson.D{{Key: "find", Value: "items"}, {Key: "x", Value: int32(1)}})
++	require.NoError(t, err)
++	raw[len(raw)-1] = 0x42 // no terminator: bson.Unmarshal refuses it
++	doc, n, partial, err := parseBodySection(raw, false)
++	require.NoError(t, err)
++	assert.Equal(t, len(raw), n)
++	assert.False(t, partial)
++	assert.Equal(t, bson.D{{Key: "find", Value: "items"}, {Key: "x", Value: int32(1)}}, doc)
++}
++
++// JavaScript and symbol values keep the types bson.Unmarshal gives them, so a
++// command whose first value is code is not mistaken for a collection name.
++func TestBsonPrefixDecodesCodeAsCode(t *testing.T) {
++	raw, err := bson.Marshal(bson.D{{Key: "$where", Value: bson.JavaScript("this.a > 1")}, {Key: "s", Value: bson.Symbol("sym")}})
++	require.NoError(t, err)
++	doc, truncated := bsonPrefix(raw)
++	assert.False(t, truncated)
++	assert.Equal(t, bson.D{{Key: "$where", Value: bson.JavaScript("this.a > 1")}, {Key: "s", Value: bson.Symbol("sym")}}, doc)
++}
++
++func TestBsonPrefixBoundsNesting(t *testing.T) {
++	// a document nested far deeper than any command, built from the inside out
++	inner, err := bson.Marshal(bson.D{{Key: "v", Value: int32(1)}})
++	require.NoError(t, err)
++	for i := 0; i < 200; i++ {
++		inner, err = bson.Marshal(bson.D{{Key: "d", Value: bson.Raw(inner)}})
++		require.NoError(t, err)
++	}
++	doc, truncated := bsonPrefix(inner)
++	assert.False(t, truncated)
++	require.Len(t, doc, 1)
++	assert.NotPanics(t, func() { _ = mongoQueryText(doc, false) })
++}
+diff --git a/pkg/ebpf/common/mongo_detect_transform.go b/pkg/ebpf/common/mongo_detect_transform.go
+index 56fd8dcdd..283ac3c17 100644
+--- a/pkg/ebpf/common/mongo_detect_transform.go
++++ b/pkg/ebpf/common/mongo_detect_transform.go
+@@ -7,6 +7,7 @@ import (
+ 	"encoding/binary"
+ 	"errors"
+ 	"strconv"
++	"strings"
+ 	"unsafe"
+ 
+ 	"github.com/hashicorp/golang-lru/v2/expirable"
+@@ -45,7 +46,6 @@ var (
+ 	errMongoInvalidFlagBits                      = errors.New("invalid MongoDB flag bits")
+ 	errMongoNoRequestSections                    = errors.New("no MongoDB request sections found")
+ 	errMongoFirstSectionNotBody                  = errors.New("first MongoDB section is not of type body")
+-	errMongoNoResponseBody                       = errors.New("no MongoDB body found in the response section")
+ 	errMongoNoOkField                            = errors.New("no 'ok' field found in MongoDB response")
+ 	errMongoHeartbeatIgnored                     = errors.New("MongoDB heartbeat operation is ignored")
+ 	errMongoNonStringCollectionType              = errors.New("MongoDB command has non-string collection type")
+@@ -55,6 +55,7 @@ type mongoSpanInfo struct {
+ 	OpName        string
+ 	Collection    string
+ 	DB            string
++	Query         string // the command's shape, for db.query.text
+ 	Success       bool
+ 	Error         string
+ 	ErrorCode     int
+@@ -80,6 +81,8 @@ const (
+ type mongoSection struct {
+ 	Type SectionType
+ 	Body bson.D // in case of sectionTypeBody, this will contain the BSON document
++	// Partial marks a body the capture cut short: Body holds what was readable
++	Partial bool
+ }
+ 
+ const (
+@@ -114,6 +117,7 @@ const (
+ 	commCount         = "count"
+ 	commDistinct      = "distinct"
+ 	commMapReduce     = "mapReduce"
++	commGetMore       = "getMore"
+ )
+ 
+ type MongoRequestKey struct {
+@@ -315,27 +319,42 @@ func parseSections(buf []uint8, partialCapture bool) ([]mongoSection, error) {
+ 		switch sectionType {
+ 		// https://www.mongodb.com/docs/manual/reference/mongodb-wire-protocol/#kind-0--body
+ 		case sectionTypeBody:
+-			doc, bodyLength, err := parseBodySection(buf[offSet:], partialCapture)
++			doc, bodyLength, partial, err := parseBodySection(buf[offSet:], partialCapture)
+ 			if err != nil {
+ 				return nil, err
+ 			}
+ 			sections = append(sections, mongoSection{
+-				Type: sectionType,
+-				Body: doc,
++				Type:    sectionType,
++				Body:    doc,
++				Partial: partial,
+ 			})
+ 			offSet += bodyLength
+ 		// https://www.mongodb.com/docs/manual/reference/mongodb-wire-protocol/#kind-1--document-sequence
+ 		case sectionTypeDocumentSequence:
+-			sections = append(sections, mongoSection{
+-				Type: sectionTypeDocumentSequence,
+-			})
+ 			if len(buf) < offSet+int32Size {
++				if partialCapture {
++					// the capture ends inside the section header
++					sections = append(sections, mongoSection{Type: sectionTypeDocumentSequence, Partial: true})
++					return sections, nil
++				}
+ 				return nil, errMongoNotEnoughDataForSectionLength
+ 			}
+ 			length := int(int32(binary.LittleEndian.Uint32(buf[offSet : offSet+int32Size])))
+-			if length < int32Size+1 || length > len(buf)-offSet {
++			if length < int32Size+1 {
+ 				return nil, errMongoInvalidSectionLength
+ 			}
++			if length > len(buf)-offSet {
++				if !partialCapture {
++					return nil, errMongoInvalidSectionLength
++				}
++				// pymongo, Java and C# carry the documents of an insert, update
++				// or delete here, after the body that names the command; a
++				// sequence longer than the capture is the common case, and the
++				// body before it is all the span needs
++				sections = append(sections, mongoSection{Type: sectionTypeDocumentSequence, Partial: true})
++				return sections, nil
++			}
++			sections = append(sections, mongoSection{Type: sectionTypeDocumentSequence})
+ 			offSet += length
+ 			// TODO (mongo) actually read documents? for now we just skip them
+ 		default:
+@@ -348,30 +367,34 @@ func parseSections(buf []uint8, partialCapture bool) ([]mongoSection, error) {
+ 	return sections, nil
+ }
+ 
+-func parseBodySection(buf []byte, partialCapture bool) (bson.D, int, error) {
++// parseBodySection decodes a kind-0 section. The capture is often shorter
++// than the message (see mongo_bson_partial.go), in which case the readable
++// prefix of the document is returned and partial is set.
++func parseBodySection(buf []byte, partialCapture bool) (doc bson.D, bodyLength int, partial bool, err error) {
+ 	if len(buf) < int32Size {
+-		return nil, 0, errMongoInvalidBSONLength
++		return nil, 0, false, errMongoInvalidBSONLength
+ 	}
+-	bodyLength := int(int32(binary.LittleEndian.Uint32(buf[:int32Size])))
++	bodyLength = int(int32(binary.LittleEndian.Uint32(buf[:int32Size])))
+ 	if bodyLength < int32Size+1 {
+-		return nil, 0, errMongoInvalidBSONLength
++		return nil, 0, false, errMongoInvalidBSONLength
+ 	}
+ 
+ 	if len(buf) < bodyLength {
+ 		if !partialCapture {
+-			return nil, 0, errMongoInvalidBSONLength
++			return nil, 0, false, errMongoInvalidBSONLength
+ 		}
+-		return bson.D{}, len(buf), nil
++		doc, _ = bsonPrefix(buf)
++		return doc, len(buf), true, nil
+ 	}
+ 
+ 	bodyData := buf[:bodyLength]
+-	// TODO (mongo) we need to parse partial bson parsing, we won't always get the full tcp payload, so we want to extract as many fields as we can
+-	var doc bson.D
+-	err := bson.Unmarshal(bodyData, &doc)
+-	if err != nil {
+-		return bson.D{}, bodyLength, nil
++	if err := bson.Unmarshal(bodyData, &doc); err != nil {
++		// not a document the library accepts; keep whatever is readable, but
++		// this is a whole document, so what is missing is not a cut
++		doc, _ = bsonPrefix(bodyData)
++		return doc, bodyLength, false, nil
+ 	}
+-	return doc, bodyLength, nil
++	return doc, bodyLength, false, nil
+ }
+ 
+ func parseMongoHeader(pkt []byte) (*msgHeader, error) {
+@@ -457,10 +480,17 @@ func getMongoInfo(request *MongoRequestValue) (*mongoSpanInfo, error) {
+ 		}
+ 		spanInfo.OpName = op
+ 		spanInfo.Collection = collection
++		if op == commGetMore {
++			// the cursor id comes first; the collection has its own field
++			if collection, ok := findStringInBson(requestSection.Body, "collection"); ok {
++				spanInfo.Collection = collection
++			}
++		}
+ 		db, ok := findStringInBson(requestSection.Body, "$db")
+ 		if ok {
+ 			spanInfo.DB = db
+ 		}
++		spanInfo.Query = mongoQueryText(requestSection.Body, requestSection.Partial)
+ 	}
+ 
+ 	if len(request.ResponseSections) == 0 {
+@@ -468,12 +498,24 @@ func getMongoInfo(request *MongoRequestValue) (*mongoSpanInfo, error) {
+ 		spanInfo.Success = true
+ 	} else {
+ 		responseSection := request.ResponseSections[0]
+-		if len(responseSection.Body) == 0 {
+-			return nil, errMongoNoResponseBody
++		if responseSection.Type != sectionTypeBody {
++			return nil, errMongoFirstSectionNotBody
+ 		}
+-		success, ok := findDoubleInBson(responseSection.Body, "ok")
++		success, ok := findNumberInBson(responseSection.Body, "ok")
+ 		if !ok {
+-			return nil, errMongoNoOkField
++			// "ok" is the last field of a reply and the first the capture cuts
++			// off: a find's reply carries its documents ahead of it. An error
++			// reply is short and names itself up front, so a missing "ok" with
++			// no error in sight is a success whose data was not captured, not
++			// a reply that cannot be read.
++			if _, failed := findStringInBson(responseSection.Body, "errmsg"); !failed {
++				if !responseSection.Partial && len(responseSection.Body) > 0 {
++					return nil, errMongoNoOkField
++				}
++				spanInfo.Success = true
++				return spanInfo, nil
++			}
++			success = 0
+ 		}
+ 		spanInfo.Success = success == float64(1)
+ 		if spanInfo.Success {
+@@ -513,9 +555,14 @@ func TCPToMongoToSpan(trace *TCPRequestInfo, info *mongoSpanInfo) request.Span {
+ 
+ 	var dbError request.DBError
+ 	if !info.Success {
+-		dbError = request.DBError{
+-			ErrorCode:   strconv.Itoa(info.ErrorCode),
+-			Description: info.ErrorCodeName + ": " + info.Error,
++		if info.ErrorCode == 0 && info.Error == "" && info.ErrorCodeName == "" {
++			// "ok: 0" was captured, the rest of the reply was not
++			dbError = request.DBError{Description: "error reply cut before its message"}
++		} else {
++			dbError = request.DBError{
++				ErrorCode:   strconv.Itoa(info.ErrorCode),
++				Description: info.ErrorCodeName + ": " + info.Error,
++			}
+ 		}
+ 	}
+ 
+@@ -530,6 +577,7 @@ func TCPToMongoToSpan(trace *TCPRequestInfo, info *mongoSpanInfo) request.Span {
+ 		Type:          reqType,
+ 		Method:        info.OpName,
+ 		Path:          info.Collection,
++		Statement:     info.Query,
+ 		Peer:          peer,
+ 		PeerPort:      peerPort,
+ 		Host:          hostname,
+@@ -553,8 +601,16 @@ func TCPToMongoToSpan(trace *TCPRequestInfo, info *mongoSpanInfo) request.Span {
+ 	}
+ }
+ 
++// isHeartbeat recognises the commands drivers send to keep a connection
++// warm. The server matches command names case-insensitively and pymongo
++// spells the legacy one "ismaster".
+ func isHeartbeat(comm string) bool {
+-	return comm == commHello || comm == commIsMaster || comm == commPing || comm == commIsWritablePrimary || comm == commAtlasVersion
++	for _, heartbeat := range []string{commHello, commIsMaster, commPing, commIsWritablePrimary, commAtlasVersion} {
++		if strings.EqualFold(comm, heartbeat) {
++			return true
++		}
++	}
++	return false
+ }
+ 
+ func isCollectionCommand(comm string) bool {
+@@ -569,11 +625,18 @@ func parseFirstField(field bson.E) (string, string, error) {
+ 		return "", "", errMongoHeartbeatIgnored
+ 	}
+ 	if isCollectionCommand(comm) {
+-		collection, ok := field.Value.(string)
+-		if !ok {
++		switch collection := field.Value.(type) {
++		case string:
++			return comm, collection, nil
++		case int32, int64, float64:
++			if comm == commAggregate {
++				// the database-level form, {aggregate: 1, pipeline: [...]}
++				return comm, "", nil
++			}
++			return "", "", errMongoNonStringCollectionType
++		default:
+ 			return "", "", errMongoNonStringCollectionType
+ 		}
+-		return comm, collection, nil
+ 	}
+ 	return comm, "", nil
+ }
+@@ -630,6 +693,18 @@ func findDoubleInBson(doc bson.D, key string) (float64, bool) {
+ 	return doubleValue, true
+ }
+ 
++// findNumberInBson reads a numeric field whatever width the server chose:
++// "ok" is a double from mongod but an int from some proxies and tests.
++func findNumberInBson(doc bson.D, key string) (float64, bool) {
++	if d, ok := findDoubleInBson(doc, key); ok {
++		return d, true
++	}
++	if i, ok := findIntInBson(doc, key); ok {
++		return float64(i), true
++	}
++	return 0, false
++}
++
+ func opAndCollectionFromEvent(event *GoMongoClientInfo) (string, string) {
+ 	coll := cstr(event.Coll[:])
+ 	db := cstr(event.Db[:])
+diff --git a/pkg/ebpf/common/mongo_detect_transform_fuzz_test.go b/pkg/ebpf/common/mongo_detect_transform_fuzz_test.go
+index 2f9d0928f..e00af635d 100644
+--- a/pkg/ebpf/common/mongo_detect_transform_fuzz_test.go
++++ b/pkg/ebpf/common/mongo_detect_transform_fuzz_test.go
+@@ -148,6 +148,10 @@ func assertAcceptedMongoSections(t *testing.T, sections []byte, completeMessage
+ 		kind := sections[offset]
+ 		offset++
+ 		if len(sections)-offset < 4 {
++			if !completeMessage {
++				// a cut capture may end inside the last section's header
++				return
++			}
+ 			t.Fatalf("accepted section kind %d without a length", kind)
+ 		}
+ 		length := int(int32(binary.LittleEndian.Uint32(sections[offset : offset+4])))
+@@ -164,7 +168,11 @@ func assertAcceptedMongoSections(t *testing.T, sections []byte, completeMessage
+ 			}
+ 		case 1:
+ 			if length > len(sections)-offset {
+-				t.Fatalf("accepted truncated document sequence of length %d", length)
++				if completeMessage {
++					t.Fatalf("accepted truncated document sequence of length %d", length)
++				}
++				// the capture cut the documents; the body before them names the command
++				return
+ 			}
+ 		default:
+ 			t.Fatalf("accepted unsupported section kind %d", kind)
+diff --git a/pkg/ebpf/common/mongo_detect_transform_test.go b/pkg/ebpf/common/mongo_detect_transform_test.go
+index 2de06d54e..e83686a17 100644
+--- a/pkg/ebpf/common/mongo_detect_transform_test.go
++++ b/pkg/ebpf/common/mongo_detect_transform_test.go
+@@ -369,7 +369,9 @@ func TestProcessMongoEventSuccessWhenCannotParseBsonInRequest(t *testing.T) {
+ 	assert.Len(t, mongoRequestValue.RequestSections, 1, "Expected one request section")
+ 	firstRequestSection := mongoRequestValue.RequestSections[0]
+ 	assert.Equal(t, sectionTypeBody, firstRequestSection.Type, "Expected first section type to be sectionTypeBody")
+-	assert.Equal(t, bson.D{}, firstRequestSection.Body, "Expected first section body be empty due to parsing error")
++	// the cut lands in the "$db" string; everything before it is readable
++	assert.Equal(t, bson.D{bson.E{Key: commFind, Value: "my_collection"}}, firstRequestSection.Body, "Expected the readable prefix of the cut body")
++	assert.True(t, firstRequestSection.Partial)
+ 	assert.Len(t, mongoRequestValue.ResponseSections, 1, "Expected one response section")
+ 	firstResponseSection := mongoRequestValue.ResponseSections[0]
+ 	assert.Equal(t, sectionTypeBody, firstResponseSection.Type, "Expected first section type to be sectionTypeBody")
+@@ -491,7 +493,7 @@ func TestParseSectionsDocSequenceShortReturnsError(t *testing.T) {
+ }
+ 
+ func TestParseFirstFieldTypeAssertionReturnsError(t *testing.T) {
+-	field := bson.E{Key: commInsert, Value: int32(5)}
++	field := bson.E{Key: commInsert, Value: bson.D{{Key: "x", Value: int32(5)}}}
+ 
+ 	comm, collection, err := parseFirstField(field)
+ 
+@@ -501,6 +503,14 @@ func TestParseFirstFieldTypeAssertionReturnsError(t *testing.T) {
+ 	assert.Empty(t, collection)
+ }
+ 
++// {aggregate: 1, pipeline: [...]} runs against the database, not a collection.
++func TestParseFirstFieldDatabaseLevelCommand(t *testing.T) {
++	comm, collection, err := parseFirstField(bson.E{Key: commAggregate, Value: int32(1)})
++	require.NoError(t, err)
++	assert.Equal(t, commAggregate, comm)
++	assert.Empty(t, collection)
++}
++
+ func TestGetMongoInfoNoResponseSectionShouldBeSuccess(t *testing.T) {
+ 	mongoRequest := MongoRequestValue{
+ 		RequestSections: []mongoSection{
+diff --git a/pkg/export/otel/tracesgen/tracesgen.go b/pkg/export/otel/tracesgen/tracesgen.go
+index 40093e986..9ed1afb68 100644
+--- a/pkg/export/otel/tracesgen/tracesgen.go
++++ b/pkg/export/otel/tracesgen/tracesgen.go
+@@ -1595,6 +1595,9 @@ func traceAttributesSelectorInternal(span *request.Span, optionalAttrs map[attr.
+ 		operation := span.Method
+ 		attrs = appendIfSet(attrs, request.DBOperationName, operation)
+ 		attrs = appendIfSet(attrs, request.DBCollectionName, span.Path)
++		if _, ok := optionalAttrs[attr.DBQueryText]; ok {
++			attrs = appendIfSet(attrs, request.DBQueryText, span.Statement)
++		}
+ 		if span.Status == 1 {
+ 			attrs = appendIfSet(attrs, request.DBResponseStatusCode, span.DBError.ErrorCode)
+ 			attrs = append(attrs, attributes.DBResponseErrorAttr(optionalAttrs, span.DBError.Description)...)
+diff --git a/pkg/export/otel/tracesgen/tracesgen_test.go b/pkg/export/otel/tracesgen/tracesgen_test.go
+index 8b43ac941..25857d75a 100644
+--- a/pkg/export/otel/tracesgen/tracesgen_test.go
++++ b/pkg/export/otel/tracesgen/tracesgen_test.go
+@@ -2134,3 +2134,22 @@ func TestGenerateTracesSetsOBISchemaURL(t *testing.T) {
+ 	require.Equal(t, 1, traces.ResourceSpans().Len())
+ 	assert.Equal(t, attr.OBISchemaURL, traces.ResourceSpans().At(0).SchemaUrl())
+ }
++
++func TestTraceAttributesSelector_MongoQueryText(t *testing.T) {
++	span := &request.Span{
++		Type:        request.EventTypeMongoClient,
++		Method:      "find",
++		Path:        "items",
++		DBNamespace: "shop",
++		Statement:   `{"find": "items", "filter": {"type": ?}}`,
++	}
++
++	// not selected: the shape of the query is not emitted
++	emptyAttrs := TraceAttributesSelector(span, map[attr.Name]struct{}{})
++	assert.Contains(t, emptyAttrs, request.DBOperationName("find"))
++	assert.Contains(t, emptyAttrs, request.DBCollectionName("items"))
++	assert.NotContains(t, emptyAttrs, request.DBQueryText(span.Statement))
++
++	optInAttrs := TraceAttributesSelector(span, map[attr.Name]struct{}{attr.DBQueryText: {}})
++	assert.Contains(t, optInAttrs, request.DBQueryText(span.Statement))
++}
