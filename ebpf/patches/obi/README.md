@@ -27,6 +27,7 @@ digest is pinned in `ebpf/Dockerfile`.
 | 020 | New | Names HTTP client spans from their own path when the only harvested route they match is a catch-all, and keeps the Host header's port in `url.full`. Upstream candidate; no upstream equivalent yet. |
 | 021 | New | Python: a request's trace follows the copied context into anyio's worker threads (FastAPI sync endpoints). Upstream candidate; no upstream equivalent yet. |
 | 022 | New | Java: a thread hand-off reported by the Java agent links the worker to the thread holding the request's server span, not only to the submitter, so actor-style dispatchers (Pekko, Akka) keep their traces stitched. Upstream candidate; no upstream equivalent yet. |
+| 023 | New | FastCGI: a server that reads a request header first and the rest after (PHP-FPM) keeps up to 248 of the 256 captured bytes instead of 152, and the params parser honours four-byte lengths and stops at a cut value, so PHP-FPM spans are named `POST /orders` rather than `POST` or `GET /*`. Upstream candidate; no upstream equivalent yet. |
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
 bounds are part of the base now. A successful fill can copy less than `msg->size`
@@ -680,3 +681,38 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   all, and spymemcached, which runs its I/O on a thread of its own without
   an executor, still has no hand-off to report; both are documented on the
   ticket.
+* 023-fastcgi-request-path.patch
+  Name PHP-FPM's server spans from the request. Behind nginx, every PHP
+  request has three spans: nginx's server span, nginx's FastCGI client span
+  and PHP-FPM's server span, and the last one was named `GET /*`, `GET /` or
+  just `POST` while nginx's carried the path. The FastCGI params are
+  captured from the kernel like any generic TCP request, 256 bytes at most.
+  nginx sends them in one write, so its client span sees `REQUEST_URI`;
+  PHP-FPM reads the same stream in pieces, three 8-byte headers and then the
+  params, and the kernel probe's "append one more packet" step copied a
+  fixed 128 bytes per append, so the server-side capture ended at byte 152,
+  inside `SCRIPT_NAME`, before `REQUEST_URI`. The params parser then took
+  the zero padding behind the cut as the rest of the value (`/inde` followed
+  by NULs, which the route heuristic turned into `/*`) or found no path at
+  all.
+
+  Two changes. The append now fills as much of the capture buffer as the
+  verifier lets it prove, in three tiers of constant bounds (224, 192 or 128
+  bytes, by how much was captured first), so PHP-FPM's capture reaches 248
+  bytes: with nginx's stock parameter order and a front controller under
+  `/var/www/html/public`, `REQUEST_URI` is there whenever path plus query
+  string stay under about 78 bytes, and a longer one falls back to
+  `DOCUMENT_URI` (`/index.php`) rather than to garbage. The params parser
+  decodes FastCGI's four-byte lengths (a cookie or user agent of 128 bytes
+  or more used to derail every pair after it) and stops at a value that
+  runs into the zero padding, so a cut value is never a path. Tests cover
+  both.
+
+  Verified on the box with nginx + PHP-FPM 8.3 and a Laravel-style front
+  controller: PHP-FPM's server spans went from `GET /*` (`url.path`
+  `/inde` + NULs) and `POST` to `GET /books`, `GET /books/*` and `POST
+  /orders`, 140 of 140 each over five minutes, the same names as nginx's.
+
+  Not changed: the request still appears as three spans, two of them server
+  spans, which is how nginx and PHP-FPM really talk; naming them
+  consistently is what the ticket asked for.
