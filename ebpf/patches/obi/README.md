@@ -21,6 +21,7 @@ digest is pinned in `ebpf/Dockerfile`.
 | 014 | Remove | [#3514](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3514) sizes the environment map with `validEnvCount()`, ignoring empty entries left by `setproctitle`. |
 | 015 | Restack | Preserve upstream socket-cookie includes and tracer detach lifecycle state while retaining injector-owned Go PID admission and connect tracking. |
 | 016 | New | Keeps OBI's own cgroup out of the traces. Upstream candidate; no upstream equivalent yet. |
+| 017 | New | Names MongoDB spans from cut-short captures and adds `db.query.text`. Upstream candidate; no upstream equivalent yet. |
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
 bounds are part of the base now. A successful fill can copy less than `msg->size`
@@ -444,3 +445,56 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   each connection carries one request, and OBI must have printed a server
   span for the root child's, none for the one from its cgroup, and a client
   span for the parent's request to the listener in its cgroup.
+* 017-mongo-partial-capture.patch
+  Name MongoDB spans from what the capture actually holds. The generic TCP
+  tracer hands the userspace parser the first `k_tcp_max_len` (256) bytes of
+  a request and `k_tcp_res_len` (128) of its reply unless `buffer_sizes.tcp`
+  raises them, and the OP_MSG parser used `bson.Unmarshal`, which refuses a
+  document whose declared length exceeds the bytes it is given, and failed a
+  message outright when a kind-1 document sequence ran past the capture. A
+  cut request body therefore became a span named `*` with no collection, a
+  cut reply body (`errMongoNoResponseBody`) dropped the span altogether, and
+  an insert whose documents travel in a kind-1 section (pymongo, Java, C#)
+  was lost whenever they did not fit. Which of these a driver hits depends on
+  how it reads and writes: pymongo reads the 16-byte reply header first,
+  which the parser already treats as "reply seen, assume success", so its
+  finds were named; the Node driver reads the whole reply at once, so every
+  find whose reply held more than 128 bytes vanished, and a find request long
+  enough (a regex filter plus session and read-preference fields) came out as
+  `*`.
+
+  The patch adds `bsonPrefix`, a walk over a BSON document prefix that keeps
+  every complete top-level element, descends into embedded documents and
+  arrays the same way, and reports that it ran out of bytes. It replaces the
+  empty document for cut and otherwise unreadable bodies. The command name and
+  collection are the first element of a request, so they are almost always
+  present; `$db` near the end is kept when it is. A kind-1 section the
+  capture cuts ends the sections instead of failing the message; the body
+  before it is all the span needs. A reply cut before its `ok` field, which
+  is last, is treated as a success unless an `errmsg` is visible, like the
+  header-only path; one cut after `ok: 0` is a failure that says its message
+  was not captured; a complete reply without `ok` is still rejected, as is a
+  reply whose first section is not a body. `getMore` takes its collection
+  from the `collection` field, a database-level `{aggregate: 1}` keeps its
+  name without a collection, and pymongo's lowercase `ismaster` is a
+  heartbeat like `isMaster`. Numeric `ok` fields of any width are accepted.
+  The walk bounds nesting at 32 levels and never splits a character when
+  capping the text.
+
+  Spans also gain `db.query.text`: the command's shape with every value
+  replaced by `?`, the collection a collection command names kept (the first
+  value of any other command, a user name for `createUser` say, is not),
+  session and routing fields (`lsid`, `$clusterTime`, `$db`,
+  `$readPreference`, transaction and API fields) left out, arrays shown by
+  their first element, capped at 2048 bytes and ending in `…` when the
+  capture cut the command. Field names are kept as SQL identifiers are, which
+  includes names an application derives from data. The traces exporter emits
+  it for MongoDB spans when `db.query.text` is selected, as it already does
+  for SQL. A cut-short command still yields its full shape up to the cut.
+
+  Server-side MongoDB spans (the `mongod` process reporting requests) remain
+  unsupported, as before. `buffer_sizes.tcp` in the runtime configuration
+  still decides how much of a command the text can show; 256 bytes cover a
+  typical find or insert's shape but not a long aggregation pipeline. The
+  unit tests use messages captured from the mongodb npm 6.12 and pymongo 4.15
+  drivers, cut at the capture sizes, and a fuzz target covers the walk.
