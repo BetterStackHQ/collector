@@ -20,8 +20,8 @@ digest is pinned in `ebpf/Dockerfile`.
 | 013 | Restack | Adapt to the `DynamicSelector` rename and new matcher test callers. Explicit exclusions still take precedence over admitted parents. |
 | 014 | Remove | [#3514](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3514) sizes the environment map with `validEnvCount()`, ignoring empty entries left by `setproctitle`. |
 | 015 | Restack | Preserve upstream socket-cookie includes and tracer detach lifecycle state while retaining injector-owned Go PID admission and connect tracking. |
-| 024 | New | Memcached binary protocol (dalli 3, pylibmc, spymemcached) is reported as memcached with server and client spans, and a miss, an existing key or a failed conditional store is not an error; a connection is Couchbase only when it negotiated like one or uses Couchbase's KV ports. Upstream candidate; no upstream equivalent yet. |
 | 016 | New | Keeps OBI's own cgroup out of the traces. Upstream candidate; no upstream equivalent yet. |
+| 024 | New | Memcached binary protocol (dalli 3, pylibmc, spymemcached) is reported as memcached with server and client spans, and a miss, an existing key or a failed conditional store is not an error; a connection is Couchbase only when it negotiated like one or uses Couchbase's KV ports. Upstream candidate; no upstream equivalent yet. |
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
 bounds are part of the base now. A successful fill can copy less than `msg->size`
@@ -338,45 +338,6 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   discovery exclusions. Adds injector-owned PID admission and connect tracking;
   see the correction above. Also fixes sorted-key cleanup in the Go HTTP/1 probes. The generic PID filter
   remains unchanged.
-
-* 024-memcached-binary-protocol.patch
-  Tell memcached from Couchbase on the binary protocol they share. OBI's
-  Couchbase parser recognises memcached's binary protocol, which Couchbase
-  inherited, and labelled every such connection `db.system.name: couchbase`
-  with `kind: client` on both ends, and every non-success status an error.
-  Ruby's dalli 3 (Rails' `:mem_cache_store`; dalli 4 moved to the meta text
-  protocol), Python's pylibmc and Java's spymemcached all use that protocol,
-  so a Rails app showed a "Couchbase"
-  database it does not have, its memcached server's spans were clients too,
-  and every cache miss (`KeyNotFound`, status 1) was a red error although
-  the request succeeded. Node's `memcached` package uses the text protocol
-  and was fine.
-
-  A Couchbase client negotiates before its first KV operation (HELLO,
-  SELECT_BUCKET, GET_CLUSTER_CONFIG, GET_ERROR_MAP, collections) and the KV
-  service listens on 11210, 11207 or 11209; memcached clients send plain
-  GET/SET from the first byte. The parser now marks a connection as
-  Couchbase when it sees any Couchbase-only operation (those above plus
-  replica reads, observe, locks, *_WITH_META, sub-document and DCP
-  commands) or a selected bucket, or when either port is a Couchbase KV
-  port; anything else on the binary protocol is memcached and produces the
-  same span the text protocol does: a memcached client or server span by
-  direction, the key as the path, no namespace, and `KeyNotFound`,
-  `KeyExists` and `ItemNotStored` as normal results (the text parser lets
-  NOT_FOUND, EXISTS and NOT_STORED through the same way). SASL is not a
-  Couchbase signal: memcached speaks it too (`memcached -S`), and a
-  Couchbase SDK says HELLO first anyway. Couchbase spans and their error
-  semantics are unchanged; a Couchbase client on a non-standard port whose
-  negotiation happened before OBI watched the connection is the one case
-  that is now labelled memcached. Tests cover the default, the negotiation,
-  SASL, the ports, SELECT_BUCKET, the conditional outcomes and a key with
-  raw bytes.
-
-  Verified on the box with dalli 3.2.8 against memcached 1.6 (a miss, a set,
-  a hit and a delete every two seconds): every span `memcached`, the client's
-  as `client` and the memcached process's as `server`, 294 `GET`s and not one
-  error, where the stock build had 36 of 86 `GET`s red and both sides as
-  Couchbase clients.
 * 016-exclude-own-cgroup.patch
   Keep the instrumentation's own container out of the traces. OBI runs in a
   container next to the collector's probes: the cluster agent scraping Redis
@@ -484,3 +445,41 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   each connection carries one request, and OBI must have printed a server
   span for the root child's, none for the one from its cgroup, and a client
   span for the parent's request to the listener in its cgroup.
+* 024-memcached-binary-protocol.patch
+  Tell memcached from Couchbase on the binary protocol they share. OBI's
+  Couchbase parser recognises memcached's binary protocol, which Couchbase
+  inherited, and labelled every such connection `db.system.name: couchbase`
+  with `kind: client` on both ends, and every non-success status an error.
+  Ruby's dalli 3 (Rails' `:mem_cache_store`; dalli 4 moved to the meta text
+  protocol), Python's pylibmc and Java's spymemcached all use that protocol,
+  so a Rails app showed a "Couchbase"
+  database it does not have, its memcached server's spans were clients too,
+  and every cache miss (`KeyNotFound`, status 1) was a red error although
+  the request succeeded. Node's `memcached` package uses the text protocol
+  and was fine.
+
+  A Couchbase client negotiates before its first KV operation (HELLO,
+  SELECT_BUCKET, GET_CLUSTER_CONFIG, GET_ERROR_MAP, collections) and the KV
+  service listens on 11210, 11207 or 11209; memcached clients send plain
+  GET/SET from the first byte. The parser now marks a connection as
+  Couchbase when it sees any Couchbase-only operation (those above plus
+  replica reads, observe, locks, *_WITH_META, sub-document and DCP
+  commands) or a selected bucket, or when either port is a Couchbase KV
+  port; anything else on the binary protocol is memcached and produces the
+  same span the text protocol does: a memcached client or server span by
+  direction, the key as the path, no namespace, and `KeyNotFound`,
+  `KeyExists` and `ItemNotStored` as normal results (the text parser lets
+  NOT_FOUND, EXISTS and NOT_STORED through the same way). SASL is not a
+  Couchbase signal: memcached speaks it too (`memcached -S`), and a
+  Couchbase SDK says HELLO first anyway. Couchbase spans and their error
+  semantics are unchanged; a Couchbase client on a non-standard port whose
+  negotiation happened before OBI watched the connection is the one case
+  that is now labelled memcached. Tests cover the default, the negotiation,
+  SASL, the ports, SELECT_BUCKET, the conditional outcomes and a key with
+  raw bytes.
+
+  Verified on the box with dalli 3.2.8 against memcached 1.6 (a miss, a set,
+  a hit and a delete every two seconds): every span `memcached`, the client's
+  as `client` and the memcached process's as `server`, 294 `GET`s and not one
+  error, where the stock build had 36 of 86 `GET`s red and both sides as
+  Couchbase clients.
