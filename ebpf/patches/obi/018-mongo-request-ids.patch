@@ -1,0 +1,118 @@
+diff --git a/pkg/ebpf/common/mongo_bson_partial_test.go b/pkg/ebpf/common/mongo_bson_partial_test.go
+index 14b6e4849..54d99030d 100644
+--- a/pkg/ebpf/common/mongo_bson_partial_test.go
++++ b/pkg/ebpf/common/mongo_bson_partial_test.go
+@@ -20,11 +20,12 @@ import (
+ 
+ // real driver messages captured with strace on the test host (mongodb npm 6.12, pymongo 4.15, MongoDB 8.2)
+ const (
+-	nodeInsertReq  = "d20000002601000000000000dd0700000000000000bd00000002696e7365727400060000006974656d730004646f63756d656e7473005f00000003300057000000027479706500060000006f7264657200027469746c650011000000776964676574207769643020233133330010717479000300000009617400bc0b9163a1010000075f6964006ada0044b414565ddd8e81c20000086f7264657265640001036c736964001e000000056964001000000004b20d29d4ff5d4eb3b062fd8859d893900002246462000500000073686f700000"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 // 210 bytes
+-	nodeInsertResp = "2d000000b602000026010000dd070000000000000018000000106e0001000000016f6b00000000000000f03f00"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           // 45 bytes
+-	nodeFindReq    = "b40000002701000000000000dd07000000000000009f0000000266696e6400060000006974656d73000366696c7465720032000000027479706500060000006f7264657200037469746c6500160000000224726567657800050000007769643000000003736f7274000d00000010617400ffffffff00106c696d6974000a000000036c736964001e000000056964001000000004b20d29d4ff5d4eb3b062fd8859d893900002246462000500000073686f700000"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             // 180 bytes
+-	nodeFindResp   = "e2030000b702000027010000dd0700000000000000cd03000003637572736f7200b40300000466697273744261746368008403000003300057000000075f6964006ada0044b414565ddd8e81c2027479706500060000006f7264657200027469746c650011000000776964676574207769643020233133330010717479000300000009617400bc0b9163a10100000003310057000000075f6964006ada0036b414565ddd8e81bb027479706500060000006f7264657200027469746c650011000000776964676574207769643020233132360010717479000100000009617400eed49063a10100000003320057000000075f6964006ada0028b414565ddd8e81b4027479706500060000006f7264657200027469746c6500110000007769646765742077696430202331313900107174790004000000096174001f9e9063a10100000003330057000000075f6964006ada001ab414565ddd8e81ad027479706500060000006f7264657200027469746c6500110000007769646765742077696430202331313200107174790002000000096174004e679063a10100000003340057000000075f6964006ada000cb414565ddd8e81a6027479706500060000006f7264657200027469746c6500110000007769646765742077696430202331303500107174790000000000096174007a309063a10100000003350056000000075f6964006ad9fffeb414565ddd8e819f027479706500060000006f7264657200027469746c6500100000007769646765742077696430202339380010717479000300000009617400aaf98f63a10100000003360056000000075f6964006ad9fff0b414565ddd8e8198027479706500060000006f7264657200027469746c6500100000007769646765742077696430202339310010717479000100000009617400dac28f63a10100000003370056000000075f6964006ad9ffe2b414565ddd8e8191027479706500060000006f7264657200027469746c6500100000007769646765742077696430202338340010717479000400000009617400088c8f63a10100000003380056000000075f6964006ad9ffd4b414565ddd8e818a027479706500060000006f7264657200027469746c650010000000776964676574207769643020233737001071747900020000000961740036558f63a10100000003390056000000075f6964006ad9ffc6b414565ddd8e8183027479706500060000006f7264657200027469746c6500100000007769646765742077696430202337300010717479000000000009617400651e8f63a10100000000126964000000000000000000026e73000b00000073686f702e6974656d730000016f6b00000000000000f03f00" // 994 bytes
+-	pyInsertReq    = "d000000030ff016000000000dd07000000000000005500000002696e73657274000800000070796974656d7300086f7264657265640001036c736964001e0000000569640010000000045c13a074803b4fbaa3bea99914a56b980002246462000500000073686f7000000165000000646f63756d656e74730057000000075f6964006ada004a16ef8a4ccbd405b3027479706500060000006f7264657200027469746c65001100000077696467657420776964342023313136001071747900010000000961740087219163a101000000"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     // 208 bytes
++	nodeInsertReq  = "d20000002601000000000000dd0700000000000000bd00000002696e7365727400060000006974656d730004646f63756d656e7473005f00000003300057000000027479706500060000006f7264657200027469746c650011000000776964676574207769643020233133330010717479000300000009617400bc0b9163a1010000075f6964006ada0044b414565ddd8e81c20000086f7264657265640001036c736964001e000000056964001000000004b20d29d4ff5d4eb3b062fd8859d893900002246462000500000073686f700000"
++	nodeInsertResp = "2d000000b602000026010000dd070000000000000018000000106e0001000000016f6b00000000000000f03f00"
++	nodeFindReq    = "b40000002701000000000000dd07000000000000009f0000000266696e6400060000006974656d73000366696c7465720032000000027479706500060000006f7264657200037469746c6500160000000224726567657800050000007769643000000003736f7274000d00000010617400ffffffff00106c696d6974000a000000036c736964001e000000056964001000000004b20d29d4ff5d4eb3b062fd8859d893900002246462000500000073686f700000"
++	nodeFindResp   = "e2030000b702000027010000dd0700000000000000cd03000003637572736f7200b40300000466697273744261746368008403000003300057000000075f6964006ada0044b414565ddd8e81c2027479706500060000006f7264657200027469746c650011000000776964676574207769643020233133330010717479000300000009617400bc0b9163a10100000003310057000000075f6964006ada0036b414565ddd8e81bb027479706500060000006f7264657200027469746c650011000000776964676574207769643020233132360010717479000100000009617400eed49063a10100000003320057000000075f6964006ada0028b414565ddd8e81b4027479706500060000006f7264657200027469746c6500110000007769646765742077696430202331313900107174790004000000096174001f9e9063a10100000003330057000000075f6964006ada001ab414565ddd8e81ad027479706500060000006f7264657200027469746c6500110000007769646765742077696430202331313200107174790002000000096174004e679063a10100000003340057000000075f6964006ada000cb414565ddd8e81a6027479706500060000006f7264657200027469746c6500110000007769646765742077696430202331303500107174790000000000096174007a309063a10100000003350056000000075f6964006ad9fffeb414565ddd8e819f027479706500060000006f7264657200027469746c6500100000007769646765742077696430202339380010717479000300000009617400aaf98f63a10100000003360056000000075f6964006ad9fff0b414565ddd8e8198027479706500060000006f7264657200027469746c6500100000007769646765742077696430202339310010717479000100000009617400dac28f63a10100000003370056000000075f6964006ad9ffe2b414565ddd8e8191027479706500060000006f7264657200027469746c6500100000007769646765742077696430202338340010717479000400000009617400088c8f63a10100000003380056000000075f6964006ad9ffd4b414565ddd8e818a027479706500060000006f7264657200027469746c650010000000776964676574207769643020233737001071747900020000000961740036558f63a10100000003390056000000075f6964006ad9ffc6b414565ddd8e8183027479706500060000006f7264657200027469746c6500100000007769646765742077696430202337300010717479000000000009617400651e8f63a10100000000126964000000000000000000026e73000b00000073686f702e6974656d730000016f6b00000000000000f03f00"
++	pyInsertReq    = "d000000030ff016000000000dd07000000000000005500000002696e73657274000800000070796974656d7300086f7264657265640001036c736964001e0000000569640010000000045c13a074803b4fbaa3bea99914a56b980002246462000500000073686f7000000165000000646f63756d656e74730057000000075f6964006ada004a16ef8a4ccbd405b3027479706500060000006f7264657200027469746c65001100000077696467657420776964342023313136001071747900010000000961740087219163a101000000"
++	pyFindReq      = "b600000006d382e900000000dd0700000000000000a10000000266696e64000800000070796974656d73000366696c7465720032000000027479706500060000006f7264657200037469746c6500160000000224726567657800050000007769643400000003736f7274000d00000010617400ffffffff00106c696d6974000a000000036c736964001e0000000569640010000000045c13a074803b4fbaa3bea99914a56b980002246462000500000073686f700000"
+ )
+ 
+ // What the generic tracer hands the parser unless buffer_sizes.tcp raises
+@@ -422,3 +423,49 @@ func TestBsonPrefixBoundsNesting(t *testing.T) {
+ 	require.Len(t, doc, 1)
+ 	assert.NotPanics(t, func() { _ = mongoQueryText(doc, false) })
+ }
++
++// pymongo draws request ids at random from the whole int32 range; this find
++// carries a negative one and its reply echoes it.
++func TestMongoPymongoNegativeRequestID(t *testing.T) {
++	cache := expirable.NewLRU[MongoRequestKey, *MongoRequestValue](10, nil, 0)
++	conn := getConnInfo()
++	raw := fixture(t, pyFindReq)
++	requestID := int32(binary.LittleEndian.Uint32(raw[4:8]))
++	require.Negative(t, requestID, "the fixture must carry a negative id")
++
++	_, more, err := ProcessMongoEvent(captured(t, pyFindReq), StartTime, EndTime, conn, cache)
++	require.NoError(t, err)
++	assert.True(t, more)
++
++	// the reply, as pymongo reads it: the header first
++	reply := new(bytes.Buffer)
++	_ = binary.Write(reply, binary.LittleEndian, msgHeader{MessageLength: 994, RequestID: 712, ResponseTo: requestID, OpCode: opMsg})
++	req, more, err := ProcessMongoEvent(reply.Bytes(), StartTime, EndTime, conn, cache)
++	require.NoError(t, err)
++	assert.False(t, more)
++	require.NotNil(t, req)
++
++	info, err := getMongoInfo(req)
++	require.NoError(t, err)
++	assert.Equal(t, "find", info.OpName)
++	assert.Equal(t, "pyitems", info.Collection)
++	assert.Equal(t, "shop", info.DB)
++	assert.True(t, info.Success)
++}
++
++func TestMongoNegativeIDsRoundTrip(t *testing.T) {
++	cache := expirable.NewLRU[MongoRequestKey, *MongoRequestValue](10, nil, 0)
++	conn := getConnInfo()
++	request := getRequestPayload(&msgHeader{MessageLength: MessageLength, RequestID: -1610743600, OpCode: opMsg}, 0, sectionTypeBody, nil)
++	_, _, err := ProcessMongoEvent(request, StartTime, EndTime, conn, cache)
++	require.NoError(t, err)
++	response := getResponsePayload(&msgHeader{MessageLength: 38, RequestID: -7, ResponseTo: -1610743600, OpCode: opMsg}, 0, sectionTypeBody, nil)
++	req, more, err := ProcessMongoEvent(response, StartTime, EndTime, conn, cache)
++	require.NoError(t, err)
++	assert.False(t, more)
++	require.NotNil(t, req)
++	info, err := getMongoInfo(req)
++	require.NoError(t, err)
++	assert.Equal(t, "find", info.OpName)
++	assert.True(t, info.Success)
++}
+diff --git a/pkg/ebpf/common/mongo_detect_transform.go b/pkg/ebpf/common/mongo_detect_transform.go
+index 283ac3c17..cf366e717 100644
+--- a/pkg/ebpf/common/mongo_detect_transform.go
++++ b/pkg/ebpf/common/mongo_detect_transform.go
+@@ -41,8 +41,6 @@ var (
+ 	errMongoInvalidBSONLength                    = errors.New("invalid MongoDB BSON length")
+ 	errMongoUnsupportedSectionType               = errors.New("unsupported MongoDB section type")
+ 	errMongoInvalidMessageLength                 = errors.New("invalid MongoDB message length")
+-	errMongoInvalidRequestID                     = errors.New("invalid MongoDB request ID")
+-	errMongoInvalidResponseID                    = errors.New("invalid MongoDB response ID")
+ 	errMongoInvalidFlagBits                      = errors.New("invalid MongoDB flag bits")
+ 	errMongoNoRequestSections                    = errors.New("no MongoDB request sections found")
+ 	errMongoFirstSectionNotBody                  = errors.New("first MongoDB section is not of type body")
+@@ -411,16 +409,13 @@ func parseMongoHeader(pkt []byte) (*msgHeader, error) {
+ 	return header, nil
+ }
+ 
++// validateMsgHeader checks what the wire protocol promises about a header.
++// The ids are any int32: pymongo draws them at random from the whole range,
++// so half of its requests carry a negative one, and the reply echoes it.
+ func validateMsgHeader(header *msgHeader) error {
+ 	if header.MessageLength <= msgHeaderSize || header.OpCode == opMsg && header.MessageLength < minOpMsgSize {
+ 		return errMongoInvalidMessageLength
+ 	}
+-	if header.RequestID < 0 {
+-		return errMongoInvalidRequestID
+-	}
+-	if header.ResponseTo < 0 {
+-		return errMongoInvalidResponseID
+-	}
+ 	return nil
+ }
+ 
+diff --git a/pkg/ebpf/common/mongo_detect_transform_fuzz_test.go b/pkg/ebpf/common/mongo_detect_transform_fuzz_test.go
+index e00af635d..d3288025d 100644
+--- a/pkg/ebpf/common/mongo_detect_transform_fuzz_test.go
++++ b/pkg/ebpf/common/mongo_detect_transform_fuzz_test.go
+@@ -121,7 +121,7 @@ func assertAcceptedMongoHeader(t *testing.T, payload []byte) {
+ 	requestID := int32(binary.LittleEndian.Uint32(payload[4:8]))
+ 	responseTo := int32(binary.LittleEndian.Uint32(payload[8:12]))
+ 	opcode := int32(binary.LittleEndian.Uint32(payload[12:16]))
+-	if messageLength < minOpMsgSize || requestID < 0 || responseTo < 0 || opcode != 2013 {
++	if messageLength < minOpMsgSize || opcode != 2013 {
+ 		t.Fatalf("accepted invalid MongoDB header: length=%d request=%d response=%d opcode=%d",
+ 			messageLength, requestID, responseTo, opcode)
+ 	}

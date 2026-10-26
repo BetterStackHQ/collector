@@ -1,0 +1,53 @@
+diff --git a/bpf/common/trace_parent.h b/bpf/common/trace_parent.h
+index 9bbd4fd27..8caf77ecf 100644
+--- a/bpf/common/trace_parent.h
++++ b/bpf/common/trace_parent.h
+@@ -229,8 +229,10 @@ find_python_parent_trace(const trace_key_t *t_key, u64 pid_tgid, u8 *allow_paren
+ }
+ 
+ static __always_inline tp_info_pid_t *find_parent_java_trace(trace_key_t *t_key) {
+-    // Up to 3 levels of thread nesting allowed
+-    enum { k_max_depth = 3 };
++    // Up to 5 levels of thread nesting allowed. Hand-offs recorded while the
++    // request's thread was already known link straight to it (java_tls.c), so
++    // the depth only matters for chains recorded before it was.
++    enum { k_max_depth = 5 };
+ 
+     for (u8 i = 0; i < k_max_depth; ++i) {
+         tp_info_pid_t *server_tp = bpf_map_lookup_elem(&server_traces, t_key);
+diff --git a/bpf/generictracer/java_tls.c b/bpf/generictracer/java_tls.c
+index f2adb8e1f..c63eb8a83 100644
+--- a/bpf/generictracer/java_tls.c
++++ b/bpf/generictracer/java_tls.c
+@@ -155,12 +155,28 @@ int BPF_KPROBE_GUARDED(obi_kprobe_sys_ioctl) {
+         bpf_dbg_printk("Java thread mapping [%d] -> [%d]", parent.tid, child.tid);
+         bpf_map_update_elem(&java_tasks, &child, &parent, BPF_ANY);
+ 
+-        // Walk the java_tasks chain to find the parent's server trace and
+-        // refresh traces_ctx_v1 for this child thread.
++        // Walk the java_tasks chain from the submitter to the thread holding
++        // the server span. When it is found, link the child straight to that
++        // thread rather than to the submitter. The map keeps one parent per
++        // thread, and the pool threads of an actor system (Pekko, Akka) hand
++        // work back and forth: a link to the submitter is overwritten by the
++        // next hand-off and the walk from a worker then cycles between pool
++        // threads without reaching the request. A link to the request's
++        // thread survives any later hand-off while the request is in flight.
++        // When the chain does not resolve, the submitter stays recorded, as
++        // before, so a later walk can still follow it.
+         trace_key_t t_key = {.p_key = parent, .extra_id = extra_runtime_id_with_task_id(parent_id)};
+         tp_info_pid_t *server_tp = find_parent_java_trace(&t_key);
++        const u8 resolved = server_tp && server_tp->valid;
+ 
+-        if (server_tp && server_tp->valid) {
++        if (resolved && t_key.p_key.tid != child.tid) {
++            bpf_dbg_printk(
++                "Java thread [%d] linked to request thread [%d]", child.tid, t_key.p_key.tid);
++            bpf_map_update_elem(&java_tasks, &child, &t_key.p_key, BPF_ANY);
++        }
++
++        // Refresh traces_ctx_v1 for this child thread.
++        if (resolved) {
+             obi_ctx__set(id, &server_tp->tp);
+         } else {
+             obi_ctx__del(id);

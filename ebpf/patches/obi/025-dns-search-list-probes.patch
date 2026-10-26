@@ -1,0 +1,581 @@
+diff --git a/pkg/appolly/app/request/metric_attributes.go b/pkg/appolly/app/request/metric_attributes.go
+index 10bfb03e9..aee0a14f3 100644
+--- a/pkg/appolly/app/request/metric_attributes.go
++++ b/pkg/appolly/app/request/metric_attributes.go
+@@ -113,6 +113,10 @@ func DBQueryText(val string) attribute.KeyValue {
+ 	return attribute.Key(attr.DBQueryText).String(val)
+ }
+ 
++func DNSResponseRCode(val string) attribute.KeyValue {
++	return attribute.Key(attr.DNSResponseRCode).String(val)
++}
++
+ func DBNamespace(val string) attribute.KeyValue {
+ 	return attribute.Key(attr.DBNamespace).String(val)
+ }
+diff --git a/pkg/appolly/app/request/span.go b/pkg/appolly/app/request/span.go
+index c1668e505..b5e8421a0 100644
+--- a/pkg/appolly/app/request/span.go
++++ b/pkg/appolly/app/request/span.go
+@@ -1544,7 +1544,11 @@ type Span struct {
+ 	// ParentConditional marks a parent that may already have finished when this
+ 	// span started: BPF cannot tell at that moment, so the pipeline settles the
+ 	// link against the parent span's real end timestamp before export.
+-	ParentConditional bool           `json:"-"`
++	ParentConditional bool `json:"-"`
++	// DNSSearchProbe marks an NXDOMAIN answer for one candidate of a resolver's
++	// search-list walk whose other candidate resolved: the lookup succeeded, so
++	// the span is not an error, though Status still holds the rcode.
++	DNSSearchProbe    bool           `json:"-"`
+ 	TraceFlags        uint8          `json:"traceFlags,string"`
+ 	Links             []SpanLink     `json:"links,omitempty"`
+ 	Pid               PidInfo        `json:"-"`
+@@ -1980,7 +1984,12 @@ func SpanStatusCode(span *Span) string {
+ 		return HTTPSpanStatusCode(span)
+ 	case EventTypeGRPC, EventTypeGRPCClient:
+ 		return GrpcSpanStatusCode(span)
+-	case EventTypeSQLClient, EventTypeSQLServer, EventTypeRedisClient, EventTypeRedisServer, EventTypeMongoClient, EventTypeDNS, EventTypeCouchbaseClient, EventTypeMemcachedClient, EventTypeMemcachedServer, EventTypeSunRPCClient, EventTypeSunRPCServer, EventTypeAerospikeClient, EventTypeAerospikeServer:
++	case EventTypeDNS:
++		if span.Status != 0 && !span.DNSSearchProbe {
++			return StatusCodeError
++		}
++		return StatusCodeUnset
++	case EventTypeSQLClient, EventTypeSQLServer, EventTypeRedisClient, EventTypeRedisServer, EventTypeMongoClient, EventTypeCouchbaseClient, EventTypeMemcachedClient, EventTypeMemcachedServer, EventTypeSunRPCClient, EventTypeSunRPCServer, EventTypeAerospikeClient, EventTypeAerospikeServer:
+ 		if span.Status != 0 {
+ 			return StatusCodeError
+ 		}
+@@ -2019,6 +2028,15 @@ func (s *Span) IsDBSpan() bool {
+ 	return false
+ }
+ 
++// DNSRCodeName is the name of a DNS answer's response code other than NoError,
++// for the span attribute that keeps it even when the span is not an error.
++func DNSRCodeName(span *Span) string {
++	if span.Type != EventTypeDNS || span.Status <= 0 {
++		return ""
++	}
++	return dnsparser.RCode(span.Status).String()
++}
++
+ func SpanStatusMessage(span *Span) string {
+ 	switch span.Type {
+ 	case EventTypeManualSpan:
+@@ -2031,7 +2049,7 @@ func SpanStatusMessage(span *Span) string {
+ 			return mcp.ErrorMessage
+ 		}
+ 	case EventTypeDNS:
+-		if span.Status != 0 {
++		if span.Status != 0 && !span.DNSSearchProbe {
+ 			return dnsparser.RCode(span.Status).String()
+ 		}
+ 	}
+diff --git a/pkg/appolly/app/request/span_test.go b/pkg/appolly/app/request/span_test.go
+index db150ef5a..f1e37b770 100644
+--- a/pkg/appolly/app/request/span_test.go
++++ b/pkg/appolly/app/request/span_test.go
+@@ -2248,3 +2248,19 @@ func TestJSONRPCQualifiedMethodLeavesPayloadExtractedMethodsAlone(t *testing.T)
+ 		})
+ 	}
+ }
++
++// An NXDOMAIN for a search-list candidate whose sibling resolved is not an error.
++func TestSpanStatus_DNSSearchProbe(t *testing.T) {
++	probe := &Span{Type: EventTypeDNS, Status: 3, DNSSearchProbe: true}
++	assert.Equal(t, StatusCodeUnset, SpanStatusCode(probe))
++	assert.Empty(t, SpanStatusMessage(probe))
++	assert.Equal(t, "NXDomain", DNSRCodeName(probe))
++
++	failure := &Span{Type: EventTypeDNS, Status: 3}
++	assert.Equal(t, StatusCodeError, SpanStatusCode(failure))
++	assert.Equal(t, "NXDomain", SpanStatusMessage(failure))
++
++	ok := &Span{Type: EventTypeDNS, Status: 0}
++	assert.Equal(t, StatusCodeUnset, SpanStatusCode(ok))
++	assert.Empty(t, DNSRCodeName(ok))
++}
+diff --git a/pkg/ebpf/common/common.go b/pkg/ebpf/common/common.go
+index aad836b90..365cde1cb 100644
+--- a/pkg/ebpf/common/common.go
++++ b/pkg/ebpf/common/common.go
+@@ -327,6 +327,7 @@ type EBPFParseContext struct {
+ 	payloadExtraction           config.PayloadExtraction
+ 	httpEnricher                *ebpfhttp.HTTPEnricher
+ 	dnsEvents                   *expirable.LRU[dnsparser.DNSId, *request.Span]
++	dnsSearchGroups             *expirable.LRU[dnsSearchKey, *dnsSearchGroup]
+ 	pendingSpanLinks            *pendingSpanLinks
+ 	pendingGoHTTPClientRequests *expirable.LRU[pendingGoHTTPClientKey, *pendingGoHTTPClientRequest]
+ 	goHTTPClientMaxPendingTime  time.Duration
+@@ -517,6 +518,12 @@ func NewEBPFParseContext(cfg *config.EBPFTracer, spansChan *msg.Queue[[]request.
+ 		stopEmitting:               stopEmitting,
+ 	}
+ 
++	if cfg != nil && cfg.DNSRequestTimeout > 0 {
++		// NXDOMAIN answers wait here for a sibling candidate of the same lookup
++		// to resolve, for a short window of their own.
++		parseCtx.dnsSearchGroups = expirable.NewLRU(1024, dnsSearchGroupExpireHandler(parseCtx), dnsSearchWindow)
++	}
++
+ 	if parseCtx.goClientPayloadExtractionEnabled(cfg) {
+ 		parseCtx.goHTTPClientMaxPendingTime = cfg.MaxTransactionTime
+ 		parseCtx.pendingGoHTTPClientRequests = expirable.NewLRU(
+diff --git a/pkg/ebpf/common/dns_request_transform.go b/pkg/ebpf/common/dns_request_transform.go
+index f3cceff6a..538d2d014 100644
+--- a/pkg/ebpf/common/dns_request_transform.go
++++ b/pkg/ebpf/common/dns_request_transform.go
+@@ -6,6 +6,8 @@ package ebpfcommon // import "go.opentelemetry.io/obi/pkg/ebpf/common"
+ import (
+ 	"net"
+ 	"strings"
++	"sync"
++	"time"
+ 	"unsafe"
+ 
+ 	"golang.org/x/net/dns/dnsmessage"
+@@ -28,6 +30,134 @@ func dnsEventExpireHandler(emitSpans func([]request.Span)) func(key dnsparser.DN
+ 	}
+ }
+ 
++// A resolver with a search list asks for several candidates of one name:
++// `inventory` becomes `inventory.ns.svc.cluster.local.`, `inventory.svc.cluster.local.`,
++// `inventory.cluster.local.` and `inventory.`, and all but one answer NXDOMAIN
++// although the lookup succeeds. glibc walks the whole list for an address
++// family that has no record (AAAA for a service without IPv6), so Ruby and
++// anything else resolving both families separately shows three NXDOMAIN spans
++// per call. Those answers are parked here, per process and first label, until
++// a sibling candidate resolves (then they are emitted as probes, not errors) or
++// the window closes (then they are emitted as they always were, errors).
++type dnsSearchKey struct {
++	HostPID uint32
++	Label   string
++}
++
++const (
++	// dnsSearchWindow bounds how long an NXDOMAIN waits for a sibling and how
++	// long a resolution keeps turning later NXDOMAINs for the same label into
++	// probes. A resolver's walk takes milliseconds; the window only needs to
++	// cover a slow nameserver, and it is also how late a real NXDOMAIN error
++	// is reported.
++	dnsSearchWindow = 2 * time.Second
++	// dnsSearchMaxParked caps what one group holds; a process retrying a
++	// failing name in a loop gets its errors at once past the cap.
++	dnsSearchMaxParked = 64
++)
++
++type dnsSearchGroup struct {
++	mu       sync.Mutex
++	resolved bool           // a candidate answered with addresses inside the window
++	flushed  bool           // the window closed and the parked spans went out as errors
++	parked   []request.Span // NXDOMAIN candidates waiting for a sibling
++}
++
++// dnsSearchLabel is the first label of a question name, lower-cased: every
++// candidate of a search-list walk starts with the name the program asked for.
++func dnsSearchLabel(name string) string {
++	label, _, _ := strings.Cut(strings.TrimSuffix(name, "."), ".")
++	return strings.ToLower(label)
++}
++
++// dnsSearchGroupExpireHandler emits the parked NXDOMAIN answers of a group whose
++// window closed without a sibling resolving: the whole lookup failed, and they
++// are the errors they always were. It runs under the LRU's lock, like the
++// handler for unanswered requests, and like that handler it emits directly.
++func dnsSearchGroupExpireHandler(parseCtx *EBPFParseContext) func(dnsSearchKey, *dnsSearchGroup) {
++	return func(_ dnsSearchKey, group *dnsSearchGroup) {
++		group.mu.Lock()
++		parked := group.parked
++		group.parked = nil
++		group.flushed = true
++		group.mu.Unlock()
++		if len(parked) > 0 && parseCtx.emitSpans != nil {
++			parseCtx.emitSpans(parked)
++		}
++	}
++}
++
++// dnsSearchGroupFor returns the live group for key, starting a new one when
++// there is none. An entry past its window that the cache has not swept yet
++// would be overwritten by Add without its callback, so it is removed first,
++// which flushes it.
++func (ctx *EBPFParseContext) dnsSearchGroupFor(key dnsSearchKey) *dnsSearchGroup {
++	if group, ok := ctx.dnsSearchGroups.Get(key); ok {
++		group.mu.Lock()
++		flushed := group.flushed
++		group.mu.Unlock()
++		if !flushed {
++			return group
++		}
++	}
++	ctx.dnsSearchGroups.Remove(key)
++	group := &dnsSearchGroup{}
++	ctx.dnsSearchGroups.Add(key, group)
++	return group
++}
++
++// parkDNSSearchProbe takes an NXDOMAIN answer. It reports whether the caller
++// emits the span now and, if so, whether as a probe (a sibling already
++// resolved) or as the plain error it is when nothing correlates lookups.
++func (ctx *EBPFParseContext) parkDNSSearchProbe(span request.Span) (emitNow, probe bool) {
++	label := dnsSearchLabel(span.Path)
++	if ctx == nil || ctx.dnsSearchGroups == nil || label == "" {
++		return true, false
++	}
++	key := dnsSearchKey{HostPID: uint32(span.Pid.HostPID), Label: label}
++	group := ctx.dnsSearchGroupFor(key)
++	group.mu.Lock()
++	defer group.mu.Unlock()
++	if group.flushed {
++		return true, false
++	}
++	if group.resolved {
++		return true, true
++	}
++	if len(group.parked) >= dnsSearchMaxParked {
++		return true, false
++	}
++	group.parked = append(group.parked, span)
++	return false, false
++}
++
++// resolveDNSSearch takes an answer with addresses: the lookup succeeded, so the
++// NXDOMAIN candidates parked for it go out as probes, and later ones will too
++// for the rest of the window.
++func (ctx *EBPFParseContext) resolveDNSSearch(span *request.Span) {
++	label := dnsSearchLabel(span.Path)
++	if ctx == nil || ctx.dnsSearchGroups == nil || label == "" {
++		return
++	}
++	key := dnsSearchKey{HostPID: uint32(span.Pid.HostPID), Label: label}
++	group := ctx.dnsSearchGroupFor(key)
++	group.mu.Lock()
++	if group.flushed {
++		group.mu.Unlock()
++		return
++	}
++	group.resolved = true
++	parked := group.parked
++	group.parked = nil
++	group.mu.Unlock()
++	for i := range parked {
++		parked[i].DNSSearchProbe = true
++	}
++	if len(parked) > 0 && ctx.emitSpans != nil {
++		ctx.emitSpans(parked)
++	}
++}
++
+ func readDNSEventIntoSpan(parseCtx *EBPFParseContext, record *ringbuf.Record) (request.Span, bool, error) {
+ 	event, err := ReinterpretCast[DNSInfo](record.RawSample)
+ 	if err != nil {
+@@ -145,5 +275,18 @@ func readDNSEventIntoSpan(parseCtx *EBPFParseContext, record *ringbuf.Record) (r
+ 		return *span, true, nil // ignore duplicate errors
+ 	}
+ 
++	switch {
++	case span.Status == int(dnsparser.RCodeNameError):
++		emitNow, probe := parseCtx.parkDNSSearchProbe(*span)
++		if !emitNow {
++			return *span, true, nil // parked until a sibling resolves or the window closes
++		}
++		out := *span
++		out.DNSSearchProbe = probe
++		return out, false, nil
++	case span.Status == int(dnsparser.RCodeSuccess) && len(addresses) > 0:
++		parseCtx.resolveDNSSearch(span)
++	}
++
+ 	return *span, false, nil
+ }
+diff --git a/pkg/ebpf/common/dns_request_transform_test.go b/pkg/ebpf/common/dns_request_transform_test.go
+index efe69e54b..db5706a05 100644
+--- a/pkg/ebpf/common/dns_request_transform_test.go
++++ b/pkg/ebpf/common/dns_request_transform_test.go
+@@ -4,6 +4,7 @@
+ package ebpfcommon
+ 
+ import (
++	"sync"
+ 	"testing"
+ 	"time"
+ 	"unsafe"
+@@ -26,6 +27,53 @@ func newDNSParseContext() *EBPFParseContext {
+ 	}
+ }
+ 
++// emittedSpans records spans emitted out of band, from the reader or the LRU's
++// expiry goroutine.
++type emittedSpans struct {
++	mu    sync.Mutex
++	spans []request.Span
++}
++
++func (e *emittedSpans) add(spans []request.Span) {
++	e.mu.Lock()
++	defer e.mu.Unlock()
++	e.spans = append(e.spans, spans...)
++}
++
++func (e *emittedSpans) list() []request.Span {
++	e.mu.Lock()
++	defer e.mu.Unlock()
++	return append([]request.Span(nil), e.spans...)
++}
++
++// newDNSSearchParseContext correlates search-list candidates within ttl and
++// records every span emitted out of band.
++func newDNSSearchParseContext(ttl time.Duration) (*EBPFParseContext, *emittedSpans) {
++	emitted := &emittedSpans{}
++	ctx := &EBPFParseContext{
++		dnsEvents: expirable.NewLRU[dnsparser.DNSId, *request.Span](1024, nil, time.Minute),
++		emitSpans: emitted.add,
++	}
++	ctx.dnsSearchGroups = expirable.NewLRU(1024, dnsSearchGroupExpireHandler(ctx), ttl)
++	return ctx, emitted
++}
++
++func dnsTypedQuestion(t *testing.T, name string, typ dnsmessage.Type) dnsmessage.Question {
++	t.Helper()
++	qname, err := dnsmessage.NewName(name)
++	require.NoError(t, err)
++	return dnsmessage.Question{Name: qname, Type: typ, Class: dnsmessage.ClassINET}
++}
++
++// dnsRCodeRecord is an answer with the given rcode and no records (NXDOMAIN, or NODATA with RCodeSuccess).
++func dnsRCodeRecord(t *testing.T, id uint16, name string, typ dnsmessage.Type, rcode dnsmessage.RCode) *ringbuf.Record {
++	t.Helper()
++	return dnsRecord(t, id, dnsmessage.Message{
++		Header:    dnsmessage.Header{ID: id, Response: true, RCode: rcode},
++		Questions: []dnsmessage.Question{dnsTypedQuestion(t, name, typ)},
++	})
++}
++
+ func dnsQueryRecord(t *testing.T, id uint16, name string) *ringbuf.Record {
+ 	t.Helper()
+ 	return dnsRecord(t, id, dnsmessage.Message{
+@@ -187,3 +235,156 @@ func TestReadDNSEventIntoSpan_QueryThenAnswerPairs(t *testing.T) {
+ 	assert.Equal(t, "10.0.0.1", answer.Statement)
+ 	assert.Equal(t, request.EventTypeDNS, answer.Type)
+ }
++
++// A resolver walking the search list gets NXDOMAIN for every candidate but one;
++// those answers wait for the sibling that resolves and then go out as probes,
++// not errors, with the rcode kept.
++func TestReadDNSEventIntoSpan_NXDomainHeldUntilSiblingResolves(t *testing.T) {
++	ctx, emitted := newDNSSearchParseContext(time.Minute)
++
++	_, ignore, err := readDNSEventIntoSpan(ctx, dnsRCodeRecord(t, 1, "inventory.svc.cluster.local.", dnsmessage.TypeAAAA, dnsmessage.RCodeNameError))
++	require.NoError(t, err)
++	assert.True(t, ignore, "parked, not emitted yet")
++	_, ignore, err = readDNSEventIntoSpan(ctx, dnsRCodeRecord(t, 2, "inventory.cluster.local.", dnsmessage.TypeAAAA, dnsmessage.RCodeNameError))
++	require.NoError(t, err)
++	assert.True(t, ignore)
++	assert.Empty(t, emitted.list())
++
++	span, ignore, err := readDNSEventIntoSpan(ctx, dnsAnswerRecord(t, 3, "inventory.bookstore-rails.svc.cluster.local.", [4]byte{10, 0, 0, 10}))
++	require.NoError(t, err)
++	assert.False(t, ignore)
++	assert.Equal(t, 0, span.Status)
++
++	require.Len(t, emitted.list(), 2)
++	for _, probe := range emitted.list() {
++		assert.Equal(t, int(dnsparser.RCodeNameError), probe.Status)
++		assert.True(t, probe.DNSSearchProbe)
++		assert.Equal(t, "AAAA", probe.Method)
++		assert.Equal(t, request.StatusCodeUnset, request.SpanStatusCode(&probe))
++		assert.Empty(t, request.SpanStatusMessage(&probe))
++		assert.Equal(t, "NXDomain", request.DNSRCodeName(&probe))
++	}
++	assert.ElementsMatch(t, []string{"inventory.svc.cluster.local.", "inventory.cluster.local."}, []string{emitted.list()[0].Path, emitted.list()[1].Path})
++}
++
++// When the resolving candidate answers first, the NXDOMAINs that follow go out at once as probes.
++func TestReadDNSEventIntoSpan_NXDomainAfterSiblingResolvedIsAProbe(t *testing.T) {
++	ctx, emitted := newDNSSearchParseContext(time.Minute)
++	_, _, err := readDNSEventIntoSpan(ctx, dnsAnswerRecord(t, 1, "inventory.bookstore-rails.svc.cluster.local.", [4]byte{10, 0, 0, 10}))
++	require.NoError(t, err)
++
++	span, ignore, err := readDNSEventIntoSpan(ctx, dnsRCodeRecord(t, 2, "inventory.", dnsmessage.TypeAAAA, dnsmessage.RCodeNameError))
++	require.NoError(t, err)
++	assert.False(t, ignore)
++	assert.True(t, span.DNSSearchProbe)
++	assert.Equal(t, request.StatusCodeUnset, request.SpanStatusCode(&span))
++	assert.Empty(t, emitted.list(), "nothing was parked")
++}
++
++// A lookup that fails on every candidate keeps its errors: the parked answers
++// come out unchanged when the window closes, and only once.
++func TestReadDNSEventIntoSpan_NXDomainExpiresAsError(t *testing.T) {
++	ctx, emitted := newDNSSearchParseContext(50 * time.Millisecond)
++	_, ignore, err := readDNSEventIntoSpan(ctx, dnsRCodeRecord(t, 1, "nosuch.svc.cluster.local.", dnsmessage.TypeA, dnsmessage.RCodeNameError))
++	require.NoError(t, err)
++	assert.True(t, ignore)
++
++	assert.Eventually(t, func() bool { return len(emitted.list()) == 1 }, 3*time.Second, 10*time.Millisecond)
++	errSpan := emitted.list()[0]
++	assert.Equal(t, int(dnsparser.RCodeNameError), errSpan.Status)
++	assert.False(t, errSpan.DNSSearchProbe)
++	assert.Equal(t, request.StatusCodeError, request.SpanStatusCode(&errSpan))
++	assert.Equal(t, "NXDomain", request.SpanStatusMessage(&errSpan))
++
++	// a success arriving later starts a new group and re-emits nothing
++	_, _, err = readDNSEventIntoSpan(ctx, dnsAnswerRecord(t, 2, "nosuch.example.", [4]byte{10, 0, 0, 1}))
++	require.NoError(t, err)
++	assert.Len(t, emitted.list(), 1)
++}
++
++// Another lookup's success, or a NODATA answer, releases nothing.
++func TestReadDNSEventIntoSpan_OnlyASiblingWithAddressesReleases(t *testing.T) {
++	ctx, emitted := newDNSSearchParseContext(time.Minute)
++	_, _, err := readDNSEventIntoSpan(ctx, dnsRCodeRecord(t, 1, "inventory.cluster.local.", dnsmessage.TypeAAAA, dnsmessage.RCodeNameError))
++	require.NoError(t, err)
++
++	_, _, err = readDNSEventIntoSpan(ctx, dnsAnswerRecord(t, 2, "payments.svc.cluster.local.", [4]byte{10, 0, 0, 20}))
++	require.NoError(t, err)
++	assert.Empty(t, emitted.list(), "a different name does not release")
++
++	span, ignore, err := readDNSEventIntoSpan(ctx, dnsRCodeRecord(t, 3, "inventory.bookstore-rails.svc.cluster.local.", dnsmessage.TypeAAAA, dnsmessage.RCodeSuccess))
++	require.NoError(t, err)
++	assert.False(t, ignore)
++	assert.Equal(t, 0, span.Status)
++	assert.Empty(t, emitted.list(), "NODATA is not a resolution")
++}
++
++// Without the correlation cache an NXDOMAIN is the error it always was.
++func TestReadDNSEventIntoSpan_NXDomainWithoutCorrelationIsAnError(t *testing.T) {
++	ctx := newDNSParseContext()
++	span, ignore, err := readDNSEventIntoSpan(ctx, dnsRCodeRecord(t, 1, "inventory.", dnsmessage.TypeA, dnsmessage.RCodeNameError))
++	require.NoError(t, err)
++	assert.False(t, ignore)
++	assert.False(t, span.DNSSearchProbe)
++	assert.Equal(t, request.StatusCodeError, request.SpanStatusCode(&span))
++}
++
++func TestDNSSearchLabel(t *testing.T) {
++	assert.Equal(t, "inventory", dnsSearchLabel("inventory.svc.cluster.local."))
++	assert.Equal(t, "inventory", dnsSearchLabel("Inventory."))
++	assert.Equal(t, "api", dnsSearchLabel("api.payments.cluster.local."))
++	assert.Empty(t, dnsSearchLabel("."))
++	assert.Empty(t, dnsSearchLabel(""))
++}
++
++// An entry past its window that the cache has not swept yet must be flushed,
++// not overwritten: Add on an existing key does not run the eviction callback.
++func TestReadDNSEventIntoSpan_StaleGroupIsFlushedNotOverwritten(t *testing.T) {
++	ctx, emitted := newDNSSearchParseContext(40 * time.Millisecond)
++	_, ignore, err := readDNSEventIntoSpan(ctx, dnsRCodeRecord(t, 1, "redis.svc.cluster.local.", dnsmessage.TypeA, dnsmessage.RCodeNameError))
++	require.NoError(t, err)
++	require.True(t, ignore)
++
++	// past the window, before the sweeper (which ticks every window/100) is
++	// guaranteed to have run: a new answer for the same label must not lose the old one
++	time.Sleep(45 * time.Millisecond)
++	_, ignore, err = readDNSEventIntoSpan(ctx, dnsRCodeRecord(t, 2, "redis.cluster.local.", dnsmessage.TypeA, dnsmessage.RCodeNameError))
++	require.NoError(t, err)
++	assert.Eventually(t, func() bool { return len(emitted.list()) >= 1 }, 2*time.Second, 5*time.Millisecond)
++	first := emitted.list()[0]
++	assert.Equal(t, "redis.svc.cluster.local.", first.Path)
++	assert.False(t, first.DNSSearchProbe)
++	assert.Eventually(t, func() bool { return len(emitted.list()) == 2 }, 2*time.Second, 5*time.Millisecond, "the second one expires on its own")
++}
++
++// A process retrying a failing name in a loop gets its errors at once past the cap.
++func TestReadDNSEventIntoSpan_ParkedSpansAreCapped(t *testing.T) {
++	ctx, emitted := newDNSSearchParseContext(time.Minute)
++	for i := range dnsSearchMaxParked {
++		_, ignore, err := readDNSEventIntoSpan(ctx, dnsRCodeRecord(t, uint16(i+1), "nosuch.cluster.local.", dnsmessage.TypeA, dnsmessage.RCodeNameError))
++		require.NoError(t, err)
++		require.True(t, ignore)
++	}
++	span, ignore, err := readDNSEventIntoSpan(ctx, dnsRCodeRecord(t, uint16(dnsSearchMaxParked+1), "nosuch.cluster.local.", dnsmessage.TypeA, dnsmessage.RCodeNameError))
++	require.NoError(t, err)
++	assert.False(t, ignore)
++	assert.False(t, span.DNSSearchProbe)
++	assert.Equal(t, request.StatusCodeError, request.SpanStatusCode(&span))
++	assert.Empty(t, emitted.list())
++}
++
++// A resolved group with nothing parked expires without emitting anything.
++func TestReadDNSEventIntoSpan_ResolvedGroupExpiresQuietly(t *testing.T) {
++	ctx, emitted := newDNSSearchParseContext(30 * time.Millisecond)
++	_, _, err := readDNSEventIntoSpan(ctx, dnsAnswerRecord(t, 1, "inventory.bookstore-rails.svc.cluster.local.", [4]byte{10, 0, 0, 10}))
++	require.NoError(t, err)
++	time.Sleep(120 * time.Millisecond)
++	assert.Empty(t, emitted.list())
++
++	// and after the window a miss for the same label is an error again
++	span, ignore, err := readDNSEventIntoSpan(ctx, dnsRCodeRecord(t, 2, "inventory.", dnsmessage.TypeA, dnsmessage.RCodeNameError))
++	require.NoError(t, err)
++	assert.True(t, ignore, "parked in a fresh group")
++	_ = span
++	assert.Eventually(t, func() bool { return len(emitted.list()) == 1 && !emitted.list()[0].DNSSearchProbe }, 2*time.Second, 5*time.Millisecond)
++}
+diff --git a/pkg/export/attributes/names/attrs.go b/pkg/export/attributes/names/attrs.go
+index 6b4f029b7..73f7d3e0d 100644
+--- a/pkg/export/attributes/names/attrs.go
++++ b/pkg/export/attributes/names/attrs.go
+@@ -367,6 +367,9 @@ const (
+ // DNS events
+ const (
+ 	DNSQuestionName = Name(semconv.DNSQuestionNameKey)
++	// DNSResponseRCode names the answer's response code (NXDomain, ServFail, ...).
++	// Semconv has no attribute for it yet.
++	DNSResponseRCode = Name("dns.response.rcode")
+ )
+ 
+ // GenAI events
+diff --git a/pkg/export/otel/tracesgen/dns_rcode_test.go b/pkg/export/otel/tracesgen/dns_rcode_test.go
+new file mode 100644
+index 000000000..290492e89
+--- /dev/null
++++ b/pkg/export/otel/tracesgen/dns_rcode_test.go
+@@ -0,0 +1,37 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package tracesgen
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++
++	"go.opentelemetry.io/obi/pkg/appolly/app/request"
++	attr "go.opentelemetry.io/obi/pkg/export/attributes/names"
++)
++
++// A DNS span names its response code when it is not NoError, whether or not
++// the span counts as an error.
++func TestTraceAttributesSelector_DNSResponseRCode(t *testing.T) {
++	for _, tc := range []struct {
++		name  string
++		span  request.Span
++		want  string
++		found bool
++	}{
++		{"nxdomain error", request.Span{Type: request.EventTypeDNS, Method: "AAAA", Path: "nosuch.", Status: 3}, "NXDomain", true},
++		{"nxdomain probe", request.Span{Type: request.EventTypeDNS, Method: "AAAA", Path: "inventory.cluster.local.", Status: 3, DNSSearchProbe: true}, "NXDomain", true},
++		{"noerror", request.Span{Type: request.EventTypeDNS, Method: "A", Path: "inventory.", Status: 0}, "", false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			selected := AttrsToMap(TraceAttributesSelector(&tc.span, map[attr.Name]struct{}{}))
++			val, ok := selected.Get("dns.response.rcode")
++			assert.Equal(t, tc.found, ok)
++			if ok {
++				assert.Equal(t, tc.want, val.Str())
++			}
++		})
++	}
++}
+diff --git a/pkg/export/otel/tracesgen/tracesgen.go b/pkg/export/otel/tracesgen/tracesgen.go
+index 40093e986..dc3eddef7 100644
+--- a/pkg/export/otel/tracesgen/tracesgen.go
++++ b/pkg/export/otel/tracesgen/tracesgen.go
+@@ -1680,6 +1680,9 @@ func traceAttributesSelectorInternal(span *request.Span, optionalAttrs map[attr.
+ 		if _, ok := optionalAttrs[attr.DNSQuestionName]; ok {
+ 			attrs = appendIfSet(attrs, semconv.DNSQuestionName, span.Path)
+ 		}
++		// Say which answer this was even when it is not an error: NXDomain for a
++		// search-list candidate whose sibling resolved stays visible this way.
++		attrs = appendIfSet(attrs, request.DNSResponseRCode, request.DNSRCodeName(span))
+ 
+ 	}
+ 
