@@ -21,6 +21,12 @@ digest is pinned in `ebpf/Dockerfile`.
 | 014 | Remove | [#3514](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3514) sizes the environment map with `validEnvCount()`, ignoring empty entries left by `setproctitle`. |
 | 015 | Restack | Preserve upstream socket-cookie includes and tracer detach lifecycle state while retaining injector-owned Go PID admission and connect tracking. |
 | 016 | New | Keeps OBI's own cgroup out of the traces. Upstream candidate; no upstream equivalent yet. |
+| 017 | New | Names MongoDB spans from cut-short captures and adds `db.query.text`. Upstream candidate; no upstream equivalent yet. |
+| 018 | New | Accepts the whole int32 range of MongoDB request ids. Upstream candidate; no upstream equivalent yet. |
+| 019 | New | Postgres: skips statements without a query (BEGIN, COMMIT, SET) instead of falling back to a `PREPARED STATEMENT` span, so the pipelined query behind them is traced. Upstream candidate; no upstream equivalent yet. |
+| 020 | New | Names HTTP client spans from their own path when the only harvested route they match is a catch-all, and keeps the Host header's port in `url.full`. Upstream candidate; no upstream equivalent yet. |
+| 021 | New | Python: a request's trace follows the copied context into anyio's worker threads (FastAPI sync endpoints). Upstream candidate; no upstream equivalent yet. |
+| 022 | New | Java: a thread hand-off reported by the Java agent links the worker to the thread holding the request's server span, not only to the submitter, so actor-style dispatchers (Pekko, Akka) keep their traces stitched. Upstream candidate; no upstream equivalent yet. |
 | 023 | New | FastCGI: a server that reads a request header first and the rest after (PHP-FPM) keeps up to 248 of the 256 captured bytes instead of 152, and the params parser honours four-byte lengths and stops at a cut value, so PHP-FPM spans are named `POST /orders` rather than `POST` or `GET /*`. Upstream candidate; no upstream equivalent yet. |
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
@@ -445,6 +451,236 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   each connection carries one request, and OBI must have printed a server
   span for the root child's, none for the one from its cgroup, and a client
   span for the parent's request to the listener in its cgroup.
+* 017-mongo-partial-capture.patch
+  Name MongoDB spans from what the capture actually holds. The generic TCP
+  tracer hands the userspace parser the first `k_tcp_max_len` (256) bytes of
+  a request and `k_tcp_res_len` (128) of its reply unless `buffer_sizes.tcp`
+  raises them, and the OP_MSG parser used `bson.Unmarshal`, which refuses a
+  document whose declared length exceeds the bytes it is given, and failed a
+  message outright when a kind-1 document sequence ran past the capture. A
+  cut request body therefore became a span named `*` with no collection, a
+  cut reply body (`errMongoNoResponseBody`) dropped the span altogether, and
+  an insert whose documents travel in a kind-1 section (pymongo, Java, C#)
+  was lost whenever they did not fit. Which of these a driver hits depends on
+  how it reads and writes: pymongo reads the 16-byte reply header first,
+  which the parser already treats as "reply seen, assume success", so its
+  finds were named; the Node driver reads the whole reply at once, so every
+  find whose reply held more than 128 bytes vanished, and a find request long
+  enough (a regex filter plus session and read-preference fields) came out as
+  `*`.
+
+  The patch adds `bsonPrefix`, a walk over a BSON document prefix that keeps
+  every complete top-level element, descends into embedded documents and
+  arrays the same way, and reports that it ran out of bytes. It replaces the
+  empty document for cut and otherwise unreadable bodies. The command name and
+  collection are the first element of a request, so they are almost always
+  present; `$db` near the end is kept when it is. A kind-1 section the
+  capture cuts ends the sections instead of failing the message; the body
+  before it is all the span needs. A reply cut before its `ok` field, which
+  is last, is treated as a success unless an `errmsg` is visible, like the
+  header-only path; one cut after `ok: 0` is a failure that says its message
+  was not captured; a complete reply without `ok` is still rejected, as is a
+  reply whose first section is not a body. `getMore` takes its collection
+  from the `collection` field, a database-level `{aggregate: 1}` keeps its
+  name without a collection, and pymongo's lowercase `ismaster` is a
+  heartbeat like `isMaster`. Numeric `ok` fields of any width are accepted.
+  The walk bounds nesting at 32 levels and never splits a character when
+  capping the text.
+
+  Spans also gain `db.query.text`: the command's shape with every value
+  replaced by `?`, the collection a collection command names kept (the first
+  value of any other command, a user name for `createUser` say, is not),
+  session and routing fields (`lsid`, `$clusterTime`, `$db`,
+  `$readPreference`, transaction and API fields) left out, arrays shown by
+  their first element, capped at 2048 bytes and ending in `…` when the
+  capture cut the command. Field names are kept as SQL identifiers are, which
+  includes names an application derives from data. The traces exporter emits
+  it for MongoDB spans when `db.query.text` is selected, as it already does
+  for SQL. A cut-short command still yields its full shape up to the cut.
+
+  Server-side MongoDB spans (the `mongod` process reporting requests) remain
+  unsupported, as before. `buffer_sizes.tcp` in the runtime configuration
+  still decides how much of a command the text can show; 256 bytes cover a
+  typical find or insert's shape but not a long aggregation pipeline. The
+  unit tests use messages captured from the mongodb npm 6.12 and pymongo 4.15
+  drivers, cut at the capture sizes, and a fuzz target covers the walk.
+* 018-mongo-request-ids.patch
+  Accept MongoDB request ids from the whole int32 range. The OP_MSG header
+  check rejected any message whose `requestID` or `responseTo` was negative,
+  as if the wire protocol promised them positive; it only promises an int32.
+  pymongo draws its ids at random from that range, so half of its requests
+  failed the check and lost their span, replies included, whatever the
+  command. The other drivers count their ids up from a small number, so
+  this only ever affected pymongo; what they share with it is 017's cut
+  document sequence, which is where pymongo, the Java, C#, Ruby and PHP
+  drivers carry an insert's documents, and that is why inserts from all of
+  them were mostly missing while Node's, with documents in the body, were
+  not. The pairing of a reply with its request already keys on the full
+  int32, so nothing else changes; the fuzz invariant that encoded the old
+  rule is updated, and a test uses a pymongo find captured with a negative
+  id.
+* 019-postgres-statements-without-queries.patch
+  Trace the Postgres statement that matters when a write carries one that
+  does not. `handlePostgres` names a span from the first statement a write
+  executes: a `Q` simple query, or the prepared statement an `E` executes
+  through the portal its `B` bound. The SQL it remembers from a `P` comes
+  from `detectSQL`, which only recognises SELECT, INSERT, UPDATE, DELETE,
+  ALTER, CREATE and DROP; BEGIN, COMMIT, SET, DEALLOCATE and the like leave
+  an empty statement, and executing one ended in `errFallback`, whose
+  generic naming (`postgresPreparedStatements`) reported a `PREPARED
+  STATEMENT <names>` span with no SQL and swallowed the rest of the write.
+
+  Two drivers hit this constantly. pgjdbc turns every statement into a named
+  server-side prepared statement after five runs, BEGIN included, and
+  pipelines BEGIN with the first statement of a transaction into one send
+  (`B(S_2) E B(S_3) E S`): the first Execute was BEGIN, so the write became
+  `PREPARED STATEMENT .S_2` and the `SELECT ... FOR UPDATE` behind it was
+  never traced, the shape of the report where the hottest statements had no
+  spans while rare ones did. pdo_pgsql under Laravel prepares `set names`
+  first on every connection, always as `pdo_stmt_00000001`, so every request
+  carried one `PREPARED STATEMENT .pdo_stmt_00000001` span with empty text.
+
+  The handler now recognises control statements by their leading keyword
+  (BEGIN, START, COMMIT, END, ROLLBACK, ABORT, SAVEPOINT, RELEASE, SET,
+  RESET, DEALLOCATE, DISCARD), keeping the Parse text of a statement the
+  detector found no query in so an Execute can tell BEGIN from a CALL. An
+  executed control statement, prepared or simple, is skipped and the scan
+  goes on to the next statement in the same write, so the pipelined query
+  is the span; a write that executes only control statements is no span,
+  `errIgnore` rather than the fallback, unless the reply is an error: a
+  failed COMMIT is the only place a serialization failure or a deferred
+  constraint shows up, so that one is a span named after the statement with
+  the error attached. Everything else the detector does not know (CALL,
+  TRUNCATE, LOCK, `EXECUTE <name>`) still goes to the generic naming, which
+  at least reports that it ran, and a cut Parse with no query in what was
+  captured is no span rather than a nameless one. A statement the tracer
+  never saw prepared is still ignored, as before. The generic naming also
+  now reads a Bind message in wire order, portal then statement, so when it
+  does run it prints `S_1` rather than `.S_1`; an existing test table had
+  encoded the swap.
+
+  Verified on the box with pgjdbc 42.7.4 and PHP 8.3 pdo_pgsql against
+  Postgres 17; the unit tests build the pipelined and the PDO writes from
+  the captured message shapes.
+* 020-client-spans-own-path.patch
+  Name HTTP client spans from the request's own path. OBI harvests a
+  process's routes from its source (Django and Flask url patterns, Express
+  routers, Rails routes, Spring and JAX-RS annotations) and uses them to name
+  the spans of the requests the process *serves*, which is mostly what they
+  describe; both route providers apply the same harvested matcher to the
+  process's *outgoing* calls too, as a last resort before the unmatched-route
+  policy, which is right for the few that do describe outgoing calls (a
+  Spring Feign client's annotated interface). A Django project routinely ends
+  its urlpatterns with a catch-all `path("<path:url>", ...)`, which the
+  matcher honours as a whole-path wildcard, so every call a Django service
+  made to another service was named `GET /<path:url>` or `POST /<path:url>`
+  whatever it fetched, while the same calls from Node or Ruby were named
+  `POST /reserve` and `GET /stock/*`. A harvested route without a single
+  literal segment (`/<path:url>`, a bare `/{slug}`, `/*`), or with a
+  catch-all segment anywhere (`/api/<path:rest>`, a gateway that forwards
+  what it receives), now names incoming requests only; a client span that
+  matches one falls through to the unmatched-route policy like everyone
+  else's, which clusters it heuristically by default, while a Feign-style
+  `/users/{id}` still names the call it describes. The rule applies to route
+  tables harvested whole (Django's urlpatterns) and to the fragments most
+  other frameworks' routes are harvested as alike; a template the partial
+  matcher composes from fragments keeps naming a call when a literal fragment
+  is part of it, as before.
+
+  `url.full` on client spans also keeps the port the request's Host header
+  named: `http://inventory:4000/reserve` rather than
+  `http://inventory/reserve`, with `server.port` saying 4000 next to it. The
+  header parser splits the header into host and port and used to drop the
+  port; the span now carries it apart from the host (`HostHeaderPort`), so
+  `server.address` and the name resolver keep seeing the bare host while
+  `url.full` gets the authority the client wrote. The connection's port is
+  never used for this: through a forward proxy or a socket-level load
+  balancer it is not the URL's port.
+
+  Not changed: a SQL span without a table is still named `{operation}
+  {db.namespace}` (`SELECT bookstore` for `SELECT 1`), which is what the
+  OpenTelemetry database semantic conventions prescribe when there is no
+  collection to name; the same query shows up as plain `SELECT` only on
+  connections whose startup message the tracer never saw, so the namespace
+  is unknown.
+* 021-python-threadpool-context.patch
+  Let a Python request's trace follow its context into a worker thread. OBI
+  ties a Python asyncio task to the server request it handles and carries
+  the trace to other threads through `contextvars`: `PyContext_CopyCurrent`
+  binds the copied context to the task that copied it, and `context_run` on
+  any thread resolves the context back to that task, so a client span made
+  on a worker thread gets the request's server span as parent. The binding
+  also records the context's `ctx_vars` pointer as of the copy, and a
+  context whose `ctx_vars` differ at `context_run` is treated as a recycled
+  address and ignored; that guard matters on builds where the
+  `context_tp_dealloc` hook could not be attached.
+
+  anyio defeats the guard. Starlette's `run_in_threadpool`, which FastAPI
+  uses for every plain `def` endpoint, is `anyio.to_thread.run_sync`, and
+  that copies the context and then sets a ContextVar in it
+  (`context.run(set_current_async_library, None)`, for sniffio) before
+  handing it to a worker thread. Setting a variable replaces `ctx_vars`, so
+  the worker's `context_run` saw a changed pointer, resolved nothing, and
+  every database and Redis call of a sync endpoint became a root span in a
+  trace of its own, while an `async def` endpoint, which never leaves the
+  task, was fine. `asyncio.to_thread` does not touch the copied context,
+  which is why it already worked.
+
+  The fix is small: when `context_run` returns inside the task the context
+  is bound to (the event-loop thread running that task, or the task's own
+  eager first step), the binding takes the context's current `ctx_vars`. A
+  variable set by the owner is a legitimate change. Nothing else moves the
+  binding: a run of the context by any other task, which is either a
+  context kept across requests or a recycled address on a build without the
+  dealloc hook, still fails the guard, and runs on worker threads never
+  refresh it. The uretprobe keeps everything else it did.
+
+  Verified with FastAPI 0.118 under uvicorn 0.37 (anyio 4.15 with sniffio
+  installed, CPython 3.13 from the `python:3.13` image) against MySQL and
+  Redis: `def` endpoints' `SELECT`, `UPDATE`, `SET` and `DEL` spans go from
+  all root to all parented, `async def` endpoints are unchanged. Without
+  sniffio, anyio 4.15 sets no variable in the copied context and the stock
+  build was already fine; older anyio releases depended on sniffio outright,
+  and httpx still does, so most FastAPI services have it.
+
+  This only helps where OBI's Python probes attach at all. The official
+  `python:3.x-slim` images strip `libpython` and `_asyncio` of their symbol
+  tables, so `context_run`, `task_step` and the other static functions OBI
+  hooks are not there to hook, and a service on such an image gets no task
+  tracking whatever; that is a separate problem.
+* 022-java-thread-chain.patch
+  Keep a Java request's trace through actor-style thread hand-offs. OBI
+  learns how a JVM moves work between threads from its Java agent, which
+  reports every executor, fork-join and `Runnable` hand-off as "a task
+  submitted by thread P now runs on thread C" over an ioctl channel; the BPF
+  side keeps one parent per thread (`java_tasks[C] = P`) and, when C makes a
+  client request, walks that chain a few levels looking for a thread that
+  holds a server span. Pekko's and Akka's dispatcher threads hand work back
+  and forth: thread 103 reads the request, then 103→104, 104→103, 104→129,
+  and 129→104 overwrites 104's link to 103, so the walk from 129 cycles
+  between 104 and 129 and gives up, and the database call starts a trace of
+  its own. A Play service behind a keep-alive connection lost 80% of its
+  client spans this way even with the agent on.
+
+  The hand-off handler now records the submitter as before, then resolves
+  its chain, and when that reaches the thread holding the server span it
+  re-links the worker straight to that thread (the map's own comment always
+  called its value "the server thread"). While the request is in flight, a
+  link to its thread survives any later hand-off and cannot be walked into a
+  cycle. When the chain does not resolve, the submitter stays recorded, and
+  the fallback walk may go five levels deep instead of three.
+
+  Verified on the box with two Play 3.0.5 services (Pekko HTTP, HikariCP +
+  pgjdbc, Connector/J, Jedis, spymemcached, Mongo, Play WS) with the Java
+  agent enabled, 246 requests: the downstream service's `SET`, `DEL`, `SELECT
+  stock` and `UPDATE stock` spans went from about 51 of 255 parented to 246
+  of 246; the upstream service stayed at 241 of 246 (the first requests
+  before the agent attached), its spymemcached calls at 0 as expected.
+
+  Not changed here: without the Java agent OBI cannot stitch Java traces at
+  all, and spymemcached, which runs its I/O on a thread of its own without
+  an executor, still has no hand-off to report; both are documented on the
+  ticket.
 * 023-fastcgi-request-path.patch
   Name PHP-FPM's server spans from the request. Behind nginx, every PHP
   request has three spans: nginx's server span, nginx's FastCGI client span
