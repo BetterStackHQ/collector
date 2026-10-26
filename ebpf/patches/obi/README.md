@@ -25,7 +25,7 @@ digest is pinned in `ebpf/Dockerfile`.
 | 018 | New | Accepts the whole int32 range of MongoDB request ids. Upstream candidate; no upstream equivalent yet. |
 | 019 | New | Postgres: skips statements without a query (BEGIN, COMMIT, SET) instead of falling back to a `PREPARED STATEMENT` span, so the pipelined query behind them is traced. Upstream candidate; no upstream equivalent yet. |
 | 020 | New | Names HTTP client spans from their own path when the only harvested route they match is a catch-all, and keeps the Host header's port in `url.full`. Upstream candidate; no upstream equivalent yet. |
-
+| 021 | New | Python: a request's trace follows the copied context into anyio's worker threads (FastAPI sync endpoints). Upstream candidate; no upstream equivalent yet. |
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
 bounds are part of the base now. A successful fill can copy less than `msg->size`
@@ -601,3 +601,48 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   collection to name; the same query shows up as plain `SELECT` only on
   connections whose startup message the tracer never saw, so the namespace
   is unknown.
+* 021-python-threadpool-context.patch
+  Let a Python request's trace follow its context into a worker thread. OBI
+  ties a Python asyncio task to the server request it handles and carries
+  the trace to other threads through `contextvars`: `PyContext_CopyCurrent`
+  binds the copied context to the task that copied it, and `context_run` on
+  any thread resolves the context back to that task, so a client span made
+  on a worker thread gets the request's server span as parent. The binding
+  also records the context's `ctx_vars` pointer as of the copy, and a
+  context whose `ctx_vars` differ at `context_run` is treated as a recycled
+  address and ignored; that guard matters on builds where the
+  `context_tp_dealloc` hook could not be attached.
+
+  anyio defeats the guard. Starlette's `run_in_threadpool`, which FastAPI
+  uses for every plain `def` endpoint, is `anyio.to_thread.run_sync`, and
+  that copies the context and then sets a ContextVar in it
+  (`context.run(set_current_async_library, None)`, for sniffio) before
+  handing it to a worker thread. Setting a variable replaces `ctx_vars`, so
+  the worker's `context_run` saw a changed pointer, resolved nothing, and
+  every database and Redis call of a sync endpoint became a root span in a
+  trace of its own, while an `async def` endpoint, which never leaves the
+  task, was fine. `asyncio.to_thread` does not touch the copied context,
+  which is why it already worked.
+
+  The fix is small: when `context_run` returns inside the task the context
+  is bound to (the event-loop thread running that task, or the task's own
+  eager first step), the binding takes the context's current `ctx_vars`. A
+  variable set by the owner is a legitimate change. Nothing else moves the
+  binding: a run of the context by any other task, which is either a
+  context kept across requests or a recycled address on a build without the
+  dealloc hook, still fails the guard, and runs on worker threads never
+  refresh it. The uretprobe keeps everything else it did.
+
+  Verified with FastAPI 0.118 under uvicorn 0.37 (anyio 4.15 with sniffio
+  installed, CPython 3.13 from the `python:3.13` image) against MySQL and
+  Redis: `def` endpoints' `SELECT`, `UPDATE`, `SET` and `DEL` spans go from
+  all root to all parented, `async def` endpoints are unchanged. Without
+  sniffio, anyio 4.15 sets no variable in the copied context and the stock
+  build was already fine; older anyio releases depended on sniffio outright,
+  and httpx still does, so most FastAPI services have it.
+
+  This only helps where OBI's Python probes attach at all. The official
+  `python:3.x-slim` images strip `libpython` and `_asyncio` of their symbol
+  tables, so `context_run`, `task_step` and the other static functions OBI
+  hooks are not there to hook, and a service on such an image gets no task
+  tracking whatever; that is a separate problem.
