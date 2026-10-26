@@ -1,0 +1,547 @@
+diff --git a/pkg/ebpf/common/sql_detect_postgres.go b/pkg/ebpf/common/sql_detect_postgres.go
+index 66c67bbbb..9bb45a9f8 100644
+--- a/pkg/ebpf/common/sql_detect_postgres.go
++++ b/pkg/ebpf/common/sql_detect_postgres.go
+@@ -231,23 +231,26 @@ func msgBodyReader(b *largebuf.LargeBuffer) (largebuf.LargeBufferReader, error)
+ 	return b.NewLimitedReader(pgHeaderLen, end)
+ }
+ 
++// parsePostgresBindCommand reads a Bind message: the portal name, then the
++// prepared statement it binds, then the parameter values.
++//
+ //nolint:cyclop
+-func parsePostgresBindCommand(b *largebuf.LargeBuffer) (string, string, []string, error) {
++func parsePostgresBindCommand(b *largebuf.LargeBuffer) (portal, statement string, args []string, err error) {
+ 	r, err := msgBodyReader(b)
+ 	if err != nil {
+ 		return "", "", nil, err
+ 	}
+ 
+-	stmtBytes, err := r.ReadCStr()
+-	if err != nil {
+-		return "", "", nil, errPGTooShortStatement
+-	}
+-
+ 	portalBytes, err := r.ReadCStr()
+ 	if err != nil {
+ 		return "", "", nil, errPGTooShortPortal
+ 	}
+ 
++	stmtBytes, err := r.ReadCStr()
++	if err != nil {
++		return "", "", nil, errPGTooShortStatement
++	}
++
+ 	if _, ok := readPostgresFormats(&r); !ok {
+ 		return "", "", nil, errPGTooShortFormatCodes
+ 	}
+@@ -258,9 +261,9 @@ func parsePostgresBindCommand(b *largebuf.LargeBuffer) (string, string, []string
+ 		return "", "", nil, errPGTooShortParams
+ 	}
+ 	if params <= 0 {
+-		return string(stmtBytes), string(portalBytes), nil, nil
++		return string(portalBytes), string(stmtBytes), nil, nil
+ 	}
+-	args := make([]string, 0, int(params))
++	args = make([]string, 0, int(params))
+ 	for range int(params) {
+ 		argLen, err := r.ReadI32BE()
+ 		if err != nil {
+@@ -278,7 +281,7 @@ func parsePostgresBindCommand(b *largebuf.LargeBuffer) (string, string, []string
+ 		args = append(args, string(arg))
+ 	}
+ 
+-	return string(stmtBytes), string(portalBytes), args, nil
++	return string(portalBytes), string(stmtBytes), args, nil
+ }
+ 
+ func parsePosgresQueryCommand(b *largebuf.LargeBuffer) ([]byte, error) {
+@@ -293,10 +296,13 @@ func parsePosgresQueryCommand(b *largebuf.LargeBuffer) ([]byte, error) {
+ func postgresPreparedStatements(b *largebuf.LargeBuffer) (string, string, string) {
+ 	var op, table, sql string
+ 	if isPostgresBindCommand(b) {
+-		statement, portal, args, err := parsePostgresBindCommand(b)
++		portal, statement, args, err := parsePostgresBindCommand(b)
+ 		if err == nil {
+ 			op = "PREPARED STATEMENT"
+-			table = fmt.Sprintf("%s.%s", statement, portal)
++			table = statement
++			if portal != "" {
++				table = fmt.Sprintf("%s.%s", statement, portal)
++			}
+ 			var sqlBuilder strings.Builder
+ 			for _, arg := range args {
+ 				if isASCII(arg) {
+@@ -501,12 +507,63 @@ func parsePostgresResponse(response []byte) postgresResponse {
+ 	return result
+ }
+ 
++// postgresControlStatements are the statements drivers run through the same
++// paths as queries without there being a query in them: transaction control
++// and session setup. pgjdbc turns them into named prepared statements after a
++// few runs and pipelines BEGIN with the first statement of a transaction into
++// one write; PDO prepares `set names` first on every connection.
++var postgresControlStatements = map[string]struct{}{
++	"BEGIN": {}, "START": {}, "COMMIT": {}, "END": {}, "ROLLBACK": {}, "ABORT": {},
++	"SAVEPOINT": {}, "RELEASE": {}, "SET": {}, "RESET": {}, "DEALLOCATE": {}, "DISCARD": {},
++}
++
++// postgresControlStatement returns the leading keyword of text, upper-cased,
++// when it is one of postgresControlStatements, and "" otherwise.
++func postgresControlStatement(text []byte) string {
++	i := 0
++	for i < len(text) && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' || text[i] == '\r' || text[i] == '(') {
++		i++
++	}
++	j := i
++	for j < len(text) && ((text[j] >= 'a' && text[j] <= 'z') || (text[j] >= 'A' && text[j] <= 'Z')) {
++		j++
++	}
++	if j == i || j > i+10 {
++		return ""
++	}
++	word := strings.ToUpper(string(text[i:j]))
++	if _, ok := postgresControlStatements[word]; ok {
++		return word
++	}
++	return ""
++}
++
++// handlePostgres names the span of one request/response exchange on a Postgres
++// connection from the statement it executes: a simple query, or the prepared
++// statement an Execute runs through the portal its Bind bound, whose SQL was
++// remembered from the Parse that created it.
++//
++// detectSQL only recognises a statement with a query in it (SELECT, INSERT,
++// UPDATE, DELETE, ALTER, CREATE, DROP). A control statement (BEGIN, COMMIT,
++// SET, ...) that is executed is skipped and the scan goes on to the next
++// statement in the same write, so pgjdbc's "BEGIN + first query" write is
++// named by the query. A write that executes only control statements is no
++// span, unless the reply is an error, which a COMMIT is the only place to see
++// for a serialization failure. Anything else the detector does not know (CALL,
++// TRUNCATE, LOCK, EXECUTE <name>) still goes to the generic naming, which at
++// least reports that it ran.
++//
++//nolint:cyclop
+ func handlePostgres(parseCtx *EBPFParseContext, event *TCPRequestInfo, requestBuffer, responseBuffer *largebuf.LargeBuffer) (request.Span, error) {
+ 	var (
+ 		hasSpan  bool
+ 		op, stmt string
+ 		tables   []string
+ 		span     request.Span
++		// the last control statement skipped, and its message kind
++		skipped, skippedKind string
++		// a simple "EXECUTE <name>" query, which the generic naming reports
++		executeQuery bool
+ 	)
+ 
+ 	reqR := requestBuffer.NewReader()
+@@ -544,8 +601,21 @@ Loop:
+ 		switch msg.typ {
+ 		case "QUERY":
+ 			op, tables, stmt = detectSQL(msg.data)
+-			hasSpan = true
+-			break Loop
++			if validSQL(op, len(tables) > 0, request.DBPostgres) {
++				hasSpan = true
++				break Loop
++			}
++			text := bytes.TrimRight(msg.data, "\x00")
++			if asciiIndexFold(text, sqlExecuteKeyword) == 0 {
++				executeQuery = true
++				continue
++			}
++			if control := postgresControlStatement(text); control != "" {
++				skipped, skippedKind, stmt = control, msg.typ, strings.Clone(string(text))
++				continue
++			}
++			// something the detector does not know: let the generic naming look
++			return span, errFallback
+ 		case "PARSE":
+ 			// On the PARSE command, the statement name is the first 4 bytes after the header and command ID
+ 			// in the request buffer.
+@@ -554,6 +624,11 @@ Loop:
+ 			stmtName := strings.Clone(unix.ByteSliceToString(msg.data))
+ 			stmtNameLen := len(stmtName)
+ 			_, _, stmt = detectSQL(msg.data[stmtNameLen:])
++			if stmt == "" {
++				// no query in it; keep the text, so that an Execute can tell
++				// BEGIN from a CALL
++				stmt = strings.Clone(unix.ByteSliceToString(msg.data[min(stmtNameLen+1, len(msg.data)):]))
++			}
+ 
+ 			parseCtx.postgresPreparedStatements.Add(postgresPreparedStatementsKey{
+ 				connInfo: event.ConnInfo,
+@@ -565,6 +640,10 @@ Loop:
+ 			}
+ 
+ 			op, tables = sqlprune.SQLParseOperationAndTables(stmt)
++			if !validSQL(op, len(tables) > 0, request.DBPostgres) {
++				// a cut Parse with no query in what was captured
++				continue
++			}
+ 			hasSpan = true
+ 			msg.typ = "EXECUTE"
+ 			break Loop
+@@ -603,6 +682,12 @@ Loop:
+ 				continue
+ 			}
+ 
++			if control := postgresControlStatement([]byte(stmt)); control != "" {
++				// the statement that matters may follow in the same write
++				skipped, skippedKind = control, msg.typ
++				continue
++			}
++
+ 			op, tables = sqlprune.SQLParseOperationAndTables(stmt)
+ 			hasSpan = true
+ 			break Loop
+@@ -612,11 +697,22 @@ Loop:
+ 	}
+ 
+ 	if !hasSpan {
++		if executeQuery {
++			return span, errFallback
++		}
++		if skipped != "" && sqlError != nil {
++			// a failed COMMIT is the only place a serialization failure or a
++			// deferred constraint shows up
++			span = TCPToSQLToSpan(event, skipped, nil, stmt, request.DBPostgres, skippedKind, sqlError)
++			span.DBNamespace = postgresDBForConn(parseCtx, event.ConnInfo)
++			return span, nil
++		}
+ 		return span, errIgnore
+ 	}
+ 
+ 	if !validSQL(op, len(tables) > 0, request.DBPostgres) {
+-		// This can happen for stuff like 'BEGIN', etc.
++		// a statement the SQL parser does not know, CALL or TRUNCATE say: the
++		// generic naming at least reports that it ran
+ 		slog.Debug("Postgres operation and/or table are invalid", "stmt", stmt)
+ 		return span, errFallback
+ 	}
+diff --git a/pkg/ebpf/common/sql_detect_postgres_test.go b/pkg/ebpf/common/sql_detect_postgres_test.go
+index a3eb0beab..651ff5925 100644
+--- a/pkg/ebpf/common/sql_detect_postgres_test.go
++++ b/pkg/ebpf/common/sql_detect_postgres_test.go
+@@ -496,3 +496,285 @@ func TestParsePostgresStartupTruncationSafety(t *testing.T) {
+ 		})
+ 	}
+ }
++
++// --- statements without a query in them -------------------------------------
++
++func postgresBindTestBody(portal, statement string, args ...string) []byte {
++	body := append([]byte(portal), 0)
++	body = append(body, statement...)
++	body = append(body, 0)
++	body = binary.BigEndian.AppendUint16(body, 0) // parameter format codes: all text
++	body = binary.BigEndian.AppendUint16(body, uint16(len(args)))
++	for _, arg := range args {
++		body = binary.BigEndian.AppendUint32(body, uint32(len(arg)))
++		body = append(body, arg...)
++	}
++	body = binary.BigEndian.AppendUint16(body, 0) // result format codes
++	return body
++}
++
++func postgresExecuteTestBody(portal string) []byte {
++	body := append([]byte(portal), 0)
++	return binary.BigEndian.AppendUint32(body, 0)
++}
++
++// postgresWrite concatenates frontend messages the way a driver pipelines them
++// into one send.
++func postgresWrite(packets ...[]byte) []byte {
++	var out []byte
++	for _, p := range packets {
++		out = append(out, p...)
++	}
++	return out
++}
++
++func postgresExtendedResponse(perStatement ...string) []byte {
++	// each statement answers BindComplete (+ rows) + CommandComplete; then ReadyForQuery
++	var out []byte
++	for _, rows := range perStatement {
++		out = append(out, postgresTestPacket('2', nil)...)
++		for range len(rows) {
++			out = append(out, postgresTestPacket('D', []byte{0, 1, 0, 0, 0, 1, '1'})...)
++		}
++		out = append(out, postgresTestPacket('C', []byte("SELECT 1\x00"))...)
++	}
++	return append(out, postgresTestPacket('Z', []byte{'I'})...)
++}
++
++// pgjdbc names BEGIN like any other statement once it has run a few times and
++// pipelines it with the first statement of the transaction. The write used to
++// end as a `PREPARED STATEMENT` span with no SQL, with the query behind BEGIN
++// lost.
++func TestHandlePostgresPipelinedBeginAndQuery(t *testing.T) {
++	ctx := newPostgresTestContext()
++	event := &TCPRequestInfo{}
++
++	// the Parse messages of both named statements, as pgjdbc sends them on the sixth run
++	for _, prepare := range []struct{ name, sql string }{
++		{"S_2", "BEGIN"},
++		{"S_3", "SELECT * FROM books WHERE id = $1 FOR UPDATE"},
++	} {
++		write := postgresWrite(
++			postgresTestPacket(kPostgresParse, postgresParseTestBody(prepare.name, prepare.sql)),
++			postgresTestPacket(kPostgresBind, postgresBindTestBody("", prepare.name)),
++			postgresTestPacket('E', postgresExecuteTestBody("")),
++			postgresTestPacket('S', nil))
++		_, _ = handlePostgres(ctx, event, largebuf.NewLargeBufferFrom(write), largebuf.NewLargeBufferFrom(postgresExtendedResponse("")))
++	}
++
++	write := postgresWrite(
++		postgresTestPacket(kPostgresBind, postgresBindTestBody("", "S_2")),
++		postgresTestPacket('E', postgresExecuteTestBody("")),
++		postgresTestPacket(kPostgresBind, postgresBindTestBody("", "S_3", "7")),
++		postgresTestPacket('E', postgresExecuteTestBody("")),
++		postgresTestPacket('S', nil))
++	span, err := handlePostgres(ctx, event, largebuf.NewLargeBufferFrom(write), largebuf.NewLargeBufferFrom(postgresExtendedResponse("", "D")))
++	require.NoError(t, err)
++	assert.Equal(t, "SELECT", span.Method)
++	assert.Equal(t, "books", span.Path)
++	assert.Equal(t, "SELECT * FROM books WHERE id = $1 FOR UPDATE", span.Statement)
++}
++
++// A write that executes only BEGIN or COMMIT is not a span.
++func TestHandlePostgresTransactionControlOnly(t *testing.T) {
++	ctx := newPostgresTestContext()
++	event := &TCPRequestInfo{}
++
++	parse := postgresWrite(
++		postgresTestPacket(kPostgresParse, postgresParseTestBody("S_1", "COMMIT")),
++		postgresTestPacket('S', nil))
++	_, err := handlePostgres(ctx, event, largebuf.NewLargeBufferFrom(parse), largebuf.NewLargeBufferFrom(postgresTestPacket('1', nil)))
++	require.ErrorIs(t, err, errIgnore)
++
++	commit := postgresWrite(
++		postgresTestPacket(kPostgresBind, postgresBindTestBody("", "S_1")),
++		postgresTestPacket('E', postgresExecuteTestBody("")),
++		postgresTestPacket('S', nil))
++	_, err = handlePostgres(ctx, event, largebuf.NewLargeBufferFrom(commit), largebuf.NewLargeBufferFrom(postgresExtendedResponse("")))
++	require.ErrorIs(t, err, errIgnore, "no span, and no fallback to the generic naming either")
++
++	for _, simple := range []string{"BEGIN", "COMMIT", "DEALLOCATE pdo_stmt_00000001", "SET search_path TO public"} {
++		query := postgresTestPacket(kPostgresQuery, append([]byte(simple), 0))
++		_, err := handlePostgres(ctx, event, largebuf.NewLargeBufferFrom(query), largebuf.NewLargeBufferFrom(postgresTestPacket('C', []byte("x\x00"))))
++		require.ErrorIs(t, err, errIgnore, simple)
++	}
++
++	// EXECUTE <name> as a simple query keeps its generic naming
++	execute := postgresTestPacket(kPostgresQuery, []byte("EXECUTE fetch_books(1)\x00"))
++	_, err = handlePostgres(ctx, event, largebuf.NewLargeBufferFrom(execute), largebuf.NewLargeBufferFrom(postgresTestPacket('C', []byte("x\x00"))))
++	require.ErrorIs(t, err, errFallback)
++}
++
++// PDO prepares `set names` first on every connection, so it was the
++// `PREPARED STATEMENT .pdo_stmt_00000001` span on every request.
++func TestHandlePostgresPDOSetNames(t *testing.T) {
++	ctx := newPostgresTestContext()
++	event := &TCPRequestInfo{}
++
++	parse := postgresWrite(
++		postgresTestPacket(kPostgresParse, postgresParseTestBody("pdo_stmt_00000001", "set names 'utf8'")),
++		postgresTestPacket('S', nil))
++	_, err := handlePostgres(ctx, event, largebuf.NewLargeBufferFrom(parse), largebuf.NewLargeBufferFrom(postgresTestPacket('1', nil)))
++	require.ErrorIs(t, err, errIgnore)
++
++	execute := postgresWrite(
++		postgresTestPacket(kPostgresBind, postgresBindTestBody("", "pdo_stmt_00000001")),
++		postgresTestPacket('D', []byte{'P', 0}),
++		postgresTestPacket('E', postgresExecuteTestBody("")),
++		postgresTestPacket('S', nil))
++	_, err = handlePostgres(ctx, event, largebuf.NewLargeBufferFrom(execute), largebuf.NewLargeBufferFrom(postgresExtendedResponse("")))
++	require.ErrorIs(t, err, errIgnore)
++
++	// the real query after it is still a span
++	parse = postgresWrite(
++		postgresTestPacket(kPostgresParse, postgresParseTestBody("pdo_stmt_00000002", "SELECT * FROM books WHERE id = $1")),
++		postgresTestPacket('S', nil))
++	_, err = handlePostgres(ctx, event, largebuf.NewLargeBufferFrom(parse), largebuf.NewLargeBufferFrom(postgresTestPacket('1', nil)))
++	require.ErrorIs(t, err, errIgnore)
++	execute = postgresWrite(
++		postgresTestPacket(kPostgresBind, postgresBindTestBody("", "pdo_stmt_00000002", "7")),
++		postgresTestPacket('D', []byte{'P', 0}),
++		postgresTestPacket('E', postgresExecuteTestBody("")),
++		postgresTestPacket('S', nil))
++	span, err := handlePostgres(ctx, event, largebuf.NewLargeBufferFrom(execute), largebuf.NewLargeBufferFrom(postgresExtendedResponse("D")))
++	require.NoError(t, err)
++	assert.Equal(t, "SELECT", span.Method)
++	assert.Equal(t, "books", span.Path)
++}
++
++// A statement prepared before the tracer started is still unknown, and still
++// no span.
++func TestHandlePostgresUnknownStatementIgnored(t *testing.T) {
++	ctx := newPostgresTestContext()
++	write := postgresWrite(
++		postgresTestPacket(kPostgresBind, postgresBindTestBody("", "S_9", "7")),
++		postgresTestPacket('E', postgresExecuteTestBody("")),
++		postgresTestPacket('S', nil))
++	_, err := handlePostgres(ctx, &TCPRequestInfo{}, largebuf.NewLargeBufferFrom(write), largebuf.NewLargeBufferFrom(postgresExtendedResponse("D")))
++	require.ErrorIs(t, err, errIgnore)
++}
++
++// The generic naming reads the Bind message in wire order: portal, then
++// statement. It used to swap them, which printed `.S_1`.
++func TestPostgresPreparedStatementNaming(t *testing.T) {
++	op, table, sql := postgresPreparedStatements(largebuf.NewLargeBufferFrom(postgresTestPacket(kPostgresBind, postgresBindTestBody("", "S_1", "7"))))
++	assert.Equal(t, "PREPARED STATEMENT", op)
++	assert.Equal(t, "S_1", table)
++	assert.Equal(t, "7 ", sql)
++
++	_, table, _ = postgresPreparedStatements(largebuf.NewLargeBufferFrom(postgresTestPacket(kPostgresBind, postgresBindTestBody("p1", "S_1"))))
++	assert.Equal(t, "S_1.p1", table)
++}
++
++func TestPostgresControlStatement(t *testing.T) {
++	for text, want := range map[string]string{
++		"BEGIN":                     "BEGIN",
++		"begin work":                "BEGIN",
++		"  COMMIT":                  "COMMIT",
++		"START TRANSACTION":         "START",
++		"set names 'utf8'":          "SET",
++		"SET search_path TO public": "SET",
++		"RESET ALL":                 "RESET",
++		"DEALLOCATE pdo_stmt_1":     "DEALLOCATE",
++		"DISCARD ALL":               "DISCARD",
++		"ROLLBACK TO SAVEPOINT a":   "ROLLBACK",
++		"SELECT 1":                  "",
++		"CALL refresh_stats($1)":    "",
++		"TRUNCATE orders":           "",
++		"settings":                  "",
++		"":                          "",
++	} {
++		assert.Equal(t, want, postgresControlStatement([]byte(text)), text)
++	}
++}
++
++// A cut Parse with no query in what was captured is not a span, even when
++// the reply shows it ran.
++func TestHandlePostgresTruncatedParseWithoutQuery(t *testing.T) {
++	ctx := newPostgresTestContext()
++	packet := postgresTestPacket(kPostgresParse, postgresParseTestBody("", "/* "+strings.Repeat("x", 400)+" */ SELECT 1"))
++	executed := postgresExtendedResponse("D")
++	_, err := handlePostgres(ctx, &TCPRequestInfo{}, largebuf.NewLargeBufferFrom(packet[:256]), largebuf.NewLargeBufferFrom(executed))
++	require.ErrorIs(t, err, errIgnore)
++}
++
++// Simple queries can be pipelined too: BEGIN and the first query in one
++// write. The query names the span.
++func TestHandlePostgresPipelinedSimpleQueries(t *testing.T) {
++	ctx := newPostgresTestContext()
++	write := postgresWrite(
++		postgresTestPacket(kPostgresQuery, []byte("BEGIN\x00")),
++		postgresTestPacket(kPostgresQuery, []byte("SELECT * FROM books WHERE id = 7\x00")))
++	response := postgresWrite(
++		postgresTestPacket('C', []byte("BEGIN\x00")), postgresTestPacket('Z', []byte{'T'}),
++		postgresTestPacket('T', []byte{0, 0}), postgresTestPacket('D', []byte{0, 1, 0, 0, 0, 1, '1'}),
++		postgresTestPacket('C', []byte("SELECT 1\x00")), postgresTestPacket('Z', []byte{'T'}))
++	span, err := handlePostgres(ctx, &TCPRequestInfo{}, largebuf.NewLargeBufferFrom(write), largebuf.NewLargeBufferFrom(response))
++	require.NoError(t, err)
++	assert.Equal(t, "SELECT", span.Method)
++	assert.Equal(t, "books", span.Path)
++}
++
++// A prepared statement the SQL parser does not know, CALL say, is not a
++// control statement: it keeps the generic naming, which reports it ran.
++func TestHandlePostgresUnknownStatementKindKeepsFallback(t *testing.T) {
++	ctx := newPostgresTestContext()
++	event := &TCPRequestInfo{}
++	parse := postgresWrite(
++		postgresTestPacket(kPostgresParse, postgresParseTestBody("S_7", "CALL refresh_stats($1)")),
++		postgresTestPacket('S', nil))
++	_, err := handlePostgres(ctx, event, largebuf.NewLargeBufferFrom(parse), largebuf.NewLargeBufferFrom(postgresTestPacket('1', nil)))
++	require.ErrorIs(t, err, errIgnore)
++	stmt, found := ctx.postgresPreparedStatements.Get(postgresPreparedStatementsKey{connInfo: event.ConnInfo, stmtName: "S_7"})
++	require.True(t, found)
++	assert.Equal(t, "CALL refresh_stats($1)", stmt, "the text is kept so that an Execute can tell it from BEGIN")
++
++	execute := postgresWrite(
++		postgresTestPacket(kPostgresBind, postgresBindTestBody("", "S_7", "1")),
++		postgresTestPacket('E', postgresExecuteTestBody("")),
++		postgresTestPacket('S', nil))
++	_, err = handlePostgres(ctx, event, largebuf.NewLargeBufferFrom(execute), largebuf.NewLargeBufferFrom(postgresExtendedResponse("")))
++	require.ErrorIs(t, err, errFallback)
++
++	// and as a simple query
++	query := postgresTestPacket(kPostgresQuery, []byte("CALL refresh_stats(1)\x00"))
++	_, err = handlePostgres(ctx, event, largebuf.NewLargeBufferFrom(query), largebuf.NewLargeBufferFrom(postgresTestPacket('C', []byte("CALL\x00"))))
++	require.ErrorIs(t, err, errFallback)
++}
++
++// A COMMIT that fails is the only place a serialization failure shows up.
++func TestHandlePostgresFailedCommitIsASpan(t *testing.T) {
++	ctx := newPostgresTestContext()
++	event := &TCPRequestInfo{}
++	parse := postgresWrite(
++		postgresTestPacket(kPostgresParse, postgresParseTestBody("S_1", "COMMIT")),
++		postgresTestPacket('S', nil))
++	_, err := handlePostgres(ctx, event, largebuf.NewLargeBufferFrom(parse), largebuf.NewLargeBufferFrom(postgresTestPacket('1', nil)))
++	require.ErrorIs(t, err, errIgnore)
++
++	commit := postgresWrite(
++		postgresTestPacket(kPostgresBind, postgresBindTestBody("", "S_1")),
++		postgresTestPacket('E', postgresExecuteTestBody("")),
++		postgresTestPacket('S', nil))
++	failed := postgresWrite(
++		postgresTestPacket('2', nil),
++		postgresErrorResponse("40001", "could not serialize access due to concurrent update"),
++		postgresTestPacket('Z', []byte{'I'}))
++	span, err := handlePostgres(ctx, event, largebuf.NewLargeBufferFrom(commit), largebuf.NewLargeBufferFrom(failed))
++	require.NoError(t, err)
++	assert.Equal(t, "COMMIT", span.Method)
++	assert.Equal(t, 1, span.Status)
++	require.NotNil(t, span.SQLError)
++	assert.Equal(t, "40001", span.SQLError.SQLState)
++
++	// a successful COMMIT stays silent
++	_, err = handlePostgres(ctx, event, largebuf.NewLargeBufferFrom(commit), largebuf.NewLargeBufferFrom(postgresExtendedResponse("")))
++	require.ErrorIs(t, err, errIgnore)
++
++	// so does a simple BEGIN that fails (there is nothing to report but its text)
++	begin := postgresTestPacket(kPostgresQuery, []byte("COMMIT\x00"))
++	span, err = handlePostgres(ctx, event, largebuf.NewLargeBufferFrom(begin), largebuf.NewLargeBufferFrom(postgresWrite(postgresErrorResponse("40001", "serialization"), postgresTestPacket('Z', []byte{'I'}))))
++	require.NoError(t, err)
++	assert.Equal(t, "COMMIT", span.Method)
++	assert.Equal(t, "COMMIT", span.Statement)
++}
+diff --git a/pkg/ebpf/common/sql_detect_transform_test.go b/pkg/ebpf/common/sql_detect_transform_test.go
+index 880150218..6a4f386e5 100644
+--- a/pkg/ebpf/common/sql_detect_transform_test.go
++++ b/pkg/ebpf/common/sql_detect_transform_test.go
+@@ -35,8 +35,8 @@ func TestPostgresBindParsing(t *testing.T) {
+ 			bytes:  []byte{66, 0, 0, 0, 52, 0, 101, 99, 116, 111, 95, 49, 49, 53, 56, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 19, 114, 101, 99, 111, 109, 109, 101, 110, 100, 97, 116, 105, 111, 110, 67, 97, 99, 104, 101, 0, 3, 0, 1, 0, 1, 0, 1, 69, 0, 0, 0, 9, 0, 0, 0, 0, 0, 83, 0, 0, 0, 4, 0, 4, 34, 101, 110, 97, 98, 108, 101, 100, 34, 32, 70, 82, 79, 77, 32, 34, 102, 101, 97, 116, 117, 114, 101, 102, 108, 97, 103, 115, 34, 32, 65, 83, 32, 102, 48, 32, 87, 72, 69, 82, 69, 32, 40, 102, 48, 46, 34, 110, 97, 109, 101, 34, 32, 61, 32, 36, 49, 41, 0, 0, 1, 0, 0, 0, 25, 68, 0, 0, 0, 15, 83, 101, 99, 116, 111, 95, 49, 49, 53, 56, 0, 72, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+ 			isBind: true,
+ 			result: bindParseResult{
+-				statement:    "",
+-				portal:       "ecto_1158",
++				statement:    "ecto_1158",
++				portal:       "",
+ 				args:         []string{"recommendationCache"},
+ 				hasErr:       false,
+ 				hasASCIIArgs: true,
+@@ -95,8 +95,8 @@ func TestPostgresBindParsing(t *testing.T) {
+ 			bytes:  []byte{66, 0, 0, 0, 52, 0, 101, 99, 116, 111, 95, 49, 49, 53, 56, 0, 0, 1, 0, 1, 0, 1, 0, 0, 100, 19, 114, 101, 99, 111, 109, 109, 101, 110, 100, 97, 116, 105, 111, 110, 67, 97, 99, 104, 101, 0, 3, 0, 1, 0, 1, 0, 1, 69, 0, 0, 0, 9, 0, 0, 0, 0, 0, 83, 0, 0, 0, 4, 0, 4, 34, 101, 110, 97, 98, 108, 101, 100, 34, 32, 70, 82, 79, 77, 32, 34, 102, 101, 97, 116, 117, 114, 101, 102, 108, 97, 103, 115, 34, 32, 65, 83, 32, 102, 48, 32, 87, 72, 69, 82, 69, 32, 40, 102, 48, 46, 34, 110, 97, 109, 101, 34, 32, 61, 32, 36, 49, 41, 0, 0, 1, 0, 0, 0, 25, 68, 0, 0, 0, 15, 83, 101, 99, 116, 111, 95, 49, 49, 53, 56, 0, 72, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+ 			isBind: true,
+ 			result: bindParseResult{
+-				statement:    "",
+-				portal:       "ecto_1158",
++				statement:    "ecto_1158",
++				portal:       "",
+ 				args:         []string{"recommendationCache"},
+ 				hasErr:       false,
+ 				hasASCIIArgs: false,
+@@ -108,7 +108,7 @@ func TestPostgresBindParsing(t *testing.T) {
+ 			ok := isPostgresBindCommand(lb)
+ 			assert.Equal(t, ts.isBind, ok)
+ 			if ok {
+-				statement, portal, args, err := parsePostgresBindCommand(lb)
++				portal, statement, args, err := parsePostgresBindCommand(lb)
+ 				if ts.result.hasErr {
+ 					require.Error(t, err)
+ 				} else {
