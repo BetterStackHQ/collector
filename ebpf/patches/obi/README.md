@@ -29,6 +29,7 @@ digest is pinned in `ebpf/Dockerfile`.
 | 022 | New | Java: a thread hand-off reported by the Java agent links the worker to the thread holding the request's server span, not only to the submitter, so actor-style dispatchers (Pekko, Akka) keep their traces stitched. Upstream candidate; no upstream equivalent yet. |
 | 023 | New | FastCGI: a server that reads a request header first and the rest after (PHP-FPM) keeps up to 248 of the 256 captured bytes instead of 152, and the params parser honours four-byte lengths and stops at a cut value, so PHP-FPM spans are named `POST /orders` rather than `POST` or `GET /*`. Upstream candidate; no upstream equivalent yet. |
 | 024 | New | Memcached binary protocol (dalli 3, pylibmc, spymemcached) is reported as memcached with server and client spans, and a miss, an existing key or a failed conditional store is not an error; a connection is Couchbase only when it negotiated like one or uses Couchbase's KV ports. Upstream candidate; no upstream equivalent yet. |
+| 025 | New | DNS: an NXDOMAIN for one candidate of a resolver's search-list walk is not an error when another candidate of the same lookup resolves within two seconds; a lookup that fails on every candidate keeps its errors. Adds `dns.response.rcode`. Upstream candidate; no upstream equivalent yet. |
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
 bounds are part of the base now. A successful fill can copy less than `msg->size`
@@ -755,3 +756,44 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   as `client` and the memcached process's as `server`, 294 `GET`s and not one
   error, where the stock build had 36 of 86 `GET`s red and both sides as
   Couchbase clients.
+* 025-dns-search-list-probes.patch
+  Stop marking a resolver's search-list walk as errors. A resolver with a
+  search list asks for several candidates of one name: in Kubernetes
+  `inventory` becomes `inventory.<ns>.svc.cluster.local.`,
+  `inventory.svc.cluster.local.`, `inventory.cluster.local.` and
+  `inventory.`, and every candidate but one answers NXDOMAIN although the
+  lookup succeeds. glibc walks the whole list for an address family that has
+  no record, so a client resolving IPv6 and IPv4 separately (Ruby 3.4's
+  Net::HTTP, among others) sends the AAAA walk through all candidates while
+  the A of the right one succeeds at once: three red `AAAA inventory...`
+  spans before every healthy call, 900 of them per five minutes in the
+  ticket's service, while Python and Node, which resolve both families per
+  candidate and stop at the first, showed none. OBI set the span status from
+  the DNS rcode, so NXDOMAIN was always an error.
+
+  An NXDOMAIN answer is now parked, per process and first label of the
+  question (the name the program asked for, which every candidate starts
+  with), for a window of two seconds: a resolver's walk takes milliseconds,
+  and the window only has to cover a slow nameserver. When an answer with
+  addresses arrives for the same process and label, the parked spans are
+  emitted as probes: status unset, the rcode kept in `Status` and in a new
+  `dns.response.rcode` attribute (`NXDomain`); later NXDOMAINs for that
+  label inside the window go out as probes at once. When nothing resolves
+  before the window closes, the parked spans are emitted exactly as before,
+  as errors, and an entry the cache has not swept yet is flushed rather than
+  overwritten, so no error is ever lost. A group holds at most 64 parked
+  answers; a process retrying a failing name in a loop gets its errors at
+  once past that. A/AAAA are correlated together, a NODATA answer (NOERROR
+  without addresses, what a service without IPv6 returns for AAAA) resolves
+  nothing, and other rcodes (SERVFAIL, REFUSED, timeouts) are untouched. The
+  one cost is that a genuine NXDOMAIN error is reported up to two seconds
+  late; the one imprecision is two unrelated lookups sharing a first label
+  in one process within two seconds, where a real failure would be shown as
+  a probe (it still carries the rcode, and the application's own failure to
+  reach the name is still visible).
+
+  Verified on the box with Ruby 3.4 Net::HTTP behind a Kubernetes-style
+  search list and a CoreDNS that answers only the right candidate: over 180
+  calls, the two NXDOMAIN candidates per call went from error spans to
+  status-unset spans carrying `dns.response.rcode: NXDomain`, with every
+  other span, and the count of each, unchanged.
