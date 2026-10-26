@@ -1,0 +1,331 @@
+diff --git a/pkg/ebpf/common/common.go b/pkg/ebpf/common/common.go
+index aad836b90..4ddde3dd4 100644
+--- a/pkg/ebpf/common/common.go
++++ b/pkg/ebpf/common/common.go
+@@ -290,10 +290,14 @@ type MisclassifiedEvent struct {
+ }
+ 
+ // CouchbaseBucketInfo holds the bucket, scope, and collection for a Couchbase connection.
++// Couchbase records that the connection spoke a Couchbase-only operation (HELLO,
++// SASL, SELECT_BUCKET, GET_CLUSTER_CONFIG, ...), which tells it from memcached:
++// both speak the same binary protocol.
+ type CouchbaseBucketInfo struct {
+ 	Bucket     string
+ 	Scope      string
+ 	Collection string
++	Couchbase  bool
+ }
+ 
+ const maxPendingGoHTTPClientRequests = 1024
+diff --git a/pkg/ebpf/common/couchbase_detect_transform.go b/pkg/ebpf/common/couchbase_detect_transform.go
+index 40e4f9221..2aff31910 100644
+--- a/pkg/ebpf/common/couchbase_detect_transform.go
++++ b/pkg/ebpf/common/couchbase_detect_transform.go
+@@ -30,6 +30,80 @@ type CouchbaseInfo struct {
+ 	Statement  string
+ 	Status     couchbasekv.Status
+ 	IsError    bool
++	// Memcached is set when the connection is a plain memcached one rather than
++	// Couchbase; the two share the binary protocol.
++	Memcached bool
++}
++
++// Couchbase's KV service listens on these ports (plain, TLS, and the node-local
++// one its own services use); memcached's own is 11211.
++const (
++	couchbaseKVPort      = 11210
++	couchbaseKVTLSPort   = 11207
++	couchbaseKVLocalPort = 11209
++)
++
++// isCouchbaseOnlyOpcode reports an operation memcached does not have: a client
++// negotiating features or a bucket, or using Couchbase's metadata, replica,
++// observe, lock, sub-document or DCP commands. Seeing one marks the connection
++// as Couchbase for every later packet. SASL is not among them: memcached speaks
++// it too (`memcached -S`, used by dalli and spymemcached with credentials), and
++// a Couchbase SDK sends HELLO before it authenticates anyway.
++func isCouchbaseOnlyOpcode(op couchbasekv.Opcode) bool {
++	switch op {
++	case couchbasekv.OpcodeHello, couchbasekv.OpcodeSelectBucket, couchbasekv.OpcodeGetClusterConfig,
++		couchbasekv.OpcodeGetErrorMap, couchbasekv.OpcodeCollectionsGetID,
++		couchbasekv.OpcodeCollectionsGetManifest, couchbasekv.OpcodeCollectionsSetManifest,
++		couchbasekv.OpcodeGetReplica, couchbasekv.OpcodeObserve, couchbasekv.OpcodeObserveSeqno,
++		couchbasekv.OpcodeGetLocked, couchbasekv.OpcodeUnlockKey, couchbasekv.OpcodeGetMeta,
++		couchbasekv.OpcodeGetQMeta, couchbasekv.OpcodeSetWithMeta, couchbasekv.OpcodeSetQWithMeta,
++		couchbasekv.OpcodeAddWithMeta, couchbasekv.OpcodeAddQWithMeta, couchbasekv.OpcodeDelWithMeta,
++		couchbasekv.OpcodeDelQWithMeta:
++		return true
++	}
++	return (op >= couchbasekv.OpcodeDcpOpen && op <= couchbasekv.OpcodeDcpCacheTransferEnd) ||
++		(op >= couchbasekv.OpcodeSubdocGet && op <= couchbasekv.OpcodeSubdocReplaceBodyWithXattr)
++}
++
++// memcachedOutcomeIsNormal reports the binary-protocol statuses that memcached's
++// text protocol reports as NOT_FOUND, EXISTS and NOT_STORED, which the text
++// parser does not treat as errors either.
++func memcachedOutcomeIsNormal(status couchbasekv.Status) bool {
++	switch status {
++	case couchbasekv.StatusKeyNotFound, couchbasekv.StatusKeyExists, couchbasekv.StatusItemNotStored:
++		return true
++	}
++	return false
++}
++
++// markCouchbaseConnection remembers that connInfo spoke a Couchbase-only operation.
++func markCouchbaseConnection(connInfo BpfConnectionInfoT, bucketCache *simplelru.LRU[BpfConnectionInfoT, CouchbaseBucketInfo]) {
++	if bucketCache == nil {
++		return
++	}
++	bucketInfo, _ := bucketCache.Get(connInfo)
++	if bucketInfo.Couchbase {
++		return
++	}
++	bucketInfo.Couchbase = true
++	bucketCache.Add(connInfo, bucketInfo)
++}
++
++// binaryProtocolIsCouchbase tells Couchbase from memcached on the binary protocol
++// they share. A Couchbase client negotiates (HELLO, SASL, SELECT_BUCKET,
++// GET_CLUSTER_CONFIG) before its first KV operation and the KV service listens on
++// 11210 or 11207; a connection with none of that is memcached, whose clients
++// (dalli, pymemcache, spymemcached) send plain GET/SET from the first byte.
++func binaryProtocolIsCouchbase(connInfo BpfConnectionInfoT, bucketInfo CouchbaseBucketInfo) bool {
++	if bucketInfo.Couchbase || bucketInfo.Bucket != "" {
++		return true
++	}
++	for _, port := range []uint16{connInfo.S_port, connInfo.D_port} {
++		if port == couchbaseKVPort || port == couchbaseKVTLSPort || port == couchbaseKVLocalPort {
++			return true
++		}
++	}
++	return false
+ }
+ 
+ var errInvalidCouchbase = errors.New("no valid Couchbase request packets found")
+@@ -187,6 +261,7 @@ func handleSelectBucketWithResponse(connInfo BpfConnectionInfoT, reqPacket couch
+ 		bucketInfo = CouchbaseBucketInfo{}
+ 	}
+ 	bucketInfo.Bucket = bucketName
++	bucketInfo.Couchbase = true
+ 	slog.Debug("Adding Couchbase bucket to cache", "bucket", bucketName, "conn", connInfo)
+ 	bucketCache.Add(connInfo, bucketInfo)
+ }
+@@ -252,6 +327,10 @@ func processCouchbaseEvent(connInfo BpfConnectionInfoT, requestBuf []byte, respo
+ 
+ 		respPacket, hasResp := respByOpaque[reqPacket.Header().Opaque()]
+ 
++		if isCouchbaseOnlyOpcode(reqPacket.Header().Opcode()) {
++			markCouchbaseConnection(connInfo, bucketCache)
++		}
++
+ 		if reqPacket.Header().Opcode() == couchbasekv.OpcodeSelectBucket {
+ 			handleSelectBucketWithResponse(connInfo, reqPacket, respPacket, bucketCache)
+ 			// Don't create a span for SELECT_BUCKET
+@@ -281,20 +360,29 @@ func processCouchbaseEvent(connInfo BpfConnectionInfoT, requestBuf []byte, respo
+ 
+ 		// Get bucket info from cache
+ 		collectionsEnabled := false
++		var bucketInfo CouchbaseBucketInfo
+ 		if bucketCache != nil {
+-			if bucketInfo, found := bucketCache.Get(connInfo); found {
++			var found bool
++			if bucketInfo, found = bucketCache.Get(connInfo); found {
+ 				info.Bucket = bucketInfo.Bucket
+ 				info.Scope = bucketInfo.Scope
+ 				info.Collection = bucketInfo.Collection
+ 				collectionsEnabled = bucketInfo.Scope != "" || bucketInfo.Collection != ""
+ 			}
+ 		}
++		info.Memcached = !binaryProtocolIsCouchbase(connInfo, bucketInfo)
+ 
+ 		info.Statement = buildCouchbaseStatement(reqPacket, collectionsEnabled)
+ 
+ 		if hasResp && respPacket.IsResponse() {
+ 			info.Status = respPacket.Header().Status()
+ 			info.IsError = respPacket.Header().Status().IsError()
++			// On memcached a miss, an existing key on ADD or a failed
++			// conditional store is how the cache says no, not an error: the
++			// same three outcomes the text protocol parser lets through.
++			if info.Memcached && memcachedOutcomeIsNormal(info.Status) {
++				info.IsError = false
++			}
+ 		}
+ 
+ 		return info, false, nil
+@@ -338,6 +426,19 @@ func TCPToCouchbaseToSpan(trace *TCPRequestInfo, data *CouchbaseInfo) request.Sp
+ 		collection += "." + data.Collection
+ 	}
+ 
++	// Plain memcached over the binary protocol: the same span the text protocol
++	// produces, a memcached client or server span (by direction) with the key
++	// as its path and no namespace.
++	if data.Memcached {
++		reqType = request.EventTypeMemcachedClient
++		if trace.Direction == 0 {
++			reqType = request.EventTypeMemcachedServer
++		}
++		// A key with raw bytes would make the span invalid and drop it.
++		collection = strings.ToValidUTF8(data.Key, "")
++		dbNamespace = ""
++	}
++
+ 	return request.Span{
+ 		Type:          reqType,
+ 		Method:        data.Operation,
+diff --git a/pkg/ebpf/common/couchbase_detect_transform_test.go b/pkg/ebpf/common/couchbase_detect_transform_test.go
+index fed9ff237..2918d5371 100644
+--- a/pkg/ebpf/common/couchbase_detect_transform_test.go
++++ b/pkg/ebpf/common/couchbase_detect_transform_test.go
+@@ -1112,3 +1112,152 @@ func TestProcessCouchbaseEvent_StatementPopulated(t *testing.T) {
+ 	require.NotNil(t, info)
+ 	assert.Equal(t, "GET user::42", info.Statement)
+ }
++
++// dalli, pymemcache and spymemcached speak memcached's binary protocol, which
++// Couchbase inherited. A connection with none of Couchbase's negotiation, on a
++// port other than Couchbase's KV ports, is memcached: the spans say so, take the
++// server or client kind from the direction like the text protocol does, and a
++// miss is a normal result rather than an error.
++func TestBinaryProtocolMemcachedWithoutCouchbaseTraits(t *testing.T) {
++	cache, err := simplelru.NewLRU[BpfConnectionInfoT, CouchbaseBucketInfo](16, nil)
++	require.NoError(t, err)
++	conn := newTestConnInfo()
++	conn.D_port = 11211
++
++	req := makeCouchbaseRequestPacket(couchbasekv.OpcodeGet, "views/books/7", "", nil)
++	miss := makeCouchbaseResponsePacket(couchbasekv.OpcodeGet, couchbasekv.StatusKeyNotFound, "")
++	info, ignore, err := processCouchbaseEvent(conn, req, miss, cache)
++	require.NoError(t, err)
++	require.False(t, ignore)
++	require.NotNil(t, info)
++	assert.True(t, info.Memcached)
++	assert.Equal(t, couchbasekv.StatusKeyNotFound, info.Status)
++	assert.False(t, info.IsError, "a miss is how a cache says no")
++
++	event := &TCPRequestInfo{ConnInfo: conn, Direction: directionSend}
++	span := TCPToCouchbaseToSpan(event, info)
++	assert.Equal(t, request.EventTypeMemcachedClient, span.Type)
++	assert.Equal(t, "GET", span.Method)
++	assert.Equal(t, "views/books/7", span.Path, "the key is the path, as for the text protocol")
++	assert.Equal(t, 0, span.Status)
++	assert.Empty(t, span.DBNamespace)
++
++	event.Direction = directionRecv
++	assert.Equal(t, request.EventTypeMemcachedServer, TCPToCouchbaseToSpan(event, info).Type, "the memcached process itself is the server")
++
++	// a real failure still is one
++	tooLarge := makeCouchbaseResponsePacket(couchbasekv.OpcodeSet, couchbasekv.StatusValueTooLarge, "")
++	set := makeCouchbaseRequestPacket(couchbasekv.OpcodeSet, "views/books/7", "<li>", []byte{0, 0, 0, 0, 0, 0, 1, 44})
++	info, _, err = processCouchbaseEvent(conn, set, tooLarge, cache)
++	require.NoError(t, err)
++	assert.True(t, info.Memcached)
++	assert.True(t, info.IsError)
++	assert.Equal(t, int(couchbasekv.StatusValueTooLarge), TCPToCouchbaseToSpan(event, info).Status)
++}
++
++// A Couchbase SDK negotiates before its first KV operation; once a connection has
++// shown that, it stays Couchbase, with Couchbase's error semantics, whatever port.
++func TestBinaryProtocolCouchbaseAfterNegotiation(t *testing.T) {
++	cache, err := simplelru.NewLRU[BpfConnectionInfoT, CouchbaseBucketInfo](16, nil)
++	require.NoError(t, err)
++	conn := newTestConnInfo()
++	conn.D_port = 12000
++
++	hello := makeCouchbaseRequestPacket(couchbasekv.OpcodeHello, "{\"a\":\"sdk\"}", "", nil)
++	_, ignore, err := processCouchbaseEvent(conn, hello, nil, cache)
++	require.NoError(t, err)
++	assert.True(t, ignore, "HELLO is not a span")
++
++	req := makeCouchbaseRequestPacket(couchbasekv.OpcodeGet, "doc::1", "", nil)
++	miss := makeCouchbaseResponsePacket(couchbasekv.OpcodeGet, couchbasekv.StatusKeyNotFound, "")
++	info, ignore, err := processCouchbaseEvent(conn, req, miss, cache)
++	require.NoError(t, err)
++	require.False(t, ignore)
++	assert.False(t, info.Memcached)
++	assert.True(t, info.IsError, "Couchbase semantics are unchanged")
++	assert.Equal(t, request.EventTypeCouchbaseClient, TCPToCouchbaseToSpan(&TCPRequestInfo{ConnInfo: conn, Direction: directionSend}, info).Type)
++
++	// another connection to the same port has not negotiated and is memcached
++	other := conn
++	other.S_port = 54399
++	info, _, err = processCouchbaseEvent(other, req, miss, cache)
++	require.NoError(t, err)
++	assert.True(t, info.Memcached)
++}
++
++// Couchbase's KV ports settle it even when the negotiation happened before the
++// connection was watched.
++func TestBinaryProtocolCouchbaseByPort(t *testing.T) {
++	for _, port := range []uint16{11210, 11207} {
++		conn := newTestConnInfo()
++		conn.D_port = port
++		req := makeCouchbaseRequestPacket(couchbasekv.OpcodeGet, "doc::1", "", nil)
++		info, _, err := processCouchbaseEvent(conn, req, nil, nil)
++		require.NoError(t, err)
++		assert.False(t, info.Memcached, "port %d", port)
++	}
++}
++
++// SELECT_BUCKET marks the connection as Couchbase as well as recording the bucket.
++func TestBinaryProtocolSelectBucketMarksCouchbase(t *testing.T) {
++	cache, err := simplelru.NewLRU[BpfConnectionInfoT, CouchbaseBucketInfo](16, nil)
++	require.NoError(t, err)
++	conn := newTestConnInfo()
++	conn.D_port = 12000
++	sel := makeCouchbaseRequestPacket(couchbasekv.OpcodeSelectBucket, "travel-sample", "", nil)
++	ok := makeCouchbaseResponsePacket(couchbasekv.OpcodeSelectBucket, couchbasekv.StatusSuccess, "")
++	_, _, err = processCouchbaseEvent(conn, sel, ok, cache)
++	require.NoError(t, err)
++	bucket, found := cache.Get(conn)
++	require.True(t, found)
++	assert.True(t, bucket.Couchbase)
++	assert.Equal(t, "travel-sample", bucket.Bucket)
++}
++
++// memcached speaks SASL too (`memcached -S`; dalli and spymemcached with
++// credentials), so authenticating does not make a connection Couchbase.
++func TestBinaryProtocolSASLIsNotCouchbase(t *testing.T) {
++	cache, err := simplelru.NewLRU[BpfConnectionInfoT, CouchbaseBucketInfo](16, nil)
++	require.NoError(t, err)
++	conn := newTestConnInfo()
++	conn.D_port = 11211
++	mechs := makeCouchbaseRequestPacket(couchbasekv.OpcodeSASLListMechs, "", "", nil)
++	_, _, err = processCouchbaseEvent(conn, mechs, nil, cache)
++	require.NoError(t, err)
++	auth := makeCouchbaseRequestPacket(couchbasekv.OpcodeSASLAuth, "PLAIN", "\x00user\x00secret", nil)
++	_, _, err = processCouchbaseEvent(conn, auth, nil, cache)
++	require.NoError(t, err)
++
++	req := makeCouchbaseRequestPacket(couchbasekv.OpcodeGet, "k", "", nil)
++	info, _, err := processCouchbaseEvent(conn, req, nil, cache)
++	require.NoError(t, err)
++	assert.True(t, info.Memcached)
++}
++
++// ADD on an existing key and a failed conditional store are normal answers on a
++// cache, as the text protocol's EXISTS and NOT_STORED are; raw bytes in a key
++// do not make the span invalid.
++func TestBinaryProtocolMemcachedConditionalOutcomes(t *testing.T) {
++	conn := newTestConnInfo()
++	conn.D_port = 11211
++	for _, tc := range []struct {
++		op     couchbasekv.Opcode
++		status couchbasekv.Status
++	}{
++		{couchbasekv.OpcodeAdd, couchbasekv.StatusKeyExists},
++		{couchbasekv.OpcodeReplace, couchbasekv.StatusItemNotStored},
++	} {
++		req := makeCouchbaseRequestPacket(tc.op, "lock:1", "1", []byte{0, 0, 0, 0, 0, 0, 0, 60})
++		resp := makeCouchbaseResponsePacket(tc.op, tc.status, "")
++		info, _, err := processCouchbaseEvent(conn, req, resp, nil)
++		require.NoError(t, err)
++		assert.False(t, info.IsError, "%s with %s", tc.op, tc.status)
++	}
++
++	req := makeCouchbaseRequestPacket(couchbasekv.OpcodeGet, "digest:\xff\xfe", "", nil)
++	info, _, err := processCouchbaseEvent(conn, req, nil, nil)
++	require.NoError(t, err)
++	span := TCPToCouchbaseToSpan(&TCPRequestInfo{ConnInfo: conn, Direction: directionSend}, info)
++	assert.Equal(t, "digest:", span.Path)
++	assert.True(t, span.IsValid())
++}

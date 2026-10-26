@@ -1,0 +1,65 @@
+diff --git a/bpf/common/python_task.h b/bpf/common/python_task.h
+index 1f093766c..afb9b8b54 100644
+--- a/bpf/common/python_task.h
++++ b/bpf/common/python_task.h
+@@ -120,6 +120,38 @@ static __always_inline u8 resolve_python_context_task(u64 pid_tgid,
+     return 1;
+ }
+ 
++// A context's variables change when a ContextVar is set while it runs, and
++// the binding records them as they were at copy time to tell a live context
++// from a recycled address. The owner of a context may well set a variable in
++// it before handing it to another thread: anyio's to_thread does, for
++// sniffio, in the event-loop task that is about to wait for the worker. Called
++// when such a run returns, so the binding follows the legitimate change and
++// the worker's run still resolves to the owner. Only the task the context is
++// bound to may move the binding: a run by any other task is either a context
++// kept across requests or a recycled address whose dealloc hook was not
++// attached, and both must keep failing the guard.
++static __always_inline void refresh_python_context_vars(
++    u64 pid_tgid, u64 context, u64 current_task, u64 inflight_task) {
++    if (!context) {
++        return;
++    }
++    const python_addr_key_t context_key = python_addr_key(pid_tgid, context);
++    python_context_task_t *context_task =
++        (python_context_task_t *)bpf_map_lookup_elem(&python_context_task, &context_key);
++    if (!context_task) {
++        return;
++    }
++    const u64 owner = context_task->task.addr;
++    if (!owner || (owner != current_task && owner != inflight_task)) {
++        return;
++    }
++    const u64 vars = read_python_context_vars(context);
++    if (vars && vars != context_task->vars) {
++        bpf_dbg_printk("python context vars refreshed ctx=%llx", context);
++        context_task->vars = vars;
++    }
++}
++
+ // Resolve a context owner and tell callers whether another parent lookup is safe.
+ // Fallback is allowed with no active context or an explicitly ownerless context.
+ static __always_inline python_task_resolution_t
+diff --git a/bpf/generictracer/python.c b/bpf/generictracer/python.c
+index b3b8da908..5eb8873a1 100644
+--- a/bpf/generictracer/python.c
++++ b/bpf/generictracer/python.c
+@@ -198,6 +198,17 @@ int GUARDED_PROG(obi_uretprobe_context_run, struct pt_regs *, ctx) {
+         return 0;
+     }
+ 
++    // A run by the task that owns the context may have set a variable in it
++    // (anyio's to_thread does, right before handing the copied context to a
++    // worker); let the binding follow, or the worker's run would be taken for
++    // a recycled address and the request's trace would not reach it.
++    if (thread_state->current_task != k_python_state_none) {
++        refresh_python_context_vars(id,
++                                    thread_state->current_context,
++                                    thread_state->current_task,
++                                    thread_state->inflight_task);
++    }
++
+     thread_state->current_context = k_python_state_none;
+     thread_state->start_monotime_ns = bpf_ktime_get_ns();
+     // Only worker threads have no current_task here; on the event-loop thread
