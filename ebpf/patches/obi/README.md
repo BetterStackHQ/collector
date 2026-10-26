@@ -20,6 +20,7 @@ digest is pinned in `ebpf/Dockerfile`.
 | 013 | Restack | Adapt to the `DynamicSelector` rename and new matcher test callers. Explicit exclusions still take precedence over admitted parents. |
 | 014 | Remove | [#3514](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3514) sizes the environment map with `validEnvCount()`, ignoring empty entries left by `setproctitle`. |
 | 015 | Restack | Preserve upstream socket-cookie includes and tracer detach lifecycle state while retaining injector-owned Go PID admission and connect tracking. |
+| 025 | New | DNS: an NXDOMAIN for one candidate of a resolver's search-list walk is not an error when another candidate of the same lookup resolves within two seconds; a lookup that fails on every candidate keeps its errors. Adds `dns.response.rcode`. Upstream candidate; no upstream equivalent yet. |
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
 bounds are part of the base now. A successful fill can copy less than `msg->size`
@@ -336,3 +337,45 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   discovery exclusions. Adds injector-owned PID admission and connect tracking;
   see the correction above. Also fixes sorted-key cleanup in the Go HTTP/1 probes. The generic PID filter
   remains unchanged.
+
+* 025-dns-search-list-probes.patch
+  Stop marking a resolver's search-list walk as errors. A resolver with a
+  search list asks for several candidates of one name: in Kubernetes
+  `inventory` becomes `inventory.<ns>.svc.cluster.local.`,
+  `inventory.svc.cluster.local.`, `inventory.cluster.local.` and
+  `inventory.`, and every candidate but one answers NXDOMAIN although the
+  lookup succeeds. glibc walks the whole list for an address family that has
+  no record, so a client resolving IPv6 and IPv4 separately (Ruby 3.4's
+  Net::HTTP, among others) sends the AAAA walk through all candidates while
+  the A of the right one succeeds at once: three red `AAAA inventory...`
+  spans before every healthy call, 900 of them per five minutes in the
+  ticket's service, while Python and Node, which resolve both families per
+  candidate and stop at the first, showed none. OBI set the span status from
+  the DNS rcode, so NXDOMAIN was always an error.
+
+  An NXDOMAIN answer is now parked, per process and first label of the
+  question (the name the program asked for, which every candidate starts
+  with), for a window of two seconds: a resolver's walk takes milliseconds,
+  and the window only has to cover a slow nameserver. When an answer with
+  addresses arrives for the same process and label, the parked spans are
+  emitted as probes: status unset, the rcode kept in `Status` and in a new
+  `dns.response.rcode` attribute (`NXDomain`); later NXDOMAINs for that
+  label inside the window go out as probes at once. When nothing resolves
+  before the window closes, the parked spans are emitted exactly as before,
+  as errors, and an entry the cache has not swept yet is flushed rather than
+  overwritten, so no error is ever lost. A group holds at most 64 parked
+  answers; a process retrying a failing name in a loop gets its errors at
+  once past that. A/AAAA are correlated together, a NODATA answer (NOERROR
+  without addresses, what a service without IPv6 returns for AAAA) resolves
+  nothing, and other rcodes (SERVFAIL, REFUSED, timeouts) are untouched. The
+  one cost is that a genuine NXDOMAIN error is reported up to two seconds
+  late; the one imprecision is two unrelated lookups sharing a first label
+  in one process within two seconds, where a real failure would be shown as
+  a probe (it still carries the rcode, and the application's own failure to
+  reach the name is still visible).
+
+  Verified on the box with Ruby 3.4 Net::HTTP behind a Kubernetes-style
+  search list and a CoreDNS that answers only the right candidate: over 180
+  calls, the two NXDOMAIN candidates per call went from error spans to
+  status-unset spans carrying `dns.response.rcode: NXDomain`, with every
+  other span, and the count of each, unchanged.
