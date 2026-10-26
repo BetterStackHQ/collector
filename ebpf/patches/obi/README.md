@@ -21,6 +21,7 @@ digest is pinned in `ebpf/Dockerfile`.
 | 014 | Remove | [#3514](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3514) sizes the environment map with `validEnvCount()`, ignoring empty entries left by `setproctitle`. |
 | 015 | Restack | Preserve upstream socket-cookie includes and tracer detach lifecycle state while retaining injector-owned Go PID admission and connect tracking. |
 | 020 | New | Names HTTP client spans from their own path when the only harvested route they match is a catch-all, and keeps the Host header's port in `url.full`. Upstream candidate; no upstream equivalent yet. |
+| 016 | New | Keeps OBI's own cgroup out of the traces. Upstream candidate; no upstream equivalent yet. |
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
 bounds are part of the base now. A successful fill can copy less than `msg->size`
@@ -378,3 +379,110 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   collection to name; the same query shows up as plain `SELECT` only on
   connections whose startup message the tracer never saw, so the namespace
   is unknown.
+* 016-exclude-own-cgroup.patch
+  Keep the instrumentation's own container out of the traces. OBI runs in a
+  container next to the collector's probes: the cluster agent scraping Redis
+  (`INFO`, `SLOWLOG`, `CONFIG`) and Memcached (`STATS`), the metric exporters,
+  the Node inspector session OBI itself opens on port 9229. None of that is the
+  application's traffic, yet it was reported twice over: as client spans of
+  whichever probe matched `open_ports` discovery (`mysqld_exporter` listens, so
+  it became a service), and as root server spans of every instrumented Redis,
+  Memcached or Node process the probes talked to. Path-based
+  `exclude_instrument` entries only ever addressed the first half, one binary
+  at a time, and can do nothing about the second: the server is legitimately
+  instrumented, and nothing in its span says who the client was.
+
+  A new `discovery.exclude_own_cgroup` option (`OTEL_EBPF_EXCLUDE_OWN_CGROUP`,
+  default on) resolves the cgroup v2 node OBI runs in, which is its container
+  when it has one, and uses it on both sides:
+
+  - Discovery excludes every process in that cgroup ahead of any criteria, and
+    publishes the exclusion to `denied_pids` like any other, so neither the
+    Go uprobes nor the kernel's parent fallback instrument them.
+  - `obi_kprobe_tcp_connect` runs in the dialling task, so it can ask
+    `bpf_get_current_cgroup_id()`; a connect from OBI's cgroup is recorded in
+    a new `own_cgroup_conns` LRU and the kprobe returns before the pid filter.
+    `obi_handle_buf_with_args`, which every protocol parser is reached
+    through, drops any buffer on a recorded connection, so no request is ever
+    started on it and nothing later can finish one. Both ends' `tcp_close`
+    retract the entry.
+  - The generic tracer's existing `iter/tcp` iterator, which already walks
+    each discovered network namespace once for listening ports, also records
+    the established sockets whose `sk_cgrp_data` names OBI's cgroup: the
+    connections the cluster agent's pool already held when OBI loaded, which
+    the connect kprobe never saw. An accepted socket inherits its listener's
+    cgroup rather than its peer's, so sockets whose local port is one of the
+    namespace's listening ports (visited earlier in the same walk) are left
+    alone: a server inside OBI's container does not claim the application
+    clients that talk to it. The tracer also runs the iterator in OBI's own
+    network namespace at start, since discovery may select nothing there.
+
+  The key is the sorted tuple with the server address blanked. Destination
+  NAT on a published container port or a Kubernetes service IP rewrites that
+  address between the client's connect and the server's accept, while the
+  client's address and port and the server port survive, and the sort looks at
+  ports only, so both ends spell the key the same way. What still defeats it
+  fails open, i.e. the span is kept: a port-remapping NAT, source NAT, a
+  userland proxy terminating the connection (Docker's `docker-proxy` serving
+  a port published on 127.0.0.1), and a server on another host, whose kernel
+  never saw the client. A collision with an unrelated connection needs the
+  same client address and port towards the same server port on a different
+  server at the same time; its cost is one connection's server spans until
+  either end closes. The key carries no network namespace, so the same
+  collision can also come from another container reusing the same loopback
+  or private address and ephemeral port at the same moment.
+
+  Resolving the cgroup is the subtle part. `/proc/self/cgroup` renders the
+  path relative to the reader's cgroup namespace, and the collector-host
+  container runs in a private one with the host's `/sys/fs/cgroup`
+  bind-mounted, so it reads `0::/` for a cgroup two levels down the mount.
+  `procs.OwnCgroup` therefore treats the path as a first guess and otherwise
+  walks the hierarchy for the directory whose `cgroup.procs` lists its pid;
+  the directory's inode is the id BPF compares against. Membership of other
+  processes is a string comparison of their `0::` line against OBI's, read by
+  the same reader, which is exact in both the private-namespace and the
+  host-namespace case.
+
+  The feature turns itself off, with an info log, wherever that cgroup would
+  not be the container. The root of the hierarchy (inode 1) is shared by every
+  process on a host without cgroup v2 containers. A hybrid host, which mounts
+  the v1 controllers next to the unified hierarchy, is only trusted when
+  OBI's v1 paths equal its unified path, which is what a systemd-driven
+  runtime produces by creating its scope in every hierarchy. Docker's
+  cgroupfs driver, its default on such hosts, populates only the v1
+  controllers and leaves every container's processes in the unified cgroup
+  inherited from the runtime's service, where "own cgroup" would mean every
+  container on the host; and behind a private cgroup namespace on a hybrid
+  host every path reads `/`, so nothing can be compared. Both stay off. A
+  process that the criteria select but the cgroup excludes is reported once at
+  info level, so an agent that shares its cgroup with the application it was
+  meant to instrument does not go quiet without a word. The dynamic (API)
+  selector does not apply the exclusion in userspace, while the BPF constant
+  still does; a process in OBI's own cgroup selected that way is not a
+  supported case.
+
+  Kernel floor: `bpf_get_current_cgroup_id()` has been available to kprobes
+  since 4.18 and has equalled the cgroup directory's inode since 5.5, well
+  below the 5.15 support floor. The iterator reads `sock_cgroup_data.cgroup`
+  behind `bpf_core_field_exists`, so a kernel whose `struct sock_cgroup_data`
+  still packs that pointer into a word (before 5.15's explicit layout) loads
+  and merely skips the backfill. The Go tracer's server spans are untouched
+  by this patch: a Go server scraped by the collector still reports the
+  scrape.
+
+  The egress-integrity harness now starts OBI in a child cgroup of the
+  container's root, as a runtime would, because everything in that container
+  otherwise shares one cgroup and the payload would be excluded along with
+  OBI. Its `own-cgroup` scenario runs the payload binary, which discovery
+  matches, from that cgroup: it waits for its exclusion to reach
+  `denied_pids`, sends one request to the instrumented payload, which must
+  arrive byte-identical without a Traceparent, and run-under-obi.sh then
+  requires OBI to have printed a server span for the control request the
+  payload sends itself and none for the subject's. The iterator's half is
+  covered by connections older than OBI: before OBI starts, the runner
+  launches the payload as a parent whose children connect to it from OBI's
+  cgroup and from the root cgroup, and a third child listens from OBI's
+  cgroup with the parent connected to it. Once the payload proper is done
+  each connection carries one request, and OBI must have printed a server
+  span for the root child's, none for the one from its cgroup, and a client
+  span for the parent's request to the listener in its cgroup.
