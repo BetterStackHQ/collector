@@ -20,8 +20,8 @@ digest is pinned in `ebpf/Dockerfile`.
 | 013 | Restack | Adapt to the `DynamicSelector` rename and new matcher test callers. Explicit exclusions still take precedence over admitted parents. |
 | 014 | Remove | [#3514](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3514) sizes the environment map with `validEnvCount()`, ignoring empty entries left by `setproctitle`. |
 | 015 | Restack | Preserve upstream socket-cookie includes and tracer detach lifecycle state while retaining injector-owned Go PID admission and connect tracking. |
-| 023 | New | FastCGI: a server that reads a request header first and the rest after (PHP-FPM) keeps up to 248 of the 256 captured bytes instead of 152, and the params parser honours four-byte lengths and stops at a cut value, so PHP-FPM spans are named `POST /orders` rather than `POST` or `GET /*`. Upstream candidate; no upstream equivalent yet. |
 | 016 | New | Keeps OBI's own cgroup out of the traces. Upstream candidate; no upstream equivalent yet. |
+| 023 | New | FastCGI: a server that reads a request header first and the rest after (PHP-FPM) keeps up to 248 of the 256 captured bytes instead of 152, and the params parser honours four-byte lengths and stops at a cut value, so PHP-FPM spans are named `POST /orders` rather than `POST` or `GET /*`. Upstream candidate; no upstream equivalent yet. |
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
 bounds are part of the base now. A successful fill can copy less than `msg->size`
@@ -338,42 +338,6 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   discovery exclusions. Adds injector-owned PID admission and connect tracking;
   see the correction above. Also fixes sorted-key cleanup in the Go HTTP/1 probes. The generic PID filter
   remains unchanged.
-
-* 023-fastcgi-request-path.patch
-  Name PHP-FPM's server spans from the request. Behind nginx, every PHP
-  request has three spans: nginx's server span, nginx's FastCGI client span
-  and PHP-FPM's server span, and the last one was named `GET /*`, `GET /` or
-  just `POST` while nginx's carried the path. The FastCGI params are
-  captured from the kernel like any generic TCP request, 256 bytes at most.
-  nginx sends them in one write, so its client span sees `REQUEST_URI`;
-  PHP-FPM reads the same stream in pieces, three 8-byte headers and then the
-  params, and the kernel probe's "append one more packet" step copied a
-  fixed 128 bytes per append, so the server-side capture ended at byte 152,
-  inside `SCRIPT_NAME`, before `REQUEST_URI`. The params parser then took
-  the zero padding behind the cut as the rest of the value (`/inde` followed
-  by NULs, which the route heuristic turned into `/*`) or found no path at
-  all.
-
-  Two changes. The append now fills as much of the capture buffer as the
-  verifier lets it prove, in three tiers of constant bounds (224, 192 or 128
-  bytes, by how much was captured first), so PHP-FPM's capture reaches 248
-  bytes: with nginx's stock parameter order and a front controller under
-  `/var/www/html/public`, `REQUEST_URI` is there whenever path plus query
-  string stay under about 78 bytes, and a longer one falls back to
-  `DOCUMENT_URI` (`/index.php`) rather than to garbage. The params parser
-  decodes FastCGI's four-byte lengths (a cookie or user agent of 128 bytes
-  or more used to derail every pair after it) and stops at a value that
-  runs into the zero padding, so a cut value is never a path. Tests cover
-  both.
-
-  Verified on the box with nginx + PHP-FPM 8.3 and a Laravel-style front
-  controller: PHP-FPM's server spans went from `GET /*` (`url.path`
-  `/inde` + NULs) and `POST` to `GET /books`, `GET /books/*` and `POST
-  /orders`, 140 of 140 each over five minutes, the same names as nginx's.
-
-  Not changed: the request still appears as three spans, two of them server
-  spans, which is how nginx and PHP-FPM really talk; naming them
-  consistently is what the ticket asked for.
 * 016-exclude-own-cgroup.patch
   Keep the instrumentation's own container out of the traces. OBI runs in a
   container next to the collector's probes: the cluster agent scraping Redis
@@ -481,3 +445,38 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   each connection carries one request, and OBI must have printed a server
   span for the root child's, none for the one from its cgroup, and a client
   span for the parent's request to the listener in its cgroup.
+* 023-fastcgi-request-path.patch
+  Name PHP-FPM's server spans from the request. Behind nginx, every PHP
+  request has three spans: nginx's server span, nginx's FastCGI client span
+  and PHP-FPM's server span, and the last one was named `GET /*`, `GET /` or
+  just `POST` while nginx's carried the path. The FastCGI params are
+  captured from the kernel like any generic TCP request, 256 bytes at most.
+  nginx sends them in one write, so its client span sees `REQUEST_URI`;
+  PHP-FPM reads the same stream in pieces, three 8-byte headers and then the
+  params, and the kernel probe's "append one more packet" step copied a
+  fixed 128 bytes per append, so the server-side capture ended at byte 152,
+  inside `SCRIPT_NAME`, before `REQUEST_URI`. The params parser then took
+  the zero padding behind the cut as the rest of the value (`/inde` followed
+  by NULs, which the route heuristic turned into `/*`) or found no path at
+  all.
+
+  Two changes. The append now fills as much of the capture buffer as the
+  verifier lets it prove, in three tiers of constant bounds (224, 192 or 128
+  bytes, by how much was captured first), so PHP-FPM's capture reaches 248
+  bytes: with nginx's stock parameter order and a front controller under
+  `/var/www/html/public`, `REQUEST_URI` is there whenever path plus query
+  string stay under about 78 bytes, and a longer one falls back to
+  `DOCUMENT_URI` (`/index.php`) rather than to garbage. The params parser
+  decodes FastCGI's four-byte lengths (a cookie or user agent of 128 bytes
+  or more used to derail every pair after it) and stops at a value that
+  runs into the zero padding, so a cut value is never a path. Tests cover
+  both.
+
+  Verified on the box with nginx + PHP-FPM 8.3 and a Laravel-style front
+  controller: PHP-FPM's server spans went from `GET /*` (`url.path`
+  `/inde` + NULs) and `POST` to `GET /books`, `GET /books/*` and `POST
+  /orders`, 140 of 140 each over five minutes, the same names as nginx's.
+
+  Not changed: the request still appears as three spans, two of them server
+  spans, which is how nginx and PHP-FPM really talk; naming them
+  consistently is what the ticket asked for.
