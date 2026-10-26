@@ -20,8 +20,8 @@ digest is pinned in `ebpf/Dockerfile`.
 | 013 | Restack | Adapt to the `DynamicSelector` rename and new matcher test callers. Explicit exclusions still take precedence over admitted parents. |
 | 014 | Remove | [#3514](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3514) sizes the environment map with `validEnvCount()`, ignoring empty entries left by `setproctitle`. |
 | 015 | Restack | Preserve upstream socket-cookie includes and tracer detach lifecycle state while retaining injector-owned Go PID admission and connect tracking. |
-| 019 | New | Postgres: skips statements without a query (BEGIN, COMMIT, SET) instead of falling back to a `PREPARED STATEMENT` span, so the pipelined query behind them is traced. Upstream candidate; no upstream equivalent yet. |
 | 016 | New | Keeps OBI's own cgroup out of the traces. Upstream candidate; no upstream equivalent yet. |
+| 019 | New | Postgres: skips statements without a query (BEGIN, COMMIT, SET) instead of falling back to a `PREPARED STATEMENT` span, so the pipelined query behind them is traced. Upstream candidate; no upstream equivalent yet. |
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
 bounds are part of the base now. A successful fill can copy less than `msg->size`
@@ -338,49 +338,6 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   discovery exclusions. Adds injector-owned PID admission and connect tracking;
   see the correction above. Also fixes sorted-key cleanup in the Go HTTP/1 probes. The generic PID filter
   remains unchanged.
-* 019-postgres-statements-without-queries.patch
-  Trace the Postgres statement that matters when a write carries one that
-  does not. `handlePostgres` names a span from the first statement a write
-  executes: a `Q` simple query, or the prepared statement an `E` executes
-  through the portal its `B` bound. The SQL it remembers from a `P` comes
-  from `detectSQL`, which only recognises SELECT, INSERT, UPDATE, DELETE,
-  ALTER, CREATE and DROP; BEGIN, COMMIT, SET, DEALLOCATE and the like leave
-  an empty statement, and executing one ended in `errFallback`, whose
-  generic naming (`postgresPreparedStatements`) reported a `PREPARED
-  STATEMENT <names>` span with no SQL and swallowed the rest of the write.
-
-  Two drivers hit this constantly. pgjdbc turns every statement into a named
-  server-side prepared statement after five runs, BEGIN included, and
-  pipelines BEGIN with the first statement of a transaction into one send
-  (`B(S_2) E B(S_3) E S`): the first Execute was BEGIN, so the write became
-  `PREPARED STATEMENT .S_2` and the `SELECT ... FOR UPDATE` behind it was
-  never traced, the shape of the report where the hottest statements had no
-  spans while rare ones did. pdo_pgsql under Laravel prepares `set names`
-  first on every connection, always as `pdo_stmt_00000001`, so every request
-  carried one `PREPARED STATEMENT .pdo_stmt_00000001` span with empty text.
-
-  The handler now recognises control statements by their leading keyword
-  (BEGIN, START, COMMIT, END, ROLLBACK, ABORT, SAVEPOINT, RELEASE, SET,
-  RESET, DEALLOCATE, DISCARD), keeping the Parse text of a statement the
-  detector found no query in so an Execute can tell BEGIN from a CALL. An
-  executed control statement, prepared or simple, is skipped and the scan
-  goes on to the next statement in the same write, so the pipelined query
-  is the span; a write that executes only control statements is no span,
-  `errIgnore` rather than the fallback, unless the reply is an error: a
-  failed COMMIT is the only place a serialization failure or a deferred
-  constraint shows up, so that one is a span named after the statement with
-  the error attached. Everything else the detector does not know (CALL,
-  TRUNCATE, LOCK, `EXECUTE <name>`) still goes to the generic naming, which
-  at least reports that it ran, and a cut Parse with no query in what was
-  captured is no span rather than a nameless one. A statement the tracer
-  never saw prepared is still ignored, as before. The generic naming also
-  now reads a Bind message in wire order, portal then statement, so when it
-  does run it prints `S_1` rather than `.S_1`; an existing test table had
-  encoded the swap.
-
-  Verified on the box with pgjdbc 42.7.4 and PHP 8.3 pdo_pgsql against
-  Postgres 17; the unit tests build the pipelined and the PDO writes from
-  the captured message shapes.
 * 016-exclude-own-cgroup.patch
   Keep the instrumentation's own container out of the traces. OBI runs in a
   container next to the collector's probes: the cluster agent scraping Redis
@@ -488,3 +445,46 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   each connection carries one request, and OBI must have printed a server
   span for the root child's, none for the one from its cgroup, and a client
   span for the parent's request to the listener in its cgroup.
+* 019-postgres-statements-without-queries.patch
+  Trace the Postgres statement that matters when a write carries one that
+  does not. `handlePostgres` names a span from the first statement a write
+  executes: a `Q` simple query, or the prepared statement an `E` executes
+  through the portal its `B` bound. The SQL it remembers from a `P` comes
+  from `detectSQL`, which only recognises SELECT, INSERT, UPDATE, DELETE,
+  ALTER, CREATE and DROP; BEGIN, COMMIT, SET, DEALLOCATE and the like leave
+  an empty statement, and executing one ended in `errFallback`, whose
+  generic naming (`postgresPreparedStatements`) reported a `PREPARED
+  STATEMENT <names>` span with no SQL and swallowed the rest of the write.
+
+  Two drivers hit this constantly. pgjdbc turns every statement into a named
+  server-side prepared statement after five runs, BEGIN included, and
+  pipelines BEGIN with the first statement of a transaction into one send
+  (`B(S_2) E B(S_3) E S`): the first Execute was BEGIN, so the write became
+  `PREPARED STATEMENT .S_2` and the `SELECT ... FOR UPDATE` behind it was
+  never traced, the shape of the report where the hottest statements had no
+  spans while rare ones did. pdo_pgsql under Laravel prepares `set names`
+  first on every connection, always as `pdo_stmt_00000001`, so every request
+  carried one `PREPARED STATEMENT .pdo_stmt_00000001` span with empty text.
+
+  The handler now recognises control statements by their leading keyword
+  (BEGIN, START, COMMIT, END, ROLLBACK, ABORT, SAVEPOINT, RELEASE, SET,
+  RESET, DEALLOCATE, DISCARD), keeping the Parse text of a statement the
+  detector found no query in so an Execute can tell BEGIN from a CALL. An
+  executed control statement, prepared or simple, is skipped and the scan
+  goes on to the next statement in the same write, so the pipelined query
+  is the span; a write that executes only control statements is no span,
+  `errIgnore` rather than the fallback, unless the reply is an error: a
+  failed COMMIT is the only place a serialization failure or a deferred
+  constraint shows up, so that one is a span named after the statement with
+  the error attached. Everything else the detector does not know (CALL,
+  TRUNCATE, LOCK, `EXECUTE <name>`) still goes to the generic naming, which
+  at least reports that it ran, and a cut Parse with no query in what was
+  captured is no span rather than a nameless one. A statement the tracer
+  never saw prepared is still ignored, as before. The generic naming also
+  now reads a Bind message in wire order, portal then statement, so when it
+  does run it prints `S_1` rather than `.S_1`; an existing test table had
+  encoded the swap.
+
+  Verified on the box with pgjdbc 42.7.4 and PHP 8.3 pdo_pgsql against
+  Postgres 17; the unit tests build the pipelined and the PDO writes from
+  the captured message shapes.
