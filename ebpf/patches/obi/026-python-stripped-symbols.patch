@@ -1,0 +1,2869 @@
+diff --git a/pkg/ebpf/instrumenter.go b/pkg/ebpf/instrumenter.go
+index f5ded2687..32e9c5846 100644
+--- a/pkg/ebpf/instrumenter.go
++++ b/pkg/ebpf/instrumenter.go
+@@ -34,6 +34,7 @@ import (
+ 	"go.opentelemetry.io/obi/pkg/internal/ebpf/uprobe"
+ 	"go.opentelemetry.io/obi/pkg/internal/goexec"
+ 	"go.opentelemetry.io/obi/pkg/internal/procs"
++	"go.opentelemetry.io/obi/pkg/internal/pyelf"
+ )
+ 
+ func ilog() *slog.Logger {
+@@ -1245,6 +1246,7 @@ func gatherOffsetsImpl(elfFile *elf.File, probes map[string][]*ebpfcommon.ProbeD
+ 	if err != nil {
+ 		return fmt.Errorf("failed to lookup symbols for %s: %w", instrPath, err)
+ 	}
++	addDerivedSymbols(elfFile, instrPath, probes, exactSyms, log)
+ 
+ 	for symbolName, probeArray := range probes {
+ 		for _, probe := range probeArray {
+@@ -1291,6 +1293,54 @@ func gatherOffsetsImpl(elfFile *elf.File, probes map[string][]*ebpfcommon.ProbeD
+ 	return nil
+ }
+ 
++// addDerivedSymbols fills in the exact-match symbols the symbol tables did not
++// provide, for the CPython libraries whose stripped builds pyelf can read. A
++// derived address that an already resolved symbol owns (an LTO-renamed
++// duplicate such as context_run.lto_priv.0) is dropped, so a program is never
++// attached twice to one function.
++func addDerivedSymbols(
++	elfFile *elf.File,
++	instrPath string,
++	probes map[string][]*ebpfcommon.ProbeDesc,
++	exactSyms map[string]procs.Sym,
++	log *slog.Logger,
++) {
++	var missing []string
++	for _, name := range symbolNames(probes, ebpfcommon.SymbolMatcherExact) {
++		if _, ok := exactSyms[name]; !ok {
++			missing = append(missing, name)
++		}
++	}
++	if len(missing) == 0 {
++		return
++	}
++	mergeDerivedSymbols(exactSyms, pyelf.Synthesize(elfFile, instrPath, missing, log), log)
++}
++
++func mergeDerivedSymbols(exactSyms, derived map[string]procs.Sym, log *slog.Logger) {
++	taken := make(map[uint64]string, len(exactSyms))
++	for name, sym := range exactSyms {
++		taken[sym.Off] = name
++	}
++	// Two derived names at one address mean the derivation went wrong
++	// somewhere; neither is trusted.
++	derivedAt := make(map[uint64]int, len(derived))
++	for _, sym := range derived {
++		derivedAt[sym.Off]++
++	}
++	for name, sym := range derived {
++		if derivedAt[sym.Off] > 1 {
++			log.Debug("derived symbols collide at one address, skipping", "symbol", name, "offset", sym.Off)
++			continue
++		}
++		if other, dup := taken[sym.Off]; dup {
++			log.Debug("derived symbol shares its address with a resolved one, skipping", "symbol", name, "resolved", other)
++			continue
++		}
++		exactSyms[name] = sym
++	}
++}
++
+ func applyResolvedSymbolOffsets(
+ 	probe *ebpfcommon.ProbeDesc,
+ 	sym procs.Sym,
+diff --git a/pkg/ebpf/instrumenter_test.go b/pkg/ebpf/instrumenter_test.go
+index 8a4daf899..6ea401bc0 100644
+--- a/pkg/ebpf/instrumenter_test.go
++++ b/pkg/ebpf/instrumenter_test.go
+@@ -1546,3 +1546,33 @@ func TestMakeOtelBPFFSPathRejectsInaccessibleExistingDirectory(t *testing.T) {
+ 
+ 	require.ErrorContains(t, err, "accessing bpffs otel path")
+ }
++
++func TestMergeDerivedSymbolsSkipsTakenAddresses(t *testing.T) {
++	resolved := map[string]procs.Sym{
++		"context_run.lto_priv.0": {Name: "context_run.lto_priv.0", Off: 0x1000, Len: 10},
++	}
++	derived := map[string]procs.Sym{
++		"context_run":        {Name: "context_run", Off: 0x1000, Len: 10},
++		"context_tp_dealloc": {Name: "context_tp_dealloc", Off: 0x2000, Len: 20},
++	}
++	mergeDerivedSymbols(resolved, derived, slog.Default())
++	if _, dup := resolved["context_run"]; dup {
++		t.Fatal("a derived symbol at an address that is already resolved must be dropped")
++	}
++	if sym, ok := resolved["context_tp_dealloc"]; !ok || sym.Off != 0x2000 {
++		t.Fatalf("derived symbol not merged: %+v", resolved)
++	}
++}
++
++func TestMergeDerivedSymbolsDropsCollidingDerivations(t *testing.T) {
++	resolved := map[string]procs.Sym{}
++	derived := map[string]procs.Sym{
++		"context_new_empty":     {Name: "context_new_empty", Off: 0x3000, Len: 8},
++		"context_new_from_vars": {Name: "context_new_from_vars", Off: 0x3000, Len: 8},
++		"context_run":           {Name: "context_run", Off: 0x4000, Len: 8},
++	}
++	mergeDerivedSymbols(resolved, derived, slog.Default())
++	if len(resolved) != 1 || resolved["context_run"].Off != 0x4000 {
++		t.Fatalf("two derived names at one address must both be dropped: %+v", resolved)
++	}
++}
+diff --git a/pkg/internal/pyelf/asyncio.go b/pkg/internal/pyelf/asyncio.go
+new file mode 100644
+index 000000000..c7424daf9
+--- /dev/null
++++ b/pkg/internal/pyelf/asyncio.go
+@@ -0,0 +1,111 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package pyelf // import "go.opentelemetry.io/obi/pkg/internal/pyelf"
++
++import (
++	"debug/elf"
++
++	"go.opentelemetry.io/obi/pkg/internal/procs"
++)
++
++// synthesizeAsyncio derives the task functions from the _asyncio module:
++//
++//	_asyncio_Task___init__  the tp_init slot of the "_asyncio.Task" type
++//	task_step               the one hidden function that the step wrapper's
++//	                        tp_call tail-jumps into and the wakeup callback
++//	                        transfers control to as well
++//
++// Before 3.12 the types are static PyTypeObjects and the wrapper is named
++// "TaskStepMethWrapper"; since 3.12 they are heap types built from PyType_Spec
++// and named with the module prefix. The wakeup callback is a plain PyMethodDef
++// ("task_wakeup", METH_O) since 3.10 and a "TaskWakeupMethWrapper" type before.
++func synthesizeAsyncio(img *image, names []string) (map[string]procs.Sym, []error) {
++	out := map[string]procs.Sym{}
++	var problems []error
++	reference := img.dynSymbol(anchorAsyncio, elf.STT_FUNC)
++
++	if wanted(names, SymTaskInit) {
++		task, err := img.findType("_asyncio.Task")
++		if err != nil {
++			problems = append(problems, err)
++		} else if addr, err := task.initFunc(); err != nil {
++			problems = append(problems, err)
++		} else if sym, err := img.function(SymTaskInit, addr, reference); err != nil {
++			problems = append(problems, err)
++		} else {
++			out[SymTaskInit] = sym
++		}
++	}
++
++	if wanted(names, SymTaskStep) {
++		sym, err := deriveTaskStep(img, reference)
++		if err != nil {
++			problems = append(problems, err)
++		} else {
++			out[SymTaskStep] = sym
++		}
++	}
++	return out, problems
++}
++
++func deriveTaskStep(img *image, reference *elf.Symbol) (procs.Sym, error) {
++	wrapper, err := img.findType("_asyncio.TaskStepMethWrapper", "TaskStepMethWrapper")
++	if err != nil {
++		return procs.Sym{}, err
++	}
++	stepCall, err := wrapper.callFunc()
++	if err != nil {
++		return procs.Sym{}, err
++	}
++	stepCallSym, err := img.function("TaskStepMethWrapper_call", stepCall, reference)
++	if err != nil {
++		return procs.Sym{}, err
++	}
++
++	// Since 3.10 the wakeup callback is the PyMethodDef "task_wakeup"; 3.9
++	// wraps it in a TaskWakeupMethWrapper type whose tp_call takes its place.
++	wakeupName := "task_wakeup"
++	wakeup, err := img.methodDef("task_wakeup", methO)
++	if err != nil {
++		wakeupType, typeErr := img.findType("_asyncio.TaskWakeupMethWrapper", "TaskWakeupMethWrapper")
++		if typeErr != nil {
++			return procs.Sym{}, problemf("no wakeup callback: %v; %v", err, typeErr)
++		}
++		if wakeup, err = wakeupType.callFunc(); err != nil {
++			return procs.Sym{}, err
++		}
++		wakeupName = "TaskWakeupMethWrapper_call"
++	}
++	wakeupSym, err := img.function(wakeupName, wakeup, reference)
++	if err != nil {
++		return procs.Sym{}, err
++	}
++
++	fromStep, err := img.hiddenTransfers(stepCallSym.Value, stepCallSym.Len)
++	if err != nil {
++		return procs.Sym{}, problemf("step wrapper: %w", err)
++	}
++	fromWakeup, err := img.hiddenTargets(wakeupSym.Value, wakeupSym.Len, false)
++	if err != nil {
++		return procs.Sym{}, problemf("wakeup callback: %w", err)
++	}
++	// The step wrapper does nothing after task_step, so it tail-jumps into it;
++	// a wrapper that has task_step inlined would call the helpers it shares
++	// with the wakeup callback instead, and those are not task_step.
++	var common []uint64
++	for _, t := range fromStep.transfers {
++		if !t.tail || t.target == stepCallSym.Value || t.target == wakeupSym.Value {
++			continue
++		}
++		for _, w := range fromWakeup {
++			if t.target == w {
++				common = append(common, t.target)
++			}
++		}
++	}
++	if len(common) != 1 {
++		return procs.Sym{}, problemf("step wrapper and wakeup callback share %d hidden callees, expected 1", len(common))
++	}
++	return img.function(SymTaskStep, common[0], nil)
++}
+diff --git a/pkg/internal/pyelf/code.go b/pkg/internal/pyelf/code.go
+new file mode 100644
+index 000000000..76885181b
+--- /dev/null
++++ b/pkg/internal/pyelf/code.go
+@@ -0,0 +1,232 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package pyelf // import "go.opentelemetry.io/obi/pkg/internal/pyelf"
++
++import (
++	"debug/elf"
++	"fmt"
++
++	"golang.org/x/arch/x86/x86asm"
++)
++
++// The exported context helpers that tail-jump into hidden functions are tiny
++// stubs; a body longer than this is not one of them.
++const maxStubLength = 64
++
++// transfer is a control transfer found in a function body.
++type transfer struct {
++	target uint64
++	// tail is set for an unconditional direct jump (a tail call), clear for a
++	// direct call.
++	tail bool
++}
++
++// codeShape summarises a function body: its direct transfers and whether it
++// also branches conditionally or indirectly, which a pure trampoline never does.
++type codeShape struct {
++	transfers []transfer
++	// branches is set when the body has a conditional branch or an indirect
++	// call or jump.
++	branches bool
++}
++
++func decode(machine elf.Machine, addr uint64, code []byte) (codeShape, error) {
++	switch machine {
++	case elf.EM_X86_64:
++		return x86Decode(addr, code)
++	case elf.EM_AARCH64:
++		return arm64Decode(addr, code)
++	}
++	return codeShape{}, fmt.Errorf("unsupported machine %s", machine)
++}
++
++func isEndbr(b []byte) bool {
++	return len(b) >= 4 && b[0] == 0xF3 && b[1] == 0x0F && b[2] == 0x1E && (b[3] == 0xFA || b[3] == 0xFB)
++}
++
++func x86Conditional(op x86asm.Op) bool {
++	switch op {
++	case x86asm.JA, x86asm.JAE, x86asm.JB, x86asm.JBE, x86asm.JCXZ, x86asm.JE, x86asm.JECXZ,
++		x86asm.JG, x86asm.JGE, x86asm.JL, x86asm.JLE, x86asm.JNE, x86asm.JNO, x86asm.JNP,
++		x86asm.JNS, x86asm.JO, x86asm.JP, x86asm.JRCXZ, x86asm.JS,
++		x86asm.LOOP, x86asm.LOOPE, x86asm.LOOPNE:
++		return true
++	}
++	return false
++}
++
++// x86DecodeOne decodes one instruction. The x/arch decoder panics on some
++// truncated EVEX-prefixed inputs, which a function tail can legitimately be
++// cut to; that is reported as an error like any other undecodable byte.
++func x86DecodeOne(code []byte) (inst x86asm.Inst, err error) {
++	defer func() {
++		if r := recover(); r != nil {
++			err = fmt.Errorf("decoder panic: %v", r)
++		}
++	}()
++	return x86asm.Decode(code, 64)
++}
++
++func x86Decode(addr uint64, code []byte) (codeShape, error) {
++	var shape codeShape
++	for i := 0; i < len(code); {
++		if isEndbr(code[i:]) {
++			i += 4
++			continue
++		}
++		inst, err := x86DecodeOne(code[i:])
++		if err != nil {
++			return codeShape{}, fmt.Errorf("undecodable instruction at 0x%x: %w", addr+uint64(i), err)
++		}
++		switch {
++		case inst.Op == x86asm.JMP || inst.Op == x86asm.CALL:
++			rel, direct := inst.Args[0].(x86asm.Rel)
++			if !direct {
++				shape.branches = true
++				break
++			}
++			target := int64(addr) + int64(i) + int64(inst.Len) + int64(rel)
++			if target > 0 {
++				shape.transfers = append(shape.transfers, transfer{target: uint64(target), tail: inst.Op == x86asm.JMP})
++			}
++		case x86Conditional(inst.Op):
++			shape.branches = true
++		}
++		i += inst.Len
++	}
++	return shape, nil
++}
++
++func arm64Decode(addr uint64, code []byte) (codeShape, error) {
++	if len(code)%4 != 0 {
++		return codeShape{}, fmt.Errorf("function at 0x%x has a length that is not a multiple of 4", addr)
++	}
++	var shape codeShape
++	for i := 0; i < len(code); i += 4 {
++		w := uint32(code[i]) | uint32(code[i+1])<<8 | uint32(code[i+2])<<16 | uint32(code[i+3])<<24
++		switch {
++		case w&0x7C000000 == 0x14000000: // B (0x14) / BL (0x94)
++			imm := int64(w & 0x03FFFFFF)
++			if imm&0x02000000 != 0 {
++				imm -= 0x04000000
++			}
++			target := int64(addr) + int64(i) + imm*4
++			if target > 0 {
++				shape.transfers = append(shape.transfers, transfer{target: uint64(target), tail: w&0x80000000 == 0})
++			}
++		case w&0xFF000000 == 0x54000000, // B.cond / BC.cond
++			w&0x7E000000 == 0x34000000, // CBZ / CBNZ
++			w&0x7E000000 == 0x36000000, // TBZ / TBNZ
++			w&0xFFFFFC1F == 0xD61F0000, // BR
++			w&0xFFFFFC1F == 0xD63F0000, // BLR
++			w&0xFEFFF800 == 0xD61F0800, // BRAAZ / BRABZ / BRAA / BRAB
++			w&0xFEFFF800 == 0xD63F0800: // BLRAAZ / BLRABZ / BLRAA / BLRAB
++			shape.branches = true
++		}
++	}
++	return shape, nil
++}
++
++// bodyShape decodes a function body of a sane length.
++func (img *image) bodyShape(addr, length uint64) (codeShape, error) {
++	if length == 0 || length > maxFunctionLength {
++		return codeShape{}, fmt.Errorf("function at 0x%x has an implausible length %d", addr, length)
++	}
++	code, ok := img.read(addr, length)
++	if !ok {
++		return codeShape{}, fmt.Errorf("cannot read %d bytes of code at 0x%x", length, addr)
++	}
++	return decode(img.machine, addr, code)
++}
++
++// hiddenTransfers lists the distinct transfers of a body that land on a hidden
++// function of this library: inside .text, not exported, not the body itself.
++func (img *image) hiddenTransfers(addr, length uint64) (codeShape, error) {
++	shape, err := img.bodyShape(addr, length)
++	if err != nil {
++		return codeShape{}, err
++	}
++	return img.hidden(addr, length, shape), nil
++}
++
++func (img *image) hidden(addr, length uint64, shape codeShape) codeShape {
++	var kept []transfer
++	for _, t := range shape.transfers {
++		if !img.inText(t.target) {
++			continue
++		}
++		if _, exported := img.dynFuncs[t.target]; exported {
++			continue
++		}
++		if t.target >= addr && t.target < addr+length {
++			continue
++		}
++		dup := false
++		for i := range kept {
++			if kept[i].target == t.target {
++				kept[i].tail = kept[i].tail || t.tail
++				dup = true
++				break
++			}
++		}
++		if !dup {
++			kept = append(kept, t)
++		}
++	}
++	shape.transfers = kept
++	return shape
++}
++
++// hiddenTargets returns the targets of hiddenTransfers, tail jumps only when
++// onlyTail is set.
++func (img *image) hiddenTargets(addr, length uint64, onlyTail bool) ([]uint64, error) {
++	shape, err := img.hiddenTransfers(addr, length)
++	if err != nil {
++		return nil, err
++	}
++	var out []uint64
++	for _, t := range shape.transfers {
++		if onlyTail && !t.tail {
++			continue
++		}
++		out = append(out, t.target)
++	}
++	return out, nil
++}
++
++// uniqueTailTarget derives the hidden function an exported stub tail-jumps
++// into, such as PyContext_New -> context_new_empty. The stub must be short.
++// With trampoline set it must also be straight-line code with that one jump:
++// no calls, no conditional or indirect branches, so the target cannot be a
++// cold fragment split off the stub itself.
++func (img *image) uniqueTailTarget(stub string, trampoline bool) (uint64, error) {
++	sym := img.dynSymbol(stub, elf.STT_FUNC)
++	if sym == nil {
++		return 0, fmt.Errorf("%s is not exported", stub)
++	}
++	if sym.Size == 0 || sym.Size > maxStubLength {
++		return 0, fmt.Errorf("%s is %d bytes long, not a stub", stub, sym.Size)
++	}
++	raw, err := img.bodyShape(sym.Value, sym.Size)
++	if err != nil {
++		return 0, fmt.Errorf("%s: %w", stub, err)
++	}
++	var targets []uint64
++	for _, t := range img.hidden(sym.Value, sym.Size, raw).transfers {
++		if t.tail {
++			targets = append(targets, t.target)
++		}
++	}
++	if len(targets) != 1 {
++		return 0, fmt.Errorf("%s tail-jumps to %d hidden functions, expected 1", stub, len(targets))
++	}
++	if trampoline {
++		// Every transfer counts here, including calls to exported or PLT
++		// functions: a trampoline has exactly the one jump.
++		if raw.branches || len(raw.transfers) != 1 || !raw.transfers[0].tail {
++			return 0, fmt.Errorf("%s is not a plain trampoline", stub)
++		}
++	}
++	return targets[0], nil
++}
+diff --git a/pkg/internal/pyelf/code_test.go b/pkg/internal/pyelf/code_test.go
+new file mode 100644
+index 000000000..8f691478d
+--- /dev/null
++++ b/pkg/internal/pyelf/code_test.go
+@@ -0,0 +1,93 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package pyelf
++
++import (
++	"debug/elf"
++	"encoding/binary"
++	"testing"
++)
++
++func TestX86Transfers(t *testing.T) {
++	// 0x1000: endbr64
++	// 0x1004: call  0x1100        (e8 f7 00 00 00)
++	// 0x1009: jne   0x1010        (75 05)   conditional, ignored
++	// 0x100b: jmp   0x2000        (e9 f0 0f 00 00)
++	// 0x1010: jmp   *0x10(%rip)   (ff 25 10 00 00 00)  indirect, ignored
++	// 0x1016: ret
++	code := []byte{
++		0xf3, 0x0f, 0x1e, 0xfa,
++		0xe8, 0xf7, 0x00, 0x00, 0x00,
++		0x75, 0x05,
++		0xe9, 0xf0, 0x0f, 0x00, 0x00,
++		0xff, 0x25, 0x10, 0x00, 0x00, 0x00,
++		0xc3,
++	}
++	shape, err := decode(elf.EM_X86_64, 0x1000, code)
++	if err != nil {
++		t.Fatal(err)
++	}
++	want := []transfer{{target: 0x1100}, {target: 0x2000, tail: true}}
++	if len(shape.transfers) != len(want) {
++		t.Fatalf("got %+v, want %+v", shape.transfers, want)
++	}
++	for i := range want {
++		if shape.transfers[i] != want[i] {
++			t.Errorf("transfer %d: got %+v, want %+v", i, shape.transfers[i], want[i])
++		}
++	}
++	if !shape.branches {
++		t.Error("the conditional and indirect jumps must mark the body as branching")
++	}
++	plain, err := decode(elf.EM_X86_64, 0x1000, []byte{0xf3, 0x0f, 0x1e, 0xfa, 0xe9, 0xf7, 0x0f, 0x00, 0x00})
++	if err != nil || plain.branches || len(plain.transfers) != 1 || !plain.transfers[0].tail {
++		t.Fatalf("endbr64 + jmp must be a plain trampoline: %+v %v", plain, err)
++	}
++}
++
++func TestX86DecodeRejectsGarbage(t *testing.T) {
++	if _, err := decode(elf.EM_X86_64, 0x1000, []byte{0x06}); err == nil {
++		t.Fatal("expected a decode error")
++	}
++	// A truncated EVEX prefix makes the upstream decoder panic.
++	if _, err := decode(elf.EM_X86_64, 0x1000, []byte{0x62, 0x30, 0x30, 0x30}); err == nil {
++		t.Fatal("expected a decode error for a truncated EVEX instruction")
++	}
++}
++
++func TestArm64Transfers(t *testing.T) {
++	le := binary.LittleEndian
++	var code []byte
++	code = le.AppendUint32(code, 0xd503245f)                   // bti c
++	code = le.AppendUint32(code, 0x94000000|0x40)              // bl  +0x100
++	code = le.AppendUint32(code, 0x54000040)                   // b.eq +8, conditional, ignored
++	code = le.AppendUint32(code, 0x14000000|(0x03ffffff&^0x3)) // b -16 (imm26 = -4)
++	code = le.AppendUint32(code, 0xd61f0200)                   // br x16, ignored
++	code = le.AppendUint32(code, 0xd65f03c0)                   // ret
++	shape, err := decode(elf.EM_AARCH64, 0x1000, code)
++	if err != nil {
++		t.Fatal(err)
++	}
++	want := []transfer{{target: 0x1004 + 0x100}, {target: 0x100c - 16, tail: true}}
++	if len(shape.transfers) != len(want) {
++		t.Fatalf("got %+v, want %+v", shape.transfers, want)
++	}
++	for i := range want {
++		if shape.transfers[i] != want[i] {
++			t.Errorf("transfer %d: got %+v, want %+v", i, shape.transfers[i], want[i])
++		}
++	}
++	if !shape.branches {
++		t.Error("b.eq and br must mark the body as branching")
++	}
++	if _, err := decode(elf.EM_AARCH64, 0x1000, code[:5]); err == nil {
++		t.Fatal("expected an error for a misaligned body")
++	}
++	var plain []byte
++	plain = le.AppendUint32(plain, 0xd503245f)      // bti c
++	plain = le.AppendUint32(plain, 0x14000000|0x10) // b +0x40
++	if shape, err := decode(elf.EM_AARCH64, 0x1000, plain); err != nil || shape.branches || len(shape.transfers) != 1 {
++		t.Fatalf("bti + b must be a plain trampoline: %+v %v", shape, err)
++	}
++}
+diff --git a/pkg/internal/pyelf/ehframe.go b/pkg/internal/pyelf/ehframe.go
+new file mode 100644
+index 000000000..fdd17c730
+--- /dev/null
++++ b/pkg/internal/pyelf/ehframe.go
+@@ -0,0 +1,354 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package pyelf // import "go.opentelemetry.io/obi/pkg/internal/pyelf"
++
++import (
++	"debug/elf"
++	"encoding/binary"
++	"errors"
++	"fmt"
++)
++
++// DWARF exception-header pointer encodings (the low nibble is the format, the
++// high nibble how the value is applied).
++const (
++	dwEHPEabsptr  = 0x00
++	dwEHPEuleb128 = 0x01
++	dwEHPEudata2  = 0x02
++	dwEHPEudata4  = 0x03
++	dwEHPEudata8  = 0x04
++	dwEHPEsleb128 = 0x09
++	dwEHPEsdata2  = 0x0a
++	dwEHPEsdata4  = 0x0b
++	dwEHPEsdata8  = 0x0c
++	dwEHPEpcrel   = 0x10
++	dwEHPEomit    = 0xff
++
++	ehFormatMask      = 0x0f
++	ehApplicationMask = 0x70
++	ehIndirect        = 0x80
++)
++
++type cieInfo struct {
++	fdeEncoding byte
++}
++
++// parseEHFrame walks every FDE of .eh_frame and returns the start address and
++// length of each function the compiler emitted unwind information for, which
++// on x86-64 and aarch64 is every function. Stripping removes .symtab, never
++// .eh_frame, so this is the surviving table of function boundaries.
++func parseEHFrame(f *elf.File) (map[uint64]uint64, error) {
++	sec := f.Section(".eh_frame")
++	if sec == nil {
++		return nil, errors.New("no .eh_frame section")
++	}
++	data, err := sec.Data()
++	if err != nil {
++		return nil, err
++	}
++	return parseEHFrameData(data, sec.Addr, f.ByteOrder)
++}
++
++func parseEHFrameData(data []byte, sectionAddr uint64, order binary.ByteOrder) (map[uint64]uint64, error) {
++	cies := map[int]cieInfo{}
++	functions := map[uint64]uint64{}
++	// Addresses claimed by two FDEs of different lengths: neither is trusted.
++	conflicts := map[uint64]bool{}
++
++	pos := 0
++	for pos+4 <= len(data) {
++		recordStart := pos
++		length := uint64(order.Uint32(data[pos:]))
++		pos += 4
++		if length == 0 {
++			// A zero terminator; the linker puts one at the end of the section.
++			continue
++		}
++		// Unlike .debug_frame, .eh_frame keeps a 4-byte CIE pointer even
++		// behind the 64-bit extended length (LSB, section .eh_frame).
++		const idSize = 4
++		if length == 0xffffffff {
++			if pos+8 > len(data) {
++				return nil, errors.New("truncated extended length")
++			}
++			length = order.Uint64(data[pos:])
++			pos += 8
++		}
++		if length < uint64(idSize) || length > uint64(len(data)-pos) {
++			return nil, fmt.Errorf("record at 0x%x has an impossible length %d", recordStart, length)
++		}
++		body := data[pos : pos+int(length)]
++		idPos := pos
++		pos += int(length)
++
++		id := uint64(order.Uint32(body))
++		if id == 0 {
++			cie, err := parseCIE(body[idSize:], sectionAddr+uint64(idPos+idSize), order)
++			if err != nil {
++				return nil, fmt.Errorf("CIE at 0x%x: %w", recordStart, err)
++			}
++			cies[recordStart] = cie
++			continue
++		}
++
++		ciePos := idPos - int(id)
++		cie, ok := cies[ciePos]
++		if !ok {
++			return nil, fmt.Errorf("FDE at 0x%x points at an unknown CIE", recordStart)
++		}
++		r := &reader{data: body[idSize:], addr: sectionAddr + uint64(idPos+idSize), order: order}
++		start, err := r.encoded(cie.fdeEncoding)
++		if err != nil {
++			return nil, fmt.Errorf("FDE at 0x%x: %w", recordStart, err)
++		}
++		// The range shares the format of the location but is never relative.
++		size, err := r.encoded(cie.fdeEncoding & ehFormatMask)
++		if err != nil {
++			return nil, fmt.Errorf("FDE at 0x%x: %w", recordStart, err)
++		}
++		if size == 0 {
++			continue
++		}
++		if previous, dup := functions[start]; dup && previous != size {
++			conflicts[start] = true
++		}
++		functions[start] = size
++	}
++	for addr := range conflicts {
++		delete(functions, addr)
++	}
++	return functions, nil
++}
++
++func parseCIE(body []byte, addr uint64, order binary.ByteOrder) (cieInfo, error) {
++	r := &reader{data: body, addr: addr, order: order}
++	version, err := r.u8()
++	if err != nil {
++		return cieInfo{}, err
++	}
++	if version != 1 && version != 3 && version != 4 {
++		return cieInfo{}, fmt.Errorf("unsupported CIE version %d", version)
++	}
++	augmentation, err := r.cstring()
++	if err != nil {
++		return cieInfo{}, err
++	}
++	if len(augmentation) >= 2 && augmentation[:2] == "eh" {
++		if _, err := r.u64(); err != nil {
++			return cieInfo{}, err
++		}
++		augmentation = augmentation[2:]
++	}
++	if version >= 4 {
++		if _, err := r.u8(); err != nil { // address size
++			return cieInfo{}, err
++		}
++		if _, err := r.u8(); err != nil { // segment selector size
++			return cieInfo{}, err
++		}
++	}
++	if _, err := r.uleb(); err != nil { // code alignment factor
++		return cieInfo{}, err
++	}
++	if _, err := r.sleb(); err != nil { // data alignment factor
++		return cieInfo{}, err
++	}
++	if version == 1 {
++		if _, err := r.u8(); err != nil { // return address register
++			return cieInfo{}, err
++		}
++	} else if _, err := r.uleb(); err != nil {
++		return cieInfo{}, err
++	}
++
++	cie := cieInfo{fdeEncoding: dwEHPEabsptr}
++	if len(augmentation) == 0 || augmentation[0] != 'z' {
++		return cie, nil
++	}
++	if _, err := r.uleb(); err != nil { // augmentation data length
++		return cieInfo{}, err
++	}
++	for _, c := range augmentation[1:] {
++		switch c {
++		case 'R':
++			enc, err := r.u8()
++			if err != nil {
++				return cieInfo{}, err
++			}
++			cie.fdeEncoding = enc
++		case 'L':
++			if _, err := r.u8(); err != nil {
++				return cieInfo{}, err
++			}
++		case 'P':
++			enc, err := r.u8()
++			if err != nil {
++				return cieInfo{}, err
++			}
++			// The personality routine is skipped, so only its size matters;
++			// indirect and data-relative encodings are fine here.
++			if _, err := r.encoded(enc & ehFormatMask); err != nil {
++				return cieInfo{}, err
++			}
++		case 'S', 'B', 'G':
++		default:
++			return cieInfo{}, fmt.Errorf("unsupported augmentation %q", augmentation)
++		}
++	}
++	return cie, nil
++}
++
++// reader decodes DWARF-style fields and tracks the address of the field being
++// read, which pc-relative pointers need.
++type reader struct {
++	data  []byte
++	pos   int
++	addr  uint64
++	order binary.ByteOrder
++}
++
++func (r *reader) take(n int) ([]byte, error) {
++	if r.pos+n > len(r.data) {
++		return nil, errors.New("truncated record")
++	}
++	b := r.data[r.pos : r.pos+n]
++	r.pos += n
++	return b, nil
++}
++
++func (r *reader) u8() (byte, error) {
++	b, err := r.take(1)
++	if err != nil {
++		return 0, err
++	}
++	return b[0], nil
++}
++
++func (r *reader) u16() (uint64, error) {
++	b, err := r.take(2)
++	if err != nil {
++		return 0, err
++	}
++	return uint64(r.order.Uint16(b)), nil
++}
++
++func (r *reader) u32() (uint64, error) {
++	b, err := r.take(4)
++	if err != nil {
++		return 0, err
++	}
++	return uint64(r.order.Uint32(b)), nil
++}
++
++func (r *reader) u64() (uint64, error) {
++	b, err := r.take(8)
++	if err != nil {
++		return 0, err
++	}
++	return r.order.Uint64(b), nil
++}
++
++func (r *reader) cstring() (string, error) {
++	for i := r.pos; i < len(r.data); i++ {
++		if r.data[i] == 0 {
++			s := string(r.data[r.pos:i])
++			r.pos = i + 1
++			return s, nil
++		}
++	}
++	return "", errors.New("unterminated string")
++}
++
++func (r *reader) uleb() (uint64, error) {
++	var result uint64
++	var shift uint
++	for {
++		b, err := r.u8()
++		if err != nil {
++			return 0, err
++		}
++		if shift < 64 {
++			result |= uint64(b&0x7f) << shift
++		}
++		shift += 7
++		if b&0x80 == 0 {
++			return result, nil
++		}
++		if shift > 70 {
++			return 0, errors.New("ULEB128 too long")
++		}
++	}
++}
++
++func (r *reader) sleb() (int64, error) {
++	var result int64
++	var shift uint
++	for {
++		b, err := r.u8()
++		if err != nil {
++			return 0, err
++		}
++		if shift < 64 {
++			result |= int64(b&0x7f) << shift
++		}
++		shift += 7
++		if b&0x80 == 0 {
++			if shift < 64 && b&0x40 != 0 {
++				result |= -1 << shift
++			}
++			return result, nil
++		}
++		if shift > 70 {
++			return 0, errors.New("SLEB128 too long")
++		}
++	}
++}
++
++// encoded reads a pointer in the given DW_EH_PE encoding and applies it.
++func (r *reader) encoded(enc byte) (uint64, error) {
++	if enc == dwEHPEomit {
++		return 0, nil
++	}
++	if enc&ehIndirect != 0 {
++		return 0, fmt.Errorf("indirect pointer encoding 0x%x is not supported", enc)
++	}
++	fieldAddr := r.addr + uint64(r.pos)
++	var value uint64
++	var err error
++	switch enc & ehFormatMask {
++	case dwEHPEabsptr, dwEHPEudata8, dwEHPEsdata8:
++		value, err = r.u64()
++	case dwEHPEudata4:
++		value, err = r.u32()
++	case dwEHPEsdata4:
++		var v uint64
++		v, err = r.u32()
++		value = uint64(int64(int32(v)))
++	case dwEHPEudata2:
++		value, err = r.u16()
++	case dwEHPEsdata2:
++		var v uint64
++		v, err = r.u16()
++		value = uint64(int64(int16(v)))
++	case dwEHPEuleb128:
++		value, err = r.uleb()
++	case dwEHPEsleb128:
++		var v int64
++		v, err = r.sleb()
++		value = uint64(v)
++	default:
++		return 0, fmt.Errorf("pointer format 0x%x is not supported", enc&ehFormatMask)
++	}
++	if err != nil {
++		return 0, err
++	}
++	switch enc & ehApplicationMask {
++	case 0:
++		return value, nil
++	case dwEHPEpcrel:
++		return fieldAddr + value, nil
++	default:
++		return 0, fmt.Errorf("pointer application 0x%x is not supported", enc&ehApplicationMask)
++	}
++}
+diff --git a/pkg/internal/pyelf/ehframe_test.go b/pkg/internal/pyelf/ehframe_test.go
+new file mode 100644
+index 000000000..452dbc0be
+--- /dev/null
++++ b/pkg/internal/pyelf/ehframe_test.go
+@@ -0,0 +1,133 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package pyelf
++
++import (
++	"encoding/binary"
++	"testing"
++)
++
++// buildEHFrame assembles a .eh_frame section with one CIE using the "zR"
++// augmentation and the given FDEs as (start, length) pairs encoded pc-relative
++// sdata4, the layout GCC and Clang emit on x86-64 and aarch64.
++func buildEHFrame(sectionAddr uint64, fdes [][2]uint64) []byte {
++	le := binary.LittleEndian
++	var out []byte
++	put32 := func(v uint32) { out = le.AppendUint32(out, v) }
++
++	// CIE: length, id=0, version 1, "zR", code align 1, data align -8 (0x78), return reg 16, aug len 1, enc 0x1b
++	cie := []byte{1, 'z', 'R', 0, 1, 0x78, 16, 1, 0x1b}
++	for len(cie)%4 != 0 {
++		cie = append(cie, 0) // DW_CFA_nop padding
++	}
++	put32(uint32(4 + len(cie)))
++	put32(0)
++	out = append(out, cie...)
++
++	for _, fde := range fdes {
++		recordStart := len(out)
++		put32(0)                    // length, patched below
++		put32(uint32(len(out) - 0)) // CIE pointer: distance from this field back to the CIE at offset 0
++		fieldAddr := sectionAddr + uint64(len(out))
++		put32(uint32(int32(int64(fde[0]) - int64(fieldAddr))))
++		put32(uint32(fde[1]))
++		out = append(out, 0) // augmentation data length
++		for (len(out)-recordStart)%4 != 0 {
++			out = append(out, 0)
++		}
++		le.PutUint32(out[recordStart:], uint32(len(out)-recordStart-4))
++	}
++	put32(0) // terminator
++	return out
++}
++
++func TestParseEHFrameData(t *testing.T) {
++	const sectionAddr = 0x2b8000
++	fdes := [][2]uint64{{0x1000, 0x40}, {0x1040, 0x8c}, {0x40_0000, 1}}
++	data := buildEHFrame(sectionAddr, fdes)
++
++	functions, err := parseEHFrameData(data, sectionAddr, binary.LittleEndian)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(functions) != len(fdes) {
++		t.Fatalf("got %d functions, want %d: %v", len(functions), len(fdes), functions)
++	}
++	for _, fde := range fdes {
++		if got := functions[fde[0]]; got != fde[1] {
++			t.Errorf("function 0x%x: length %d, want %d", fde[0], got, fde[1])
++		}
++	}
++}
++
++func TestParseEHFrameDataRejectsUnknownCIE(t *testing.T) {
++	data := buildEHFrame(0x1000, [][2]uint64{{0x2000, 8}})
++	// The CIE record is 20 bytes (length, id, 12 bytes of body), so the FDE's
++	// CIE pointer sits at offset 24. Point it at something that is not a CIE.
++	binary.LittleEndian.PutUint32(data[24:], 2)
++	if _, err := parseEHFrameData(data, 0x1000, binary.LittleEndian); err == nil {
++		t.Fatal("expected an error for an FDE with a bad CIE pointer")
++	}
++}
++
++func TestParseEHFrameDataRejectsShortRecord(t *testing.T) {
++	data := buildEHFrame(0x1000, [][2]uint64{{0x2000, 8}})
++	binary.LittleEndian.PutUint32(data[20:], 2) // FDE shorter than its CIE pointer field
++	if _, err := parseEHFrameData(data, 0x1000, binary.LittleEndian); err == nil {
++		t.Fatal("expected an error for a record shorter than its header")
++	}
++}
++
++func TestParseEHFrameDataRejectsOverlongRecord(t *testing.T) {
++	data := buildEHFrame(0x1000, [][2]uint64{{0x2000, 8}})
++	binary.LittleEndian.PutUint32(data, 1<<20)
++	if _, err := parseEHFrameData(data, 0x1000, binary.LittleEndian); err == nil {
++		t.Fatal("expected an error for a record longer than the section")
++	}
++}
++
++func TestReaderLEB(t *testing.T) {
++	r := &reader{data: []byte{0xe5, 0x8e, 0x26, 0x7f, 0x80, 0x7f}, order: binary.LittleEndian}
++	if v, err := r.uleb(); err != nil || v != 624485 {
++		t.Fatalf("uleb: %d %v", v, err)
++	}
++	if v, err := r.sleb(); err != nil || v != -1 {
++		t.Fatalf("sleb -1: %d %v", v, err)
++	}
++	if v, err := r.sleb(); err != nil || v != -128 {
++		t.Fatalf("sleb -128: %d %v", v, err)
++	}
++}
++
++func TestReaderEncodedPcrel(t *testing.T) {
++	data := []byte{0xf0, 0xff, 0xff, 0xff}
++	r := &reader{data: data, addr: 0x5000, order: binary.LittleEndian}
++	v, err := r.encoded(dwEHPEpcrel | dwEHPEsdata4)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if v != 0x5000-16 {
++		t.Fatalf("got 0x%x, want 0x%x", v, 0x5000-16)
++	}
++	if _, err := (&reader{data: data, order: binary.LittleEndian}).encoded(0x30 | dwEHPEsdata4); err == nil {
++		t.Fatal("datarel pointers must be rejected")
++	}
++	if _, err := (&reader{data: data, order: binary.LittleEndian}).encoded(ehIndirect | dwEHPEsdata4); err == nil {
++		t.Fatal("indirect pointers must be rejected")
++	}
++}
++
++func TestParseEHFrameDataDropsConflictingFDEs(t *testing.T) {
++	data := buildEHFrame(0x1000, [][2]uint64{{0x2000, 8}, {0x2000, 16}, {0x3000, 4}})
++	functions, err := parseEHFrameData(data, 0x1000, binary.LittleEndian)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := functions[0x2000]; ok {
++		t.Fatal("an address claimed by two FDEs of different lengths must not be trusted")
++	}
++	if functions[0x3000] != 4 {
++		t.Fatalf("the unrelated function must survive: %v", functions)
++	}
++}
+diff --git a/pkg/internal/pyelf/image.go b/pkg/internal/pyelf/image.go
+new file mode 100644
+index 000000000..5857a1131
+--- /dev/null
++++ b/pkg/internal/pyelf/image.go
+@@ -0,0 +1,517 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package pyelf // import "go.opentelemetry.io/obi/pkg/internal/pyelf"
++
++import (
++	"bytes"
++	"debug/elf"
++	"encoding/binary"
++	"errors"
++	"fmt"
++	"io"
++	"regexp"
++
++	"go.opentelemetry.io/obi/pkg/internal/procs"
++)
++
++const (
++	// Longest C string this package ever needs to read (type names, method names).
++	maxCString = 128
++	// Sanity bounds for PyTypeObject.tp_basicsize of the objects we look at;
++	// the smallest is a PyObject header plus one pointer.
++	minBasicSize = 24
++	maxBasicSize = 4096
++	// No CPython function this package derives is anywhere near this long; the
++	// bound keeps a corrupt .eh_frame length from reaching make([]byte, Len).
++	maxFunctionLength = 1 << 20
++	// R_X86_64_RELATIVE and R_AARCH64_RELATIVE: "base address + addend" pointers.
++	relX86Relative     = 8
++	relAArch64Relative = 1027
++	// SHT_RELR is missing from older debug/elf versions.
++	shtRelr elf.SectionType = 19
++)
++
++// Symbols that exist only in the free-threaded (Py_GIL_DISABLED) builds, in
++// libpython as definitions and in extension modules as imports. Their object
++// header is wider, so none of the layouts here apply.
++var freeThreadedSymbols = map[string]bool{
++	"_Py_DecRefShared":           true,
++	"_Py_DecRefSharedDebug":      true,
++	"_Py_MergeZeroLocalRefcount": true,
++}
++
++var ltoPrivate = regexp.MustCompile(`^(.*)\.lto_priv\.\d+$`)
++
++// segment is one PT_LOAD segment of the file.
++type segment struct {
++	vaddr, filesz, memsz uint64
++	// fileOff is where the segment starts in the file; uprobes are attached by
++	// file offset.
++	fileOff uint64
++	exec    bool
++	data    io.ReaderAt
++	prog    *elf.Prog
++}
++
++// region is a chunk of read-only data (a .rodata-like section) held in memory.
++type region struct {
++	addr uint64
++	data []byte
++}
++
++// image is a read-only view of a position-independent ELF shared object: its
++// loadable bytes, the pointers the dynamic linker will fill in, its exported
++// symbols, and the function boundaries recorded in .eh_frame.
++type image struct {
++	machine elf.Machine
++	order   binary.ByteOrder
++
++	segments []segment
++	rodata   []region
++
++	// textAddr and textSize delimit the .text section.
++	textAddr, textSize uint64
++
++	// pointers maps the virtual address of a pointer-sized slot to the value
++	// the dynamic linker stores there (relative to the load base). Only
++	// RELATIVE relocations are recorded; a slot that is missing here is either
++	// NULL, external, or not a pointer at all.
++	pointers map[uint64]uint64
++
++	// dynFuncs maps exported function addresses to their names.
++	dynFuncs map[uint64]string
++	// dynSyms maps exported symbol names to their ELF symbols.
++	dynSyms map[string]elf.Symbol
++
++	// functions maps every .eh_frame FDE start address to the FDE's length.
++	functions map[uint64]uint64
++
++	// symtab holds the names of the FUNC symbols of .symtab by address when the
++	// file still has one; a derived address must then agree with it.
++	symtab map[uint64][]string
++}
++
++func newImage(f *elf.File) (*image, libKind, error) {
++	if f.Class != elf.ELFCLASS64 {
++		return nil, kindUnknown, errors.New("only 64-bit ELF files are supported")
++	}
++	if f.Machine != elf.EM_X86_64 && f.Machine != elf.EM_AARCH64 {
++		return nil, kindUnknown, fmt.Errorf("unsupported machine %s", f.Machine)
++	}
++	if isExecutable(f) {
++		// A python3 binary with libpython linked in (PIE or static-PIE)
++		// exports the same anchors. Only shared libraries are in scope.
++		return nil, kindUnknown, nil
++	}
++
++	dynsyms, err := f.DynamicSymbols()
++	if err != nil {
++		return nil, kindUnknown, fmt.Errorf("reading dynamic symbols: %w", err)
++	}
++	if hasFreeThreadedSymbols(dynsyms) {
++		return nil, kindUnknown, errors.New("free-threaded CPython build")
++	}
++	img := &image{
++		machine:  f.Machine,
++		order:    f.ByteOrder,
++		dynFuncs: map[uint64]string{},
++		dynSyms:  map[string]elf.Symbol{},
++	}
++	for _, s := range dynsyms {
++		if s.Section == elf.SHN_UNDEF {
++			continue
++		}
++		img.dynSyms[s.Name] = s
++		if elf.ST_TYPE(s.Info) == elf.STT_FUNC {
++			img.dynFuncs[s.Value] = s.Name
++		}
++	}
++
++	kind := kindUnknown
++	switch {
++	case img.dynSymbol(anchorLibpython, elf.STT_OBJECT) != nil:
++		kind = kindLibpython
++	case img.dynSymbol(anchorAsyncio, elf.STT_FUNC) != nil:
++		kind = kindAsyncio
++	default:
++		return nil, kindUnknown, nil
++	}
++
++	text := f.Section(".text")
++	if text == nil || text.Size == 0 {
++		return nil, kindUnknown, errors.New("no .text section")
++	}
++	img.textAddr, img.textSize = text.Addr, text.Size
++
++	for _, p := range f.Progs {
++		if p.Type != elf.PT_LOAD {
++			continue
++		}
++		img.segments = append(img.segments, segment{
++			vaddr: p.Vaddr, filesz: p.Filesz, memsz: p.Memsz, fileOff: p.Off,
++			exec: p.Flags&elf.PF_X != 0, data: p, prog: p,
++		})
++	}
++	for _, sec := range f.Sections {
++		if sec.Type != elf.SHT_PROGBITS || sec.Flags&elf.SHF_ALLOC == 0 ||
++			sec.Flags&elf.SHF_EXECINSTR != 0 || sec.Flags&elf.SHF_WRITE != 0 || sec.Size == 0 {
++			continue
++		}
++		data, err := sec.Data()
++		if err != nil {
++			return nil, kindUnknown, fmt.Errorf("reading %s: %w", sec.Name, err)
++		}
++		img.rodata = append(img.rodata, region{addr: sec.Addr, data: data})
++	}
++
++	if err := img.loadPointers(f); err != nil {
++		return nil, kindUnknown, fmt.Errorf("reading relocations: %w", err)
++	}
++	functions, err := parseEHFrame(f)
++	if err != nil {
++		return nil, kindUnknown, fmt.Errorf("reading .eh_frame: %w", err)
++	}
++	if len(functions) == 0 {
++		return nil, kindUnknown, errors.New(".eh_frame describes no functions")
++	}
++	img.functions = functions
++
++	if symtab := f.Section(".symtab"); symtab != nil && symtab.Size > 0 {
++		syms, err := f.Symbols()
++		if err != nil && !errors.Is(err, elf.ErrNoSymbols) {
++			return nil, kindUnknown, fmt.Errorf("reading .symtab: %w", err)
++		}
++		img.symtab = map[uint64][]string{}
++		for _, s := range syms {
++			if elf.ST_TYPE(s.Info) == elf.STT_FUNC {
++				img.symtab[s.Value] = append(img.symtab[s.Value], s.Name)
++			}
++		}
++	}
++	return img, kind, nil
++}
++
++// isExecutable reports whether the file is a program rather than a library: it
++// names an interpreter, or is a static PIE (DF_1_PIE in DT_FLAGS_1).
++func isExecutable(f *elf.File) bool {
++	for _, p := range f.Progs {
++		if p.Type == elf.PT_INTERP {
++			return true
++		}
++	}
++	const df1PIE = 0x08000000
++	flags, err := f.DynValue(elf.DT_FLAGS_1)
++	if err != nil {
++		return false
++	}
++	for _, v := range flags {
++		if v&df1PIE != 0 {
++			return true
++		}
++	}
++	return false
++}
++
++// hasFreeThreadedSymbols reports whether the dynamic symbols, defined or
++// imported, include one that only free-threaded builds have.
++func hasFreeThreadedSymbols(dynsyms []elf.Symbol) bool {
++	for _, s := range dynsyms {
++		if freeThreadedSymbols[s.Name] {
++			return true
++		}
++	}
++	return false
++}
++
++func (img *image) dynSymbol(name string, typ elf.SymType) *elf.Symbol {
++	s, ok := img.dynSyms[name]
++	if !ok || elf.ST_TYPE(s.Info) != typ {
++		return nil
++	}
++	return &s
++}
++
++// loadPointers collects the RELATIVE relocations from every RELA and RELR
++// section. The in-place words of a RELA slot are not trusted (linkers leave
++// them zero or stale); a RELR slot stores its addend in place by definition.
++func (img *image) loadPointers(f *elf.File) error {
++	img.pointers = map[uint64]uint64{}
++	relativeType := uint32(relX86Relative)
++	if img.machine == elf.EM_AARCH64 {
++		relativeType = relAArch64Relative
++	}
++	for _, sec := range f.Sections {
++		if sec.Flags&elf.SHF_ALLOC == 0 {
++			continue // --emit-relocs leftovers are not applied by the loader
++		}
++		switch sec.Type {
++		case elf.SHT_RELA:
++			data, err := sec.Data()
++			if err != nil {
++				return err
++			}
++			if err := img.loadRela(data, relativeType); err != nil {
++				return err
++			}
++		case shtRelr:
++			data, err := sec.Data()
++			if err != nil {
++				return err
++			}
++			if err := decodeRelr(data, img.order, img.addRelrSlot); err != nil {
++				return err
++			}
++		}
++	}
++	return nil
++}
++
++func (img *image) loadRela(data []byte, relativeType uint32) error {
++	const entrySize = 24
++	if len(data)%entrySize != 0 {
++		return errors.New("RELA section size is not a multiple of the entry size")
++	}
++	for off := 0; off < len(data); off += entrySize {
++		rOffset := img.order.Uint64(data[off:])
++		rInfo := img.order.Uint64(data[off+8:])
++		addend := img.order.Uint64(data[off+16:])
++		if uint32(rInfo) != relativeType {
++			continue
++		}
++		img.pointers[rOffset] = addend
++	}
++	return nil
++}
++
++// decodeRelr walks the compact RELR format: an even entry names a slot, an odd
++// entry is a bitmap of the 63 slots that follow the previous address.
++func decodeRelr(data []byte, order binary.ByteOrder, apply func(slot uint64) error) error {
++	if len(data)%8 != 0 {
++		return errors.New("RELR section size is not a multiple of 8")
++	}
++	var where uint64
++	for off := 0; off < len(data); off += 8 {
++		entry := order.Uint64(data[off:])
++		if entry&1 == 0 {
++			if err := apply(entry); err != nil {
++				return err
++			}
++			where = entry + 8
++			continue
++		}
++		for i := uint64(0); entry>>(i+1) != 0; i++ {
++			if entry>>(i+1)&1 == 1 {
++				if err := apply(where + i*8); err != nil {
++					return err
++				}
++			}
++		}
++		where += 63 * 8
++	}
++	return nil
++}
++
++func (img *image) addRelrSlot(slot uint64) error {
++	word, ok := img.word(slot)
++	if !ok {
++		return fmt.Errorf("RELR slot 0x%x is outside the loaded segments", slot)
++	}
++	img.pointers[slot] = word
++	return nil
++}
++
++// read returns n bytes at a virtual address from the file-backed part of a
++// PT_LOAD segment.
++func (img *image) read(vaddr, n uint64) ([]byte, bool) {
++	if n == 0 || vaddr+n < vaddr {
++		return nil, false
++	}
++	for i := range img.segments {
++		s := &img.segments[i]
++		if vaddr < s.vaddr || vaddr+n > s.vaddr+s.filesz {
++			continue
++		}
++		buf := make([]byte, n)
++		if _, err := s.data.ReadAt(buf, int64(vaddr-s.vaddr)); err != nil {
++			return nil, false
++		}
++		return buf, true
++	}
++	return nil, false
++}
++
++// pointer returns the linker-filled value of a pointer slot.
++func (img *image) pointer(slot uint64) (uint64, bool) {
++	v, ok := img.pointers[slot]
++	return v, ok
++}
++
++// word reads a raw 64-bit value that is not a pointer (sizes, flags).
++func (img *image) word(vaddr uint64) (uint64, bool) {
++	b, ok := img.read(vaddr, 8)
++	if !ok {
++		return 0, false
++	}
++	return img.order.Uint64(b), true
++}
++
++func (img *image) word32(vaddr uint64) (uint32, bool) {
++	b, ok := img.read(vaddr, 4)
++	if !ok {
++		return 0, false
++	}
++	return img.order.Uint32(b), true
++}
++
++// cstring reads a NUL-terminated string of at most maxCString bytes.
++func (img *image) cstring(vaddr uint64) (string, bool) {
++	for n := uint64(1); n <= maxCString; n++ {
++		b, ok := img.read(vaddr, n)
++		if !ok {
++			return "", false
++		}
++		if b[n-1] == 0 {
++			return string(b[:n-1]), true
++		}
++	}
++	return "", false
++}
++
++// stringAt follows a pointer slot and reads the C string it points at.
++func (img *image) stringAt(slot uint64) (string, bool) {
++	p, ok := img.pointer(slot)
++	if !ok {
++		return "", false
++	}
++	return img.cstring(p)
++}
++
++// slotsPointingAt lists every pointer slot whose value is the given address.
++func (img *image) slotsPointingAt(target uint64) []uint64 {
++	var slots []uint64
++	for slot, v := range img.pointers {
++		if v == target {
++			slots = append(slots, slot)
++		}
++	}
++	return slots
++}
++
++// findCString locates a NUL-terminated string in the read-only data of the
++// file. It requires exactly one occurrence that is itself the start of a
++// string (preceded by NUL or a section start), so "Task" does not match inside
++// "_asyncio.Task".
++func (img *image) findCString(s string) (uint64, error) {
++	needle := append([]byte(s), 0)
++	var hits []uint64
++	for _, r := range img.rodata {
++		from := 0
++		for {
++			i := bytes.Index(r.data[from:], needle)
++			if i < 0 {
++				break
++			}
++			at := from + i
++			from = at + 1
++			if at > 0 && r.data[at-1] != 0 {
++				continue
++			}
++			hits = append(hits, r.addr+uint64(at))
++		}
++	}
++	switch len(hits) {
++	case 0:
++		return 0, fmt.Errorf("string %q not found", s)
++	case 1:
++		return hits[0], nil
++	default:
++		return 0, fmt.Errorf("string %q found %d times", s, len(hits))
++	}
++}
++
++// inText reports whether an address lies inside the .text section.
++func (img *image) inText(addr uint64) bool {
++	return addr >= img.textAddr && addr < img.textAddr+img.textSize
++}
++
++// function validates a derived code address and turns it into a symbol: it
++// must be inside .text, start a function according to .eh_frame whose length
++// stays inside .text, not be an exported function under another name, agree
++// with .symtab when the file still has one, and carry the same entry marker
++// (endbr64 / bti) as the exported reference function when one is given.
++func (img *image) function(name string, addr uint64, reference *elf.Symbol) (procs.Sym, error) {
++	if !img.inText(addr) {
++		return procs.Sym{}, problemf("%s: 0x%x is outside .text", name, addr)
++	}
++	length, ok := img.functions[addr]
++	if !ok {
++		return procs.Sym{}, problemf("%s: 0x%x does not start a function in .eh_frame", name, addr)
++	}
++	if length > maxFunctionLength || addr+length > img.textAddr+img.textSize {
++		return procs.Sym{}, problemf("%s: 0x%x has an implausible length %d", name, addr, length)
++	}
++	if other, exported := img.dynFuncs[addr]; exported && other != name {
++		return procs.Sym{}, problemf("%s: 0x%x is the exported function %s", name, addr, other)
++	}
++	if img.symtab != nil && !img.symtabAgrees(name, addr) {
++		return procs.Sym{}, problemf("%s: 0x%x is %v in .symtab", name, addr, img.symtab[addr])
++	}
++	if reference != nil {
++		refMarked, ok := img.hasEntryMarker(reference.Value)
++		if !ok {
++			return procs.Sym{}, problemf("%s: cannot read the reference function %s", name, reference.Name)
++		}
++		marked, ok := img.hasEntryMarker(addr)
++		if !ok {
++			return procs.Sym{}, problemf("%s: cannot read the code at 0x%x", name, addr)
++		}
++		if refMarked && !marked {
++			return procs.Sym{}, problemf("%s: 0x%x lacks the entry marker that %s has", name, addr, reference.Name)
++		}
++	}
++	for i := range img.segments {
++		s := &img.segments[i]
++		if !s.exec || addr < s.vaddr || addr >= s.vaddr+s.memsz {
++			continue
++		}
++		return procs.Sym{Name: name, Off: addr - s.vaddr + s.fileOff, Value: addr, Len: length, Prog: s.prog}, nil
++	}
++	return procs.Sym{}, problemf("%s: 0x%x is not in an executable segment", name, addr)
++}
++
++// symtabAgrees reports whether .symtab names the function at addr as name, or
++// as its LTO-private clone name.lto_priv.N.
++func (img *image) symtabAgrees(name string, addr uint64) bool {
++	for _, n := range img.symtab[addr] {
++		if n == name {
++			return true
++		}
++		if m := ltoPrivate.FindStringSubmatch(n); m != nil && m[1] == name {
++			return true
++		}
++	}
++	return false
++}
++
++// hasEntryMarker reports whether the code at addr starts with the landing pad
++// the toolchain emits on CET / BTI builds (endbr64, bti, or the paciasp /
++// pacibsp that double as landing pads on aarch64).
++func (img *image) hasEntryMarker(addr uint64) (bool, bool) {
++	b, ok := img.read(addr, 4)
++	if !ok {
++		return false, false
++	}
++	switch img.machine {
++	case elf.EM_X86_64:
++		return isEndbr(b), true
++	case elf.EM_AARCH64:
++		switch img.order.Uint32(b) {
++		case 0xD503245F, 0xD503249F, 0xD50324DF, // bti c / bti j / bti jc
++			0xD503233F, 0xD503237F: // paciasp / pacibsp
++			return true, true
++		}
++		return false, true
++	}
++	return false, true
++}
+diff --git a/pkg/internal/pyelf/libpython.go b/pkg/internal/pyelf/libpython.go
+new file mode 100644
+index 000000000..5a090715e
+--- /dev/null
++++ b/pkg/internal/pyelf/libpython.go
+@@ -0,0 +1,91 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package pyelf // import "go.opentelemetry.io/obi/pkg/internal/pyelf"
++
++import (
++	"debug/elf"
++	"slices"
++
++	"go.opentelemetry.io/obi/pkg/internal/procs"
++)
++
++// synthesizeLibpython derives the context functions from libpython:
++//
++//	context_run           PyContext_Type.tp_methods["run"]
++//	context_tp_dealloc    PyContext_Type.tp_dealloc
++//	context_new_empty     the function the PyContext_New trampoline jumps into
++//	context_new_from_vars the function PyContext_CopyCurrent tail-jumps into,
++//	                      which PyContext_Copy must reach as well
++func synthesizeLibpython(img *image, names []string) (map[string]procs.Sym, []error) {
++	out := map[string]procs.Sym{}
++	var problems []error
++	add := func(name string, addr uint64, reference *elf.Symbol) {
++		sym, err := img.function(name, addr, reference)
++		if err != nil {
++			problems = append(problems, err)
++			return
++		}
++		out[name] = sym
++	}
++
++	// Functions stored in type slots are address-taken, so they carry the same
++	// entry marker as the exported ones; the tail-jump targets may not.
++	reference := img.dynSymbol("PyContext_CopyCurrent", elf.STT_FUNC)
++
++	if wanted(names, SymContextRun) || wanted(names, SymContextDealloc) {
++		typ := img.dynSymbol(anchorLibpython, elf.STT_OBJECT)
++		// The type was called plain "Context" before 3.10.
++		t, err := img.typeObject(typ.Value, "_contextvars.Context", "Context")
++		if err != nil {
++			problems = append(problems, err)
++		} else {
++			if wanted(names, SymContextDealloc) {
++				if addr, err := t.slotFunc(tpDealloc); err != nil {
++					problems = append(problems, err)
++				} else {
++					add(SymContextDealloc, addr, reference)
++				}
++			}
++			if wanted(names, SymContextRun) {
++				if addr, err := t.method("run", methFastcall|methKeywords); err != nil {
++					problems = append(problems, err)
++				} else {
++					add(SymContextRun, addr, reference)
++				}
++			}
++		}
++	}
++
++	if wanted(names, SymContextNewEmpty) {
++		if addr, err := img.uniqueTailTarget("PyContext_New", true); err != nil {
++			problems = append(problems, err)
++		} else {
++			add(SymContextNewEmpty, addr, nil)
++		}
++	}
++
++	if wanted(names, SymContextNewFromVars) {
++		addr, err := img.uniqueTailTarget("PyContext_CopyCurrent", false)
++		if err != nil {
++			problems = append(problems, err)
++			return out, problems
++		}
++		copySym := img.dynSymbol("PyContext_Copy", elf.STT_FUNC)
++		if copySym == nil {
++			problems = append(problems, problemf("PyContext_Copy is not exported"))
++			return out, problems
++		}
++		reached, err := img.hiddenTargets(copySym.Value, copySym.Size, false)
++		if err != nil {
++			problems = append(problems, problemf("PyContext_Copy: %w", err))
++			return out, problems
++		}
++		if !slices.Contains(reached, addr) {
++			problems = append(problems, problemf("PyContext_Copy does not reach the function PyContext_CopyCurrent jumps to"))
++			return out, problems
++		}
++		add(SymContextNewFromVars, addr, nil)
++	}
++	return out, problems
++}
+diff --git a/pkg/internal/pyelf/oracle_test.go b/pkg/internal/pyelf/oracle_test.go
+new file mode 100644
+index 000000000..94bee28d7
+--- /dev/null
++++ b/pkg/internal/pyelf/oracle_test.go
+@@ -0,0 +1,251 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package pyelf
++
++import (
++	"debug/elf"
++	"log/slog"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"regexp"
++	"strings"
++	"testing"
++)
++
++// The oracle test runs against real CPython builds when OBI_PYELF_FIXTURES
++// points at a directory laid out as <version>/<full|slim>/<arch>/ holding
++// libpython<version>.so.1.0 and the _asyncio extension module of the official
++// python:<version> and python:<version>-slim images. The "full" builds keep
++// .symtab, which gives the expected addresses; the "slim" builds are what the
++// package exists for.
++func fixtureDir(t *testing.T) string {
++	t.Helper()
++	dir := os.Getenv("OBI_PYELF_FIXTURES")
++	if dir == "" {
++		t.Skip("OBI_PYELF_FIXTURES not set")
++	}
++	return dir
++}
++
++var libpythonNames = []string{SymContextRun, SymContextDealloc, SymContextNewEmpty, SymContextNewFromVars}
++
++var asyncioNames = []string{SymTaskInit, SymTaskStep}
++
++// Only the LTO-private clone keeps the function's ABI; .isra, .constprop and
++// .part clones may drop or reorder arguments and must never be derived.
++var ltoSuffix = regexp.MustCompile(`\.lto_priv\.\d+$`)
++
++var abiChangingClone = regexp.MustCompile(`\.(constprop|isra|part)\.\d+$`)
++
++type expectedSym struct {
++	value, size uint64
++}
++
++func symtabExpectations(t *testing.T, f *elf.File, names []string) map[string]expectedSym {
++	t.Helper()
++	syms, err := f.Symbols()
++	if err != nil {
++		t.Fatalf("reading .symtab: %v", err)
++	}
++	out := map[string]expectedSym{}
++	for _, s := range syms {
++		if elf.ST_TYPE(s.Info) != elf.STT_FUNC || s.Size == 0 {
++			continue
++		}
++		if clone := abiChangingClone.ReplaceAllString(s.Name, ""); clone != s.Name && contains(names, clone) {
++			t.Errorf("%s exists as the clone %s; a derivation must not land on it", clone, s.Name)
++		}
++		name := ltoSuffix.ReplaceAllString(s.Name, "")
++		if !contains(names, name) {
++			continue
++		}
++		if _, dup := out[name]; dup {
++			t.Fatalf("symbol %s appears twice in .symtab", name)
++		}
++		out[name] = expectedSym{value: s.Value, size: s.Size}
++	}
++	return out
++}
++
++type fixture struct {
++	version, variant, arch, path string
++	names                        []string
++}
++
++func fixtures(t *testing.T, dir string) []fixture {
++	t.Helper()
++	var out []fixture
++	versions, err := os.ReadDir(dir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, v := range versions {
++		if !v.IsDir() {
++			continue
++		}
++		for _, variant := range []string{"full", "slim"} {
++			archs, err := os.ReadDir(filepath.Join(dir, v.Name(), variant))
++			if err != nil {
++				continue
++			}
++			for _, a := range archs {
++				base := filepath.Join(dir, v.Name(), variant, a.Name())
++				files, err := os.ReadDir(base)
++				if err != nil {
++					t.Fatal(err)
++				}
++				for _, file := range files {
++					path := filepath.Join(base, file.Name())
++					switch {
++					case strings.HasPrefix(file.Name(), "libpython"):
++						out = append(out, fixture{v.Name(), variant, a.Name(), path, libpythonNames})
++					case strings.HasPrefix(file.Name(), "_asyncio"):
++						out = append(out, fixture{v.Name(), variant, a.Name(), path, asyncioNames})
++					}
++				}
++			}
++		}
++	}
++	if len(out) == 0 {
++		t.Fatalf("no fixtures under %s", dir)
++	}
++	return out
++}
++
++func testLogger(t *testing.T) *slog.Logger {
++	t.Helper()
++	return slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelDebug}))
++}
++
++type testWriter struct{ t *testing.T }
++
++func (w testWriter) Write(p []byte) (int, error) {
++	w.t.Log(strings.TrimRight(string(p), "\n"))
++	return len(p), nil
++}
++
++// TestOracleFullBuilds checks the derived addresses against .symtab on the
++// builds that still have one.
++func TestOracleFullBuilds(t *testing.T) {
++	for _, fx := range fixtures(t, fixtureDir(t)) {
++		if fx.variant != "full" {
++			continue
++		}
++		t.Run(fx.version+"/"+fx.arch+"/"+filepath.Base(fx.path), func(t *testing.T) {
++			f, err := elf.Open(fx.path)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer f.Close()
++			expected := symtabExpectations(t, f, fx.names)
++			got := Synthesize(f, fx.path, fx.names, testLogger(t))
++			for _, name := range fx.names {
++				want, known := expected[name]
++				if !known {
++					t.Errorf("%s: not in .symtab, cannot check", name)
++					continue
++				}
++				sym, ok := got[name]
++				if !ok {
++					t.Errorf("%s: not derived (expected 0x%x)", name, want.value)
++					continue
++				}
++				if sym.Value != want.value || sym.Len != want.size {
++					t.Errorf("%s: derived 0x%x len %d, .symtab says 0x%x len %d", name, sym.Value, sym.Len, want.value, want.size)
++				}
++			}
++			for name := range got {
++				if !contains(fx.names, name) {
++					t.Errorf("unexpected symbol %s derived", name)
++				}
++			}
++		})
++	}
++}
++
++// TestOracleStrippedCopies strips the full builds with binutils and checks
++// that the derivation from the stripped copy equals the original .symtab.
++func TestOracleStrippedCopies(t *testing.T) {
++	strip, err := exec.LookPath("strip")
++	if err != nil {
++		t.Skip("strip not available")
++	}
++	for _, fx := range fixtures(t, fixtureDir(t)) {
++		if fx.variant != "full" {
++			continue
++		}
++		t.Run(fx.version+"/"+fx.arch+"/"+filepath.Base(fx.path), func(t *testing.T) {
++			stripped := filepath.Join(t.TempDir(), filepath.Base(fx.path))
++			if out, err := exec.Command(strip, "--strip-all", "-o", stripped, fx.path).CombinedOutput(); err != nil {
++				t.Skipf("strip failed: %v: %s", err, out)
++			}
++			original, err := elf.Open(fx.path)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer original.Close()
++			expected := symtabExpectations(t, original, fx.names)
++
++			f, err := elf.Open(stripped)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer f.Close()
++			if _, err := f.Symbols(); err == nil {
++				t.Fatal("stripped copy still has a symbol table")
++			}
++			got := Synthesize(f, stripped, fx.names, testLogger(t))
++			for _, name := range fx.names {
++				want := expected[name]
++				sym, ok := got[name]
++				if !ok {
++					t.Errorf("%s: not derived from the stripped copy (expected 0x%x)", name, want.value)
++					continue
++				}
++				if sym.Value != want.value || sym.Len != want.size {
++					t.Errorf("%s: derived 0x%x len %d, .symtab says 0x%x len %d", name, sym.Value, sym.Len, want.value, want.size)
++				}
++			}
++		})
++	}
++}
++
++// TestOracleSlimBuilds checks that the official slim builds, which never had a
++// symbol table, yield every symbol.
++func TestOracleSlimBuilds(t *testing.T) {
++	for _, fx := range fixtures(t, fixtureDir(t)) {
++		if fx.variant != "slim" {
++			continue
++		}
++		t.Run(fx.version+"/"+fx.arch+"/"+filepath.Base(fx.path), func(t *testing.T) {
++			f, err := elf.Open(fx.path)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer f.Close()
++			if _, err := f.Symbols(); err == nil {
++				t.Skip("this build has a symbol table")
++			}
++			got := Synthesize(f, fx.path, fx.names, testLogger(t))
++			for _, name := range fx.names {
++				sym, ok := got[name]
++				if !ok {
++					t.Errorf("%s: not derived", name)
++					continue
++				}
++				t.Logf("%s at 0x%x len %d", name, sym.Value, sym.Len)
++			}
++		})
++	}
++}
++
++func contains(names []string, name string) bool {
++	for _, n := range names {
++		if n == name {
++			return true
++		}
++	}
++	return false
++}
+diff --git a/pkg/internal/pyelf/pyelf.go b/pkg/internal/pyelf/pyelf.go
+new file mode 100644
+index 000000000..cc6e34474
+--- /dev/null
++++ b/pkg/internal/pyelf/pyelf.go
+@@ -0,0 +1,132 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++// Package pyelf derives the addresses of CPython's internal functions that the
++// Python probes attach to when the shared library carries no symbol table.
++//
++// The official python:3.x-slim images strip .symtab from libpython and from
++// _asyncio, so none of the static functions OBI probes (context_run, task_step,
++// ...) can be found by name. Every one of them is still reachable from data the
++// linker cannot strip: type slots and method tables point at them through
++// dynamic relocations, and the exported wrappers tail-jump into them. This
++// package follows those pointers and only returns an address when every
++// structural check passes, since a wrong uprobe address can crash the
++// instrumented process.
++package pyelf // import "go.opentelemetry.io/obi/pkg/internal/pyelf"
++
++import (
++	"debug/elf"
++	"fmt"
++	"log/slog"
++	"slices"
++
++	"go.opentelemetry.io/obi/pkg/internal/procs"
++)
++
++// Symbol names this package knows how to derive.
++const (
++	SymContextRun         = "context_run"
++	SymContextDealloc     = "context_tp_dealloc"
++	SymContextNewEmpty    = "context_new_empty"
++	SymContextNewFromVars = "context_new_from_vars"
++	SymTaskInit           = "_asyncio_Task___init__"
++	SymTaskStep           = "task_step"
++)
++
++var derivableNames = []string{
++	SymContextRun, SymContextDealloc, SymContextNewEmpty, SymContextNewFromVars,
++	SymTaskInit, SymTaskStep,
++}
++
++// Derivable reports whether this package can derive the named symbol.
++func Derivable(name string) bool {
++	return slices.Contains(derivableNames, name)
++}
++
++// Synthesize returns addresses for the requested symbol names that could be
++// derived from the ELF structure of a stripped libpython or _asyncio shared
++// library. Names it cannot derive, or whose derivation fails any check, are
++// left out. It never returns an error: the caller treats a missing name
++// exactly as a symbol that is not in the file.
++func Synthesize(f *elf.File, path string, names []string, log *slog.Logger) (found map[string]procs.Sym) {
++	if log == nil {
++		log = slog.Default()
++	}
++	log = log.With("path", path)
++	// A malformed library must never take the instrumenter down with it.
++	defer func() {
++		if r := recover(); r != nil {
++			log.Warn("pyelf: inspecting the library failed", "panic", r)
++			found = nil
++		}
++	}()
++
++	var wanted []string
++	for _, n := range names {
++		if Derivable(n) {
++			wanted = append(wanted, n)
++		}
++	}
++	if len(wanted) == 0 || f == nil || f.Type != elf.ET_DYN {
++		return nil
++	}
++
++	img, kind, err := newImage(f)
++	if err != nil {
++		log.Debug("pyelf: not deriving probe addresses", "reason", err.Error())
++		return nil
++	}
++	if kind == kindUnknown {
++		return nil
++	}
++
++	var problems []error
++	switch kind {
++	case kindLibpython:
++		found, problems = synthesizeLibpython(img, wanted)
++	case kindAsyncio:
++		found, problems = synthesizeAsyncio(img, wanted)
++	}
++	for _, p := range problems {
++		log.Debug("pyelf: derivation skipped", "reason", p.Error())
++	}
++	if len(found) == 0 {
++		if img.symtab == nil && len(problems) > 0 {
++			log.Warn("Python library has no symbol table and no probe address could be derived from it; " +
++				"Python context tracking stays off for this process")
++		}
++		return nil
++	}
++	resolved := make([]string, 0, len(found))
++	for name := range found {
++		resolved = append(resolved, name)
++	}
++	slices.Sort(resolved)
++	if img.symtab == nil {
++		log.Info("derived Python probe addresses from a stripped library", "symbols", resolved)
++	} else {
++		log.Debug("derived Python probe addresses", "symbols", resolved)
++	}
++	return found
++}
++
++type libKind int
++
++const (
++	kindUnknown libKind = iota
++	kindLibpython
++	kindAsyncio
++)
++
++const (
++	anchorLibpython = "PyContext_Type"
++	anchorAsyncio   = "PyInit__asyncio"
++)
++
++func wanted(names []string, name string) bool {
++	return slices.Contains(names, name)
++}
++
++func problemf(format string, args ...any) error {
++	return fmt.Errorf(format, args...)
++}
+diff --git a/pkg/internal/pyelf/reloc_test.go b/pkg/internal/pyelf/reloc_test.go
+new file mode 100644
+index 000000000..b477f8243
+--- /dev/null
++++ b/pkg/internal/pyelf/reloc_test.go
+@@ -0,0 +1,62 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package pyelf
++
++import (
++	"encoding/binary"
++	"testing"
++)
++
++func TestLoadRela(t *testing.T) {
++	le := binary.LittleEndian
++	var data []byte
++	entry := func(offset uint64, typ uint32, sym uint32, addend uint64) {
++		data = le.AppendUint64(data, offset)
++		data = le.AppendUint64(data, uint64(sym)<<32|uint64(typ))
++		data = le.AppendUint64(data, addend)
++	}
++	entry(0x3000, relX86Relative, 0, 0x1234)
++	entry(0x3008, 1 /* R_X86_64_64 */, 7, 0x5678) // symbolic, must be ignored
++	entry(0x3010, relX86Relative, 0, 0x9abc)
++
++	img := &image{order: le, pointers: map[uint64]uint64{}}
++	if err := img.loadRela(data, relX86Relative); err != nil {
++		t.Fatal(err)
++	}
++	if len(img.pointers) != 2 || img.pointers[0x3000] != 0x1234 || img.pointers[0x3010] != 0x9abc {
++		t.Fatalf("pointers: %v", img.pointers)
++	}
++	if err := img.loadRela(data[:23], relX86Relative); err == nil {
++		t.Fatal("expected an error for a truncated table")
++	}
++}
++
++func TestDecodeRelr(t *testing.T) {
++	le := binary.LittleEndian
++	var data []byte
++	data = le.AppendUint64(data, 0x3000) // address entry
++	data = le.AppendUint64(data, 0b1011) // bitmap (marker bit set): slots +0 and +16 after 0x3000
++	data = le.AppendUint64(data, 0x8000) // another address entry
++
++	var slots []uint64
++	err := decodeRelr(data, le, func(slot uint64) error {
++		slots = append(slots, slot)
++		return nil
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	want := []uint64{0x3000, 0x3008, 0x3018, 0x8000}
++	if len(slots) != len(want) {
++		t.Fatalf("slots %#x, want %#x", slots, want)
++	}
++	for i := range want {
++		if slots[i] != want[i] {
++			t.Errorf("slot %d: got 0x%x, want 0x%x", i, slots[i], want[i])
++		}
++	}
++	if err := decodeRelr(data[:12], le, func(uint64) error { return nil }); err == nil {
++		t.Fatal("expected an error for a truncated table")
++	}
++}
+diff --git a/pkg/internal/pyelf/synthetic_test.go b/pkg/internal/pyelf/synthetic_test.go
+new file mode 100644
+index 000000000..9be9d25e5
+--- /dev/null
++++ b/pkg/internal/pyelf/synthetic_test.go
+@@ -0,0 +1,482 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package pyelf
++
++import (
++	"bytes"
++	"debug/elf"
++	"encoding/binary"
++	"go.opentelemetry.io/obi/pkg/internal/procs"
++	"log/slog"
++	"os"
++	"testing"
++)
++
++// fake builds an image by hand: one segment at 0x1000 holding code (.text,
++// 0x1000-0x2000), strings (0x3000-0x4000) and objects (0x4000-0x6000).
++type fake struct {
++	t   *testing.T
++	mem []byte
++	img *image
++}
++
++const (
++	fakeBase    = 0x1000
++	fakeTextEnd = 0x2000
++	fakeStrings = 0x3000
++	fakeObjects = 0x4000
++	fakeEnd     = 0x6000
++)
++
++func newFake(t *testing.T) *fake {
++	t.Helper()
++	f := &fake{t: t, mem: make([]byte, fakeEnd-fakeBase)}
++	f.img = &image{
++		machine:   elf.EM_X86_64,
++		order:     binary.LittleEndian,
++		textAddr:  fakeBase,
++		textSize:  fakeTextEnd - fakeBase,
++		pointers:  map[uint64]uint64{},
++		dynFuncs:  map[uint64]string{},
++		dynSyms:   map[string]elf.Symbol{},
++		functions: map[uint64]uint64{},
++	}
++	f.img.segments = []segment{{vaddr: fakeBase, filesz: uint64(len(f.mem)), memsz: uint64(len(f.mem)), exec: true, data: bytes.NewReader(f.mem)}}
++	f.img.rodata = []region{{addr: fakeStrings, data: f.mem[fakeStrings-fakeBase : fakeObjects-fakeBase]}}
++	return f
++}
++
++func (f *fake) put(addr uint64, b []byte) { copy(f.mem[addr-fakeBase:], b) }
++
++func (f *fake) str(addr uint64, s string) { f.put(addr, append([]byte(s), 0)) }
++
++func (f *fake) u64(addr, v uint64) { binary.LittleEndian.PutUint64(f.mem[addr-fakeBase:], v) }
++
++func (f *fake) u32(addr uint64, v uint32) { binary.LittleEndian.PutUint32(f.mem[addr-fakeBase:], v) }
++
++func (f *fake) ptr(slot, value uint64) { f.img.pointers[slot] = value }
++
++// fn places a function body and registers its FDE.
++func (f *fake) fn(addr uint64, code []byte) {
++	f.put(addr, code)
++	f.img.functions[addr] = uint64(len(code))
++}
++
++func (f *fake) export(name string, addr, size uint64, typ elf.SymType) {
++	sym := elf.Symbol{Name: name, Info: byte(elf.STB_GLOBAL)<<4 | byte(typ), Value: addr, Size: size, Section: 1}
++	f.img.dynSyms[name] = sym
++	if typ == elf.STT_FUNC {
++		f.img.dynFuncs[addr] = name
++	}
++}
++
++var (
++	endbr = []byte{0xf3, 0x0f, 0x1e, 0xfa}
++	ret   = []byte{0xc3}
++)
++
++func rel32(op byte, from, target uint64) []byte {
++	out := []byte{op, 0, 0, 0, 0}
++	binary.LittleEndian.PutUint32(out[1:], uint32(int32(int64(target)-int64(from+5))))
++	return out
++}
++
++func jmp(from, target uint64) []byte  { return rel32(0xe9, from, target) }
++func call(from, target uint64) []byte { return rel32(0xe8, from, target) }
++
++func cat(parts ...[]byte) []byte {
++	var out []byte
++	for _, p := range parts {
++		out = append(out, p...)
++	}
++	return out
++}
++
++func body(addr uint64, parts ...func(uint64) []byte) []byte {
++	var out []byte
++	for _, p := range parts {
++		out = append(out, p(addr+uint64(len(out)))...)
++	}
++	return out
++}
++
++func lit(b []byte) func(uint64) []byte { return func(uint64) []byte { return b } }
++
++func jmpTo(target uint64) func(uint64) []byte {
++	return func(at uint64) []byte { return jmp(at, target) }
++}
++func callTo(target uint64) func(uint64) []byte {
++	return func(at uint64) []byte { return call(at, target) }
++}
++
++const (
++	addrContextRun      = 0x1100
++	addrContextDealloc  = 0x1200
++	addrContextNewEmpty = 0x1300
++	addrContextFromVars = 0x1400
++	addrContextGet      = 0x1500
++	addrPyContextNew    = 0x1600
++	addrCopyCurrent     = 0x1700
++	addrCopy            = 0x1800
++	addrContextType     = 0x4000
++	addrContextMethods  = 0x4200
++)
++
++// libpythonFake lays out what a stripped libpython shows pyelf.
++func libpythonFake(t *testing.T) *fake {
++	f := newFake(t)
++	f.str(0x3000, "_contextvars.Context")
++	f.str(0x3020, "run")
++	f.str(0x3030, "copy")
++
++	f.fn(addrContextRun, cat(endbr, make([]byte, 11), ret))
++	f.fn(addrContextDealloc, cat(endbr, ret))
++	f.fn(addrContextNewEmpty, cat(endbr, make([]byte, 3), ret))
++	f.fn(addrContextFromVars, cat(endbr, make([]byte, 7), ret))
++	f.fn(addrContextGet, cat(endbr, ret))
++
++	f.fn(addrPyContextNew, body(addrPyContextNew, lit(endbr), jmpTo(addrContextNewEmpty)))
++	f.export("PyContext_New", addrPyContextNew, 9, elf.STT_FUNC)
++	// endbr; call context_get; test rax,rax; je +5; jmp context_new_from_vars; ret
++	f.fn(addrCopyCurrent, body(addrCopyCurrent, lit(endbr), callTo(addrContextGet), lit([]byte{0x48, 0x85, 0xc0, 0x74, 0x05}), jmpTo(addrContextFromVars), lit(ret)))
++	f.export("PyContext_CopyCurrent", addrCopyCurrent, 20, elf.STT_FUNC)
++	f.fn(addrCopy, body(addrCopy, lit(endbr), jmpTo(addrContextFromVars)))
++	f.export("PyContext_Copy", addrCopy, 9, elf.STT_FUNC)
++
++	f.export("PyContext_Type", addrContextType, 408, elf.STT_OBJECT)
++	f.ptr(addrContextType+tpName, 0x3000)
++	f.u64(addrContextType+tpBasicSize, 64)
++	f.u64(addrContextType+tpFlags, 1<<18)
++	f.ptr(addrContextType+tpDealloc, addrContextDealloc)
++	f.ptr(addrContextType+tpMethods, addrContextMethods)
++	f.ptr(addrContextMethods+0*methodSize+mlName, 0x3030)
++	f.ptr(addrContextMethods+0*methodSize+mlMeth, addrContextGet)
++	f.u32(addrContextMethods+0*methodSize+mlFlags, 0x4)
++	f.ptr(addrContextMethods+1*methodSize+mlName, 0x3020)
++	f.ptr(addrContextMethods+1*methodSize+mlMeth, addrContextRun)
++	f.u32(addrContextMethods+1*methodSize+mlFlags, methFastcall|methKeywords)
++	return f
++}
++
++func expectSyms(t *testing.T, got map[string]procs.Sym, want map[string]uint64) {
++	t.Helper()
++	for name, addr := range want {
++		sym, ok := got[name]
++		if !ok {
++			t.Errorf("%s: not derived", name)
++			continue
++		}
++		if sym.Value != addr {
++			t.Errorf("%s: derived 0x%x, want 0x%x", name, sym.Value, addr)
++		}
++		if sym.Len == 0 || sym.Off != addr-fakeBase {
++			t.Errorf("%s: bad length %d or file offset 0x%x", name, sym.Len, sym.Off)
++		}
++	}
++	for name := range got {
++		if _, ok := want[name]; !ok {
++			t.Errorf("%s: derived unexpectedly at 0x%x", name, got[name].Value)
++		}
++	}
++}
++
++func TestLibpythonSynthetic(t *testing.T) {
++	f := libpythonFake(t)
++	got, problems := synthesizeLibpython(f.img, libpythonNames)
++	if len(problems) != 0 {
++		t.Errorf("problems: %v", problems)
++	}
++	expectSyms(t, got, map[string]uint64{
++		SymContextRun:         addrContextRun,
++		SymContextDealloc:     addrContextDealloc,
++		SymContextNewEmpty:    addrContextNewEmpty,
++		SymContextNewFromVars: addrContextFromVars,
++	})
++}
++
++func TestLibpythonSyntheticRejections(t *testing.T) {
++	all := map[string]uint64{
++		SymContextRun: addrContextRun, SymContextDealloc: addrContextDealloc,
++		SymContextNewEmpty: addrContextNewEmpty, SymContextNewFromVars: addrContextFromVars,
++	}
++	without := func(names ...string) map[string]uint64 {
++		out := map[string]uint64{}
++		for k, v := range all {
++			if !contains(names, k) {
++				out[k] = v
++			}
++		}
++		return out
++	}
++	cases := []struct {
++		name   string
++		break_ func(*fake)
++		want   map[string]uint64
++	}{
++		{"wrong type name", func(f *fake) { f.str(0x3000, "SomethingElse") }, without(SymContextRun, SymContextDealloc)},
++		{"run has other flags", func(f *fake) { f.u32(addrContextMethods+1*methodSize+mlFlags, methFastcall) }, without(SymContextRun)},
++		{"not a function start", func(f *fake) { delete(f.img.functions, addrContextRun) }, without(SymContextRun)},
++		{"length runs past .text", func(f *fake) { f.img.functions[addrContextRun] = fakeTextEnd }, without(SymContextRun)},
++		{"absurd length", func(f *fake) { f.img.functions[addrContextRun] = 1 << 40 }, without(SymContextRun)},
++		{"exported under another name", func(f *fake) { f.img.dynFuncs[addrContextRun] = "PyOther" }, without(SymContextRun)},
++		{"slot function lacks the landing pad", func(f *fake) { f.put(addrContextRun, []byte{0x90, 0x90, 0x90, 0x90}) }, without(SymContextRun)},
++		{"symtab disagrees", func(f *fake) {
++			f.img.symtab = map[uint64][]string{addrContextRun: {"context_run_impl"}, addrContextDealloc: {"context_tp_dealloc.lto_priv.0"},
++				addrContextNewEmpty: {"context_new_empty"}, addrContextFromVars: {"context_new_from_vars"}}
++		}, without(SymContextRun)},
++		{"basicsize implausible", func(f *fake) { f.u64(addrContextType+tpBasicSize, 8) }, without(SymContextRun, SymContextDealloc)},
++		{"PyContext_New is not a trampoline", func(f *fake) {
++			// endbr; test rax,rax; je +5; jmp context_new_empty; ret
++			f.fn(addrPyContextNew, body(addrPyContextNew, lit(endbr), lit([]byte{0x48, 0x85, 0xc0, 0x74, 0x05}), jmpTo(addrContextNewEmpty), lit(ret)))
++			f.export("PyContext_New", addrPyContextNew, 15, elf.STT_FUNC)
++		}, without(SymContextNewEmpty)},
++		{"PyContext_New too long for a stub", func(f *fake) { f.export("PyContext_New", addrPyContextNew, maxStubLength+1, elf.STT_FUNC) }, without(SymContextNewEmpty)},
++		{"PyContext_Copy does not agree", func(f *fake) { f.fn(addrCopy, body(addrCopy, lit(endbr), jmpTo(addrContextGet))) }, without(SymContextNewFromVars)},
++		{"tail target is exported", func(f *fake) { f.img.dynFuncs[addrContextNewEmpty] = "PyContext_NewEmpty" }, without(SymContextNewEmpty)},
++		{"tail target not a function start", func(f *fake) { delete(f.img.functions, addrContextNewEmpty) }, without(SymContextNewEmpty)},
++	}
++	for _, c := range cases {
++		t.Run(c.name, func(t *testing.T) {
++			f := libpythonFake(t)
++			c.break_(f)
++			got, _ := synthesizeLibpython(f.img, libpythonNames)
++			expectSyms(t, got, c.want)
++		})
++	}
++}
++
++func TestLibpythonSyntheticOldTypeName(t *testing.T) {
++	f := libpythonFake(t)
++	f.str(0x3000, "Context")
++	got, _ := synthesizeLibpython(f.img, []string{SymContextRun})
++	expectSyms(t, got, map[string]uint64{SymContextRun: addrContextRun})
++}
++
++const (
++	addrInitAsyncio  = 0x1000
++	addrTaskInit     = 0x1100
++	addrStepWrapper  = 0x1200
++	addrTaskWakeup   = 0x1300
++	addrTaskStep     = 0x1400
++	addrFutureResult = 0x1500
++	addrTaskSpec     = 0x4000
++	addrTaskSlots    = 0x4100
++	addrWrapperSpec  = 0x4200
++	addrWrapperSlots = 0x4300
++	addrWakeupDef    = 0x4400
++)
++
++// asyncioSpecFake lays out a 3.12+ _asyncio: heap types from PyType_Spec and
++// a task_wakeup PyMethodDef.
++func asyncioSpecFake(t *testing.T) *fake {
++	f := newFake(t)
++	f.str(0x3000, "_asyncio.Task")
++	f.str(0x3020, "_asyncio.TaskStepMethWrapper")
++	f.str(0x3040, "task_wakeup")
++
++	f.fn(addrInitAsyncio, cat(endbr, ret))
++	f.export("PyInit__asyncio", addrInitAsyncio, 5, elf.STT_FUNC)
++	f.fn(addrTaskInit, cat(endbr, make([]byte, 11), ret))
++	// step wrapper: endbr; call future_get_result; jmp task_step
++	f.fn(addrStepWrapper, body(addrStepWrapper, lit(endbr), callTo(addrFutureResult), jmpTo(addrTaskStep)))
++	// wakeup: endbr; call task_step; call future_get_result; ret
++	f.fn(addrTaskWakeup, body(addrTaskWakeup, lit(endbr), callTo(addrTaskStep), callTo(addrFutureResult), lit(ret)))
++	f.fn(addrTaskStep, cat(endbr, make([]byte, 27), ret))
++	f.fn(addrFutureResult, cat(endbr, ret))
++
++	f.ptr(addrTaskSpec+specName, 0x3000)
++	f.u32(addrTaskSpec+specBasicSize, 200)
++	f.u32(addrTaskSpec+specFlags, 1<<18)
++	f.ptr(addrTaskSpec+specSlots, addrTaskSlots)
++	f.u32(addrTaskSlots+0*slotSize+slotID, 52)
++	f.ptr(addrTaskSlots+0*slotSize+slotFunc, addrFutureResult)
++	f.u32(addrTaskSlots+1*slotSize+slotID, pyTpInit)
++	f.ptr(addrTaskSlots+1*slotSize+slotFunc, addrTaskInit)
++
++	f.ptr(addrWrapperSpec+specName, 0x3020)
++	f.u32(addrWrapperSpec+specBasicSize, 32)
++	f.u32(addrWrapperSpec+specFlags, 1<<18)
++	f.ptr(addrWrapperSpec+specSlots, addrWrapperSlots)
++	f.u32(addrWrapperSlots+0*slotSize+slotID, pyTpCall)
++	f.ptr(addrWrapperSlots+0*slotSize+slotFunc, addrStepWrapper)
++
++	f.ptr(addrWakeupDef+mlName, 0x3040)
++	f.ptr(addrWakeupDef+mlMeth, addrTaskWakeup)
++	f.u32(addrWakeupDef+mlFlags, methO)
++	return f
++}
++
++func TestAsyncioSyntheticSpec(t *testing.T) {
++	f := asyncioSpecFake(t)
++	got, problems := synthesizeAsyncio(f.img, asyncioNames)
++	if len(problems) != 0 {
++		t.Errorf("problems: %v", problems)
++	}
++	expectSyms(t, got, map[string]uint64{SymTaskInit: addrTaskInit, SymTaskStep: addrTaskStep})
++}
++
++func TestAsyncioSyntheticRejections(t *testing.T) {
++	cases := []struct {
++		name   string
++		break_ func(*fake)
++		want   map[string]uint64
++	}{
++		{"step wrapper calls instead of jumping", func(f *fake) {
++			f.fn(addrStepWrapper, body(addrStepWrapper, lit(endbr), callTo(addrTaskStep), lit(ret)))
++		}, map[string]uint64{SymTaskInit: addrTaskInit}},
++		{"wakeup never reaches task_step", func(f *fake) {
++			f.fn(addrTaskWakeup, body(addrTaskWakeup, lit(endbr), callTo(addrFutureResult), lit(ret)))
++		}, map[string]uint64{SymTaskInit: addrTaskInit}},
++		{"two shared tail targets", func(f *fake) {
++			f.fn(addrStepWrapper, body(addrStepWrapper, lit(endbr), jmpTo(addrFutureResult), jmpTo(addrTaskStep)))
++		}, map[string]uint64{SymTaskInit: addrTaskInit}},
++		{"wakeup flags are not METH_O", func(f *fake) { f.u32(addrWakeupDef+mlFlags, methFastcall) }, map[string]uint64{SymTaskInit: addrTaskInit}},
++		{"two pointers to the type name", func(f *fake) { f.ptr(0x4800, 0x3000) }, map[string]uint64{SymTaskStep: addrTaskStep}},
++		{"spec has no init slot", func(f *fake) { f.u32(addrTaskSlots+1*slotSize+slotID, 61) }, map[string]uint64{SymTaskStep: addrTaskStep}},
++		{"vectorcall slot is not accepted as tp_call", func(f *fake) { f.u32(addrWrapperSlots+0*slotSize+slotID, 82) }, map[string]uint64{SymTaskInit: addrTaskInit}},
++	}
++	for _, c := range cases {
++		t.Run(c.name, func(t *testing.T) {
++			f := asyncioSpecFake(t)
++			c.break_(f)
++			got, _ := synthesizeAsyncio(f.img, asyncioNames)
++			expectSyms(t, got, c.want)
++		})
++	}
++}
++
++// TestAsyncioSyntheticStaticTypes lays out a 3.9 _asyncio: static PyTypeObjects
++// with unprefixed wrapper names and a TaskWakeupMethWrapper type.
++func TestAsyncioSyntheticStaticTypes(t *testing.T) {
++	f := newFake(t)
++	f.str(0x3000, "_asyncio.Task")
++	f.str(0x3020, "TaskStepMethWrapper")
++	f.str(0x3040, "TaskWakeupMethWrapper")
++	f.fn(addrInitAsyncio, cat(endbr, ret))
++	f.export("PyInit__asyncio", addrInitAsyncio, 5, elf.STT_FUNC)
++	f.fn(addrTaskInit, cat(endbr, ret))
++	f.fn(addrStepWrapper, body(addrStepWrapper, lit(endbr), jmpTo(addrTaskStep)))
++	f.fn(addrTaskWakeup, body(addrTaskWakeup, lit(endbr), callTo(addrTaskStep), lit(ret)))
++	f.fn(addrTaskStep, cat(endbr, ret))
++	f.fn(addrFutureResult, cat(endbr, ret))
++
++	typ := func(addr uint64, name uint64, basic uint64) {
++		f.ptr(addr+tpName, name)
++		f.u64(addr+tpBasicSize, basic)
++		f.u64(addr+tpFlags, 1<<18)
++		f.ptr(addr+tpDealloc, addrFutureResult)
++	}
++	typ(0x4000, 0x3000, 200)
++	f.ptr(0x4000+tpInit, addrTaskInit)
++	typ(0x4200, 0x3020, 32)
++	f.ptr(0x4200+tpCall, addrStepWrapper)
++	typ(0x4400, 0x3040, 24)
++	f.ptr(0x4400+tpCall, addrTaskWakeup)
++
++	got, problems := synthesizeAsyncio(f.img, asyncioNames)
++	if len(problems) != 0 {
++		t.Errorf("problems: %v", problems)
++	}
++	expectSyms(t, got, map[string]uint64{SymTaskInit: addrTaskInit, SymTaskStep: addrTaskStep})
++}
++
++func TestFindCString(t *testing.T) {
++	f := newFake(t)
++	f.str(0x3000, "_asyncio.Task")
++	f.str(0x3010, "Task")
++	f.str(0x3020, "Task")
++	if addr, err := f.img.findCString("_asyncio.Task"); err != nil || addr != 0x3000 {
++		t.Fatalf("got 0x%x %v", addr, err)
++	}
++	if _, err := f.img.findCString("Task"); err == nil {
++		t.Fatal("a string found twice must be rejected")
++	}
++	if _, err := f.img.findCString("asyncio.Task"); err == nil {
++		t.Fatal("a suffix of a longer string must not match")
++	}
++}
++
++func TestSynthesizeSkipsNonLibraryFiles(t *testing.T) {
++	exe, err := os.Executable()
++	if err != nil {
++		t.Skip(err)
++	}
++	f, err := elf.Open(exe)
++	if err != nil {
++		t.Skip("test binary is not an ELF file")
++	}
++	defer f.Close()
++	// The test binary is ET_EXEC on linux (and has no PyContext_Type), so this
++	// covers the file-type gate; the executable gate itself is tested below.
++	if got := Synthesize(f, exe, libpythonNames, slog.Default()); got != nil {
++		t.Fatalf("an executable must not be inspected, got %v", got)
++	}
++	if got := Synthesize(f, exe, []string{"SSL_read", "context_run.lto_priv.0"}, slog.Default()); got != nil {
++		t.Fatalf("names pyelf cannot derive must return nothing, got %v", got)
++	}
++}
++
++func TestExecutableGate(t *testing.T) {
++	lib := &elf.File{Progs: []*elf.Prog{{ProgHeader: elf.ProgHeader{Type: elf.PT_LOAD}}}}
++	if isExecutable(lib) {
++		t.Fatal("a shared library without an interpreter is not an executable")
++	}
++	pie := &elf.File{Progs: []*elf.Prog{{ProgHeader: elf.ProgHeader{Type: elf.PT_LOAD}}, {ProgHeader: elf.ProgHeader{Type: elf.PT_INTERP}}}}
++	if !isExecutable(pie) {
++		t.Fatal("a file with an interpreter is an executable")
++	}
++}
++
++func TestFreeThreadedGate(t *testing.T) {
++	gil := []elf.Symbol{{Name: "PyContext_Type"}, {Name: "Py_DecRef", Section: elf.SHN_UNDEF}}
++	if hasFreeThreadedSymbols(gil) {
++		t.Fatal("a GIL build must pass")
++	}
++	// _asyncio on a free-threaded build imports the shared-refcount helpers;
++	// libpython defines them.
++	imported := []elf.Symbol{{Name: "_Py_DecRefShared", Section: elf.SHN_UNDEF}}
++	defined := []elf.Symbol{{Name: "_Py_MergeZeroLocalRefcount", Section: 12}}
++	if !hasFreeThreadedSymbols(imported) || !hasFreeThreadedSymbols(defined) {
++		t.Fatal("free-threaded markers must be recognised whether defined or imported")
++	}
++}
++
++func TestTrampolineCountsEveryCall(t *testing.T) {
++	f := libpythonFake(t)
++	// endbr; call PyContext_Copy (exported); jmp context_new_empty
++	f.fn(addrPyContextNew, body(addrPyContextNew, lit(endbr), callTo(addrCopy), jmpTo(addrContextNewEmpty)))
++	f.export("PyContext_New", addrPyContextNew, 14, elf.STT_FUNC)
++	got, _ := synthesizeLibpython(f.img, []string{SymContextNewEmpty})
++	if len(got) != 0 {
++		t.Fatalf("a stub that calls an exported function is not a trampoline, got %v", got)
++	}
++}
++
++func FuzzParseEHFrameData(f *testing.F) {
++	f.Add(buildEHFrame(0x1000, [][2]uint64{{0x2000, 8}}))
++	f.Fuzz(func(t *testing.T, data []byte) {
++		_, _ = parseEHFrameData(data, 0x1000, binary.LittleEndian)
++	})
++}
++
++func FuzzDecodeRelr(f *testing.F) {
++	f.Add([]byte{0, 0x30, 0, 0, 0, 0, 0, 0, 0x0b, 0, 0, 0, 0, 0, 0, 0})
++	f.Fuzz(func(t *testing.T, data []byte) {
++		_ = decodeRelr(data, binary.LittleEndian, func(uint64) error { return nil })
++	})
++}
++
++func FuzzDecodeX86(f *testing.F) {
++	f.Add(cat(endbr, jmp(0x1004, 0x2000), ret))
++	f.Fuzz(func(t *testing.T, code []byte) {
++		_, _ = decode(elf.EM_X86_64, 0x1000, code)
++	})
++}
++
++func FuzzDecodeArm64(f *testing.F) {
++	f.Add([]byte{0x5f, 0x24, 0x03, 0xd5, 0x40, 0x00, 0x00, 0x94})
++	f.Fuzz(func(t *testing.T, code []byte) {
++		_, _ = decode(elf.EM_AARCH64, 0x1000, code)
++	})
++}
+diff --git a/pkg/internal/pyelf/types.go b/pkg/internal/pyelf/types.go
+new file mode 100644
+index 000000000..ea206e643
+--- /dev/null
++++ b/pkg/internal/pyelf/types.go
+@@ -0,0 +1,226 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++package pyelf // import "go.opentelemetry.io/obi/pkg/internal/pyelf"
++
++import (
++	"fmt"
++	"slices"
++)
++
++// Field offsets of CPython's C structures on 64-bit builds with the GIL. They
++// have been stable from 3.9 through 3.14; the free-threaded builds, whose
++// object header is wider, are rejected before any of these are used.
++const (
++	// PyTypeObject
++	tpName      = 24
++	tpBasicSize = 32
++	tpItemSize  = 40
++	tpDealloc   = 48
++	tpCall      = 128
++	tpFlags     = 168
++	tpMethods   = 232
++	tpInit      = 296
++
++	// PyMethodDef: {ml_name, ml_meth, ml_flags, ml_doc}
++	mlName     = 0
++	mlMeth     = 8
++	mlFlags    = 16
++	methodSize = 32
++
++	methKeywords = 0x0002
++	methO        = 0x0008
++	methFastcall = 0x0080
++
++	// PyType_Spec: {name, basicsize, itemsize, flags, slots}
++	specName      = 0
++	specBasicSize = 8
++	specItemSize  = 12
++	specFlags     = 16
++	specSlots     = 24
++
++	// PyType_Slot: {slot, pfunc}
++	slotID   = 0
++	slotFunc = 8
++	slotSize = 16
++	pyTpCall = 50
++	pyTpInit = 60
++
++	maxMethods = 256
++	maxSlots   = 64
++)
++
++// pyType is a CPython type found in the data of a module: either a static
++// PyTypeObject (libpython, _asyncio before 3.12) or the PyType_Spec a heap
++// type is created from (_asyncio since 3.12).
++type pyType struct {
++	img  *image
++	name string
++	addr uint64
++	spec bool
++}
++
++// typeObject validates a static PyTypeObject at addr whose tp_name must be one
++// of the given names.
++func (img *image) typeObject(addr uint64, names ...string) (*pyType, error) {
++	got, ok := img.stringAt(addr + tpName)
++	if !ok || !slices.Contains(names, got) {
++		return nil, fmt.Errorf("type at 0x%x is not %q", addr, names)
++	}
++	name := got
++	basic, ok := img.word(addr + tpBasicSize)
++	if !ok || basic < minBasicSize || basic > maxBasicSize {
++		return nil, fmt.Errorf("type %s has an implausible tp_basicsize", name)
++	}
++	if item, ok := img.word(addr + tpItemSize); !ok || item != 0 {
++		return nil, fmt.Errorf("type %s has a nonzero tp_itemsize", name)
++	}
++	if flags, ok := img.word(addr + tpFlags); !ok || flags == 0 || flags>>32 != 0 {
++		return nil, fmt.Errorf("type %s has implausible tp_flags", name)
++	}
++	if dealloc, ok := img.pointer(addr + tpDealloc); !ok || !img.inText(dealloc) {
++		return nil, fmt.Errorf("type %s has no tp_dealloc", name)
++	}
++	return &pyType{img: img, name: name, addr: addr}, nil
++}
++
++// typeSpec validates a PyType_Spec at addr whose name must match.
++func (img *image) typeSpec(addr uint64, name string) (*pyType, error) {
++	got, ok := img.stringAt(addr + specName)
++	if !ok || got != name {
++		return nil, fmt.Errorf("spec at 0x%x is not %q", addr, name)
++	}
++	basic, ok := img.word32(addr + specBasicSize)
++	if !ok || basic < minBasicSize || basic > maxBasicSize {
++		return nil, fmt.Errorf("spec %s has an implausible basicsize", name)
++	}
++	if item, ok := img.word32(addr + specItemSize); !ok || item != 0 {
++		return nil, fmt.Errorf("spec %s has a nonzero itemsize", name)
++	}
++	if flags, ok := img.word32(addr + specFlags); !ok || flags == 0 {
++		return nil, fmt.Errorf("spec %s has no flags", name)
++	}
++	if _, ok := img.pointer(addr + specSlots); !ok {
++		return nil, fmt.Errorf("spec %s has no slots", name)
++	}
++	return &pyType{img: img, name: name, addr: addr, spec: true}, nil
++}
++
++// findType locates a type by its tp_name, trying the static layout and the
++// spec layout. Exactly one data slot must point at the name string.
++func (img *image) findType(names ...string) (*pyType, error) {
++	var errs []error
++	for _, name := range names {
++		str, err := img.findCString(name)
++		if err != nil {
++			errs = append(errs, err)
++			continue
++		}
++		slots := img.slotsPointingAt(str)
++		if len(slots) != 1 {
++			errs = append(errs, fmt.Errorf("%d data pointers to %q, expected 1", len(slots), name))
++			continue
++		}
++		slot := slots[0]
++		if t, err := img.typeSpec(slot-specName, name); err == nil {
++			return t, nil
++		}
++		if t, err := img.typeObject(slot-tpName, name); err == nil {
++			return t, nil
++		}
++		errs = append(errs, fmt.Errorf("the pointer to %q is neither a type object nor a type spec", name))
++	}
++	return nil, fmt.Errorf("type not found: %v", errs)
++}
++
++// slotFunc returns the function stored in a slot: the given PyTypeObject field
++// offset for static types, or the Py_tp_* slot id for specs.
++func (t *pyType) slotFunc(fieldOffset uint64, slotIDs ...int32) (uint64, error) {
++	if !t.spec {
++		p, ok := t.img.pointer(t.addr + fieldOffset)
++		if !ok {
++			return 0, fmt.Errorf("type %s has no function at field offset %d", t.name, fieldOffset)
++		}
++		return p, nil
++	}
++	table, _ := t.img.pointer(t.addr + specSlots)
++	for i := uint64(0); i < maxSlots; i++ {
++		entry := table + i*slotSize
++		id, ok := t.img.word32(entry + slotID)
++		if !ok {
++			return 0, fmt.Errorf("spec %s: unreadable slot table", t.name)
++		}
++		if id == 0 {
++			break
++		}
++		for _, want := range slotIDs {
++			if int32(id) == want {
++				p, ok := t.img.pointer(entry + slotFunc)
++				if !ok {
++					return 0, fmt.Errorf("spec %s: slot %d has no function", t.name, id)
++				}
++				return p, nil
++			}
++		}
++	}
++	return 0, fmt.Errorf("spec %s has none of the slots %v", t.name, slotIDs)
++}
++
++func (t *pyType) initFunc() (uint64, error) { return t.slotFunc(tpInit, pyTpInit) }
++
++func (t *pyType) callFunc() (uint64, error) { return t.slotFunc(tpCall, pyTpCall) }
++
++// method walks the type's PyMethodDef table (static types only) for an entry
++// with the given name and exact flags.
++func (t *pyType) method(name string, flags uint32) (uint64, error) {
++	if t.spec {
++		return 0, fmt.Errorf("spec %s: method tables are only walked on static types", t.name)
++	}
++	table, ok := t.img.pointer(t.addr + tpMethods)
++	if !ok {
++		return 0, fmt.Errorf("type %s has no tp_methods", t.name)
++	}
++	for i := uint64(0); i < maxMethods; i++ {
++		entry := table + i*methodSize
++		mname, ok := t.img.stringAt(entry + mlName)
++		if !ok {
++			break // ml_name == NULL ends the table
++		}
++		if mname != name {
++			continue
++		}
++		mflags, ok := t.img.word32(entry + mlFlags)
++		if !ok || mflags != flags {
++			return 0, fmt.Errorf("method %s.%s has flags 0x%x, expected 0x%x", t.name, name, mflags, flags)
++		}
++		fn, ok := t.img.pointer(entry + mlMeth)
++		if !ok {
++			return 0, fmt.Errorf("method %s.%s has no function", t.name, name)
++		}
++		return fn, nil
++	}
++	return 0, fmt.Errorf("type %s has no method %s", t.name, name)
++}
++
++// methodDef finds a standalone PyMethodDef by name and exact flags; exactly one
++// data pointer must reference the name string.
++func (img *image) methodDef(name string, flags uint32) (uint64, error) {
++	str, err := img.findCString(name)
++	if err != nil {
++		return 0, err
++	}
++	slots := img.slotsPointingAt(str)
++	if len(slots) != 1 {
++		return 0, fmt.Errorf("%d data pointers to %q, expected 1", len(slots), name)
++	}
++	entry := slots[0] - mlName
++	mflags, ok := img.word32(entry + mlFlags)
++	if !ok || mflags != flags {
++		return 0, fmt.Errorf("method def %s has flags 0x%x, expected 0x%x", name, mflags, flags)
++	}
++	fn, ok := img.pointer(entry + mlMeth)
++	if !ok {
++		return 0, fmt.Errorf("method def %s has no function", name)
++	}
++	return fn, nil
++}

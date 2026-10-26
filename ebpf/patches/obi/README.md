@@ -30,6 +30,7 @@ digest is pinned in `ebpf/Dockerfile`.
 | 023 | New | FastCGI: a server that reads a request header first and the rest after (PHP-FPM) keeps up to 248 of the 256 captured bytes instead of 152, and the params parser honours four-byte lengths and stops at a cut value, so PHP-FPM spans are named `POST /orders` rather than `POST` or `GET /*`. Upstream candidate; no upstream equivalent yet. |
 | 024 | New | Memcached binary protocol (dalli 3, pylibmc, spymemcached) is reported as memcached with server and client spans, and a miss, an existing key or a failed conditional store is not an error; a connection is Couchbase only when it negotiated like one or uses Couchbase's KV ports. Upstream candidate; no upstream equivalent yet. |
 | 025 | New | DNS: an NXDOMAIN for one candidate of a resolver's search-list walk is not an error when another candidate of the same lookup resolves within two seconds; a lookup that fails on every candidate keeps its errors. Adds `dns.response.rcode`. Upstream candidate; no upstream equivalent yet. |
+| 026 | New | Python: derive the addresses of `context_run`, `context_tp_dealloc`, `context_new_empty`, `context_new_from_vars`, `_asyncio_Task___init__` and `task_step` from type slots, method tables and tail jumps when `libpython`/`_asyncio` carry no symbol table (the official `python:3.x-slim` images), so Python context tracking works there too. Upstream candidate; no upstream equivalent yet. |
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
 bounds are part of the base now. A successful fill can copy less than `msg->size`
@@ -797,3 +798,36 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   calls, the two NXDOMAIN candidates per call went from error spans to
   status-unset spans carrying `dns.response.rcode: NXDomain`, with every
   other span, and the count of each, unchanged.
+* 026-python-stripped-symbols.patch
+  Make the Python probes attach on stripped CPython builds. The official
+  `python:3.x-slim` images remove `.symtab` from `libpython3.x.so` and from the
+  `_asyncio` extension, and every function the Python tracer hooks apart from
+  `PyContext_CopyCurrent` is a static one (`context_run`, `context_tp_dealloc`,
+  `context_new_empty`, `context_new_from_vars`, `_asyncio_Task___init__`,
+  `task_step`), so on those images not one Python uprobe attached and asyncio
+  task and context tracking was silently off. The new `pkg/internal/pyelf`
+  package derives the addresses from data stripping cannot remove: the
+  `PyContext_Type` object (exported) points at `context_tp_dealloc` and at the
+  method table holding `run`; the exported `PyContext_New` and
+  `PyContext_CopyCurrent` tail-jump into `context_new_empty` and
+  `context_new_from_vars` (cross-checked against `PyContext_Copy`); the
+  `_asyncio.Task` type (static `PyTypeObject` before 3.12, `PyType_Spec` since)
+  gives `_asyncio_Task___init__`; and `task_step` is the one hidden function
+  that both the step wrapper's call slot and the `task_wakeup` callback transfer
+  control to. Pointers are taken only from RELATIVE relocations (RELA and RELR),
+  and an address is accepted only when it lies in `.text`, starts a function
+  according to `.eh_frame` (which also supplies the length the return probes
+  need) with a plausible length, is not an exported function under another
+  name, agrees with `.symtab` when the file still has one and, for slot-stored
+  functions, carries the same `endbr64`/`bti` landing pad as the exported
+  reference function. Anything else leaves the symbol unresolved, exactly as
+  before, with a warning once per library. Free-threaded builds (recognised by
+  the symbols only they define or import) and executables with libpython
+  linked in are skipped.
+  `gatherOffsetsImpl` merges the derived symbols after the symbol-table lookup
+  and drops one whose address a resolved symbol already owns (the LTO builds'
+  `context_run.lto_priv.0`), so no program attaches twice. Verified against the
+  `.symtab` of the full `python:3.9` to `3.14` images on amd64 and arm64, on
+  copies of those stripped with binutils, and on the slim images themselves;
+  the oracle test runs when `OBI_PYELF_FIXTURES` points at such a tree. No BPF
+  change. Upstream candidate.
