@@ -26,6 +26,7 @@ digest is pinned in `ebpf/Dockerfile`.
 | 019 | New | Postgres: skips statements without a query (BEGIN, COMMIT, SET) instead of falling back to a `PREPARED STATEMENT` span, so the pipelined query behind them is traced. Upstream candidate; no upstream equivalent yet. |
 | 020 | New | Names HTTP client spans from their own path when the only harvested route they match is a catch-all, and keeps the Host header's port in `url.full`. Upstream candidate; no upstream equivalent yet. |
 | 021 | New | Python: a request's trace follows the copied context into anyio's worker threads (FastAPI sync endpoints). Upstream candidate; no upstream equivalent yet. |
+| 022 | New | Java: a thread hand-off reported by the Java agent links the worker to the thread holding the request's server span, not only to the submitter, so actor-style dispatchers (Pekko, Akka) keep their traces stitched. Upstream candidate; no upstream equivalent yet. |
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
 bounds are part of the base now. A successful fill can copy less than `msg->size`
@@ -646,3 +647,36 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   tables, so `context_run`, `task_step` and the other static functions OBI
   hooks are not there to hook, and a service on such an image gets no task
   tracking whatever; that is a separate problem.
+* 022-java-thread-chain.patch
+  Keep a Java request's trace through actor-style thread hand-offs. OBI
+  learns how a JVM moves work between threads from its Java agent, which
+  reports every executor, fork-join and `Runnable` hand-off as "a task
+  submitted by thread P now runs on thread C" over an ioctl channel; the BPF
+  side keeps one parent per thread (`java_tasks[C] = P`) and, when C makes a
+  client request, walks that chain a few levels looking for a thread that
+  holds a server span. Pekko's and Akka's dispatcher threads hand work back
+  and forth: thread 103 reads the request, then 103→104, 104→103, 104→129,
+  and 129→104 overwrites 104's link to 103, so the walk from 129 cycles
+  between 104 and 129 and gives up, and the database call starts a trace of
+  its own. A Play service behind a keep-alive connection lost 80% of its
+  client spans this way even with the agent on.
+
+  The hand-off handler now records the submitter as before, then resolves
+  its chain, and when that reaches the thread holding the server span it
+  re-links the worker straight to that thread (the map's own comment always
+  called its value "the server thread"). While the request is in flight, a
+  link to its thread survives any later hand-off and cannot be walked into a
+  cycle. When the chain does not resolve, the submitter stays recorded, and
+  the fallback walk may go five levels deep instead of three.
+
+  Verified on the box with two Play 3.0.5 services (Pekko HTTP, HikariCP +
+  pgjdbc, Connector/J, Jedis, spymemcached, Mongo, Play WS) with the Java
+  agent enabled, 246 requests: the downstream service's `SET`, `DEL`, `SELECT
+  stock` and `UPDATE stock` spans went from about 51 of 255 parented to 246
+  of 246; the upstream service stayed at 241 of 246 (the first requests
+  before the agent attached), its spymemcached calls at 0 as expected.
+
+  Not changed here: without the Java agent OBI cannot stitch Java traces at
+  all, and spymemcached, which runs its I/O on a thread of its own without
+  an executor, still has no hand-off to report; both are documented on the
+  ticket.
