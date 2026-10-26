@@ -1,0 +1,181 @@
+diff --git a/bpf/generictracer/protocol_tcp.h b/bpf/generictracer/protocol_tcp.h
+index da861e8fa..0642f9525 100644
+--- a/bpf/generictracer/protocol_tcp.h
++++ b/bpf/generictracer/protocol_tcp.h
+@@ -386,14 +386,31 @@ static __always_inline void handle_unknown_tcp_connection(pid_connection_info_t
+         }
+     } else {
+         if (existing->len > 0 && existing->len < (k_tcp_max_len / 2)) {
+-            // Attempt to append one more packet. I couldn't convince the verifier
+-            // to use a variable (k_tcp_max_len-existing->len). If needed we may need
+-            // to try harder. Mainly needed for userspace detection of missed gRPC, where
+-            // the protocol may sent a RST frame after we've done creating the event, so
+-            // the next event has an RST frame prepended.
++            // Attempt to append one more packet, filling as much of the capture
++            // buffer as the verifier lets us prove: the offset and the length
++            // are clamped to constants per tier, since a variable
++            // (k_tcp_max_len - existing->len) pair is not accepted. Needed for
++            // userspace detection of missed gRPC, where the protocol may send a
++            // RST frame after we've created the event, so the next event has an
++            // RST frame prepended; and for servers that read a request header
++            // first and the rest after, such as PHP-FPM reading FastCGI (three
++            // 8-byte reads, then the params), where a fixed 128-byte append cut
++            // the params before REQUEST_URI.
+             u32 off = existing->len;
+-            bpf_clamp_umax(off, (k_tcp_max_len / 2));
+-            bpf_probe_read(existing->buf + off, (k_tcp_max_len / 2), u_buf);
++            u32 n = bytes_len;
++            if (off < (k_tcp_max_len / 8)) {
++                bpf_clamp_umax(off, (k_tcp_max_len / 8));
++                bpf_clamp_umax(n, (k_tcp_max_len - k_tcp_max_len / 8));
++                bpf_probe_read(existing->buf + off, n, u_buf);
++            } else if (off < (k_tcp_max_len / 4)) {
++                bpf_clamp_umax(off, (k_tcp_max_len / 4));
++                bpf_clamp_umax(n, (k_tcp_max_len - k_tcp_max_len / 4));
++                bpf_probe_read(existing->buf + off, n, u_buf);
++            } else {
++                bpf_clamp_umax(off, (k_tcp_max_len / 2));
++                bpf_clamp_umax(n, (k_tcp_max_len / 2));
++                bpf_probe_read(existing->buf + off, n, u_buf);
++            }
+         }
+         existing->len += bytes_len;
+         existing->req_len = existing->len;
+diff --git a/pkg/ebpf/common/fast_cgi_detect_transform.go b/pkg/ebpf/common/fast_cgi_detect_transform.go
+index 08f271241..236d417e4 100644
+--- a/pkg/ebpf/common/fast_cgi_detect_transform.go
++++ b/pkg/ebpf/common/fast_cgi_detect_transform.go
+@@ -71,20 +71,42 @@ func readFastCGIHeader(b []byte) *fastCGIHeader {
+ 	}
+ }
+ 
++// cgiLength reads a FastCGI name-value length: one byte below 128, otherwise
++// four bytes big-endian with the top bit set (a long header such as a cookie).
++// It reports false when the bytes are not there.
++func cgiLength(b []byte) (int, []byte, bool) {
++	if len(b) == 0 {
++		return 0, b, false
++	}
++	if b[0]>>7 == 0 {
++		return int(b[0]), b[1:], true
++	}
++	if len(b) < 4 {
++		return 0, b, false
++	}
++	return int(binary.BigEndian.Uint32(b[:4]) & 0x7fffffff), b[4:], true
++}
++
++// parseCGITable decodes FastCGI name-value pairs. The table may come from a
++// capture that ended mid-table and was zero-padded to the buffer size: a NUL
++// inside a name or a value marks that cut, and the table ends there, because
++// a partial value is not a path.
+ func parseCGITable(b []byte) map[string]string {
+ 	res := map[string]string{}
+ 
+ 	for {
+-		key := ""
+-		val := ""
+-		if len(b) <= 2 { // key len + val len
++		keyLen, rest, ok := cgiLength(b)
++		if !ok {
+ 			break
+ 		}
++		valLen, rest, ok := cgiLength(rest)
++		if !ok {
++			break
++		}
++		b = rest
+ 
+-		keyLen := int(b[0])
+-		valLen := int(b[1])
+-		b = b[2:]
+-
++		key := ""
++		val := ""
+ 		if keyLen > 0 && len(b) >= keyLen {
+ 			key = string(b[:keyLen])
+ 			b = b[keyLen:]
+@@ -95,6 +117,10 @@ func parseCGITable(b []byte) map[string]string {
+ 			b = b[valLen:]
+ 		}
+ 
++		if strings.IndexByte(key, 0) >= 0 || strings.IndexByte(val, 0) >= 0 {
++			break
++		}
++
+ 		if key != "" {
+ 			res[key] = val
+ 		}
+diff --git a/pkg/ebpf/common/fast_cgi_detect_transform_test.go b/pkg/ebpf/common/fast_cgi_detect_transform_test.go
+index b7b38b3cb..53650bca3 100644
+--- a/pkg/ebpf/common/fast_cgi_detect_transform_test.go
++++ b/pkg/ebpf/common/fast_cgi_detect_transform_test.go
+@@ -4,6 +4,7 @@
+ package ebpfcommon
+ 
+ import (
++	"strings"
+ 	"testing"
+ 
+ 	"github.com/stretchr/testify/assert"
+@@ -182,6 +183,60 @@ func TestParseCGITable(t *testing.T) {
+ 	}
+ }
+ 
++// cgiPair encodes one FastCGI name-value pair, with the four-byte length form
++// for a name or value of 128 bytes or more.
++func cgiPair(key, val string) []byte {
++	length := func(n int) []byte {
++		if n < 128 {
++			return []byte{byte(n)}
++		}
++		return []byte{byte(n>>24) | 0x80, byte(n >> 16), byte(n >> 8), byte(n)}
++	}
++	out := append(length(len(key)), length(len(val))...)
++	out = append(out, key...)
++	return append(out, val...)
++}
++
++// A browser cookie or user agent is often longer than 127 bytes, which FastCGI
++// encodes with a four-byte length; the pairs after it must still be read.
++func TestParseCGITableLongValues(t *testing.T) {
++	cookie := strings.Repeat("laravel_session=abcdefghij;", 12)
++	require.Greater(t, len(cookie), 127)
++	longName := "HTTP_X_" + strings.Repeat("CUSTOM_", 20) + "HEADER"
++	require.Greater(t, len(longName), 127)
++	table := append(cgiPair("REQUEST_METHOD", "GET"), cgiPair("HTTP_COOKIE", cookie)...)
++	table = append(table, cgiPair(longName, "1")...)
++	table = append(table, cgiPair("REQUEST_URI", "/books/3")...)
++
++	assert.Equal(t, map[string]string{
++		"REQUEST_METHOD": "GET",
++		"HTTP_COOKIE":    cookie,
++		longName:         "1",
++		"REQUEST_URI":    "/books/3",
++	}, parseCGITable(table))
++}
++
++// PHP-FPM reads a request in several pieces and the kernel capture may stop
++// inside a value, after which the buffer is zero-padded. The cut value must
++// not become a path (it used to show up as "/inde" followed by NULs) and the
++// padding must not be read as further pairs.
++func TestParseCGITableStopsAtCutValue(t *testing.T) {
++	table := append(cgiPair("REQUEST_METHOD", "GET"), cgiPair("SCRIPT_NAME", "/index.php")...)
++	table = append(table, cgiPair("REQUEST_URI", "/books")...)
++	cut := len(table) - len("x.php") - len(cgiPair("REQUEST_URI", "/books"))
++	padded := append(append([]byte{}, table[:cut]...), make([]byte, 64)...)
++
++	assert.Equal(t, map[string]string{"REQUEST_METHOD": "GET"}, parseCGITable(padded))
++
++	// A real capture is a 256-byte array whose PARAMS record announces more
++	// content than was captured; mimic that with a record cut inside the table.
++	record := append([]byte{1, 1, 0, 1, 0, 8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 4, 0, 1, byte(len(table) >> 8), byte(len(table)), 0, 0}, padded[:cut+8]...)
++	req, ok := detectFastCGI(largebuf.NewLargeBufferFrom(record), largebuf.NewLargeBufferFrom(nil))
++	require.True(t, ok)
++	assert.Equal(t, "GET", req.method)
++	assert.Empty(t, req.uri, "a cut SCRIPT_NAME must not name the request")
++}
++
+ func TestDetectFastCGI(t *testing.T) {
+ 	tests := []struct {
+ 		name           string
