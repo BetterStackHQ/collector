@@ -1,0 +1,1210 @@
+diff --git a/bpf/generictracer/iter_tcp.c b/bpf/generictracer/iter_tcp.c
+index a34dedd31..fd0cec768 100644
+--- a/bpf/generictracer/iter_tcp.c
++++ b/bpf/generictracer/iter_tcp.c
+@@ -9,6 +9,7 @@
+ #include <common/sock_port_ns.h>
+ 
+ #include <generictracer/maps/listening_ports.h>
++#include <generictracer/own_cgroup.h>
+ 
+ SEC("iter/tcp")
+ int GUARDED_PROG(obi_iter_tcp, struct bpf_iter__tcp *, ctx) {
+@@ -18,6 +19,21 @@ int GUARDED_PROG(obi_iter_tcp, struct bpf_iter__tcp *, ctx) {
+     }
+ 
+     const unsigned char skc_state = BPF_CORE_READ(skc, skc_state);
++    if (skc_state == TCP_ESTABLISHED) {
++        // An accepted socket inherits its listener's cgroup, so a server in
++        // the instrumentation's cgroup would otherwise claim every client
++        // that talks to it. The walk visits listening sockets before
++        // established ones, so by now the local ports of this namespace's
++        // listeners are known and tell the two ends apart.
++        struct sock_port_ns pn = sock_port_ns_from_skc(skc);
++        if (bpf_map_lookup_elem(&listening_ports, &pn)) {
++            return 0;
++        }
++        // only a full socket in this state; time-wait and request sockets
++        // share the table but not the layout
++        own_cgroup_record_established((struct sock *)skc);
++        return 0;
++    }
+     if (skc_state != TCP_LISTEN) {
+         return 0;
+     }
+diff --git a/bpf/generictracer/k_tracer.c b/bpf/generictracer/k_tracer.c
+index 8210c0b84..891a120d5 100644
+--- a/bpf/generictracer/k_tracer.c
++++ b/bpf/generictracer/k_tracer.c
+@@ -34,6 +34,7 @@
+ #include <generictracer/maps/listening_ports.h>
+ #include <generictracer/maps/sock_filter_buffers.h>
+ #include <generictracer/maps/tcp_connection_map.h>
++#include <generictracer/own_cgroup.h>
+ #include <generictracer/protocol_common.h>
+ #include <generictracer/protocol_http.h>
+ #include <generictracer/protocol_http2.h>
+@@ -214,6 +215,17 @@ int BPF_KPROBE_GUARDED(obi_kprobe_tcp_connect, struct sock *sk) {
+ 
+     const u64 id = bpf_get_current_pid_tgid();
+ 
++    // Not instrumented, but the server it dials is: leave the connection
++    // for the server side to recognise (generictracer/own_cgroup.h). The
++    // source port is final here, inet_hash_connect() ran before tcp_connect().
++    if (in_own_cgroup()) {
++        connection_info_t conn;
++        if (parse_sock_info(sk, &conn)) {
++            own_cgroup_conn_record(&conn);
++        }
++        return 0;
++    }
++
+     if (!valid_pid(id)) {
+         return 0;
+     }
+@@ -778,6 +790,14 @@ int BPF_KPROBE_GUARDED(obi_kprobe_tcp_close, struct sock *sk, long timeout) {
+ 
+     const u64 id = bpf_get_current_pid_tgid();
+ 
++    if (in_own_cgroup()) {
++        connection_info_t conn;
++        if (parse_sock_info(sk, &conn)) {
++            own_cgroup_conn_forget(&conn);
++        }
++        return 0;
++    }
++
+     if (!valid_pid(id)) {
+         return 0;
+     }
+@@ -828,6 +848,9 @@ int BPF_KPROBE_GUARDED(obi_kprobe_tcp_close, struct sock *sk, long timeout) {
+         terminate_http_request_if_needed(&info, &current_key);
+         finish_ongoing_tcp_req(&info);
+         bpf_map_delete_elem(&connection_tracker, &info.conn);
++        // the server's end of a connection the instrumentation's cgroup
++        // dialled; a no-op for any other connection
++        own_cgroup_conn_forget(&info.conn);
+     }
+ 
+     bpf_map_delete_elem(&active_send_args, &id);
+diff --git a/bpf/generictracer/maps/own_cgroup_conns.h b/bpf/generictracer/maps/own_cgroup_conns.h
+new file mode 100644
+index 000000000..70bd37ec2
+--- /dev/null
++++ b/bpf/generictracer/maps/own_cgroup_conns.h
+@@ -0,0 +1,24 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++#pragma once
++
++#include <bpfcore/vmlinux.h>
++#include <bpfcore/bpf_helpers.h>
++
++#include <common/connection_info.h>
++
++// Connections dialled from the instrumentation's own cgroup, keyed as
++// own_cgroup_conn_key() (generictracer/own_cgroup.h) spells them. Written at
++// connect time and by the socket iterator, retracted when either end closes,
++// and read before any buffer on an instrumented socket is parsed.
++//
++// Sized for the handful of processes that share a cgroup with the
++// instrumentation, not for a host; the LRU only matters for connections that
++// were torn down without a close this tracer saw.
++struct {
++    __uint(type, BPF_MAP_TYPE_LRU_HASH);
++    __type(key, connection_info_t);
++    __type(value, u8);
++    __uint(max_entries, 4096);
++} own_cgroup_conns SEC(".maps");
+diff --git a/bpf/generictracer/own_cgroup.h b/bpf/generictracer/own_cgroup.h
+new file mode 100644
+index 000000000..4927db063
+--- /dev/null
++++ b/bpf/generictracer/own_cgroup.h
+@@ -0,0 +1,98 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++#pragma once
++
++#include <bpfcore/vmlinux.h>
++#include <bpfcore/bpf_core_read.h>
++#include <bpfcore/bpf_helpers.h>
++
++#include <common/connection_info.h>
++#include <common/sockaddr.h>
++
++#include <generictracer/maps/own_cgroup_conns.h>
++
++// Keeping the instrumentation's own container out of the traces.
++//
++// Discovery never instruments a process that shares this cgroup (see
++// discovery.exclude_own_cgroup), which takes care of the client side. The
++// servers those processes talk to are instrumented, though, and a metric
++// scrape, a health probe or an inspector session the instrumentation itself
++// opens would still be reported as the server's own traffic: a root span with
++// no application behind it. So a connect from this cgroup is remembered here,
++// and the server side refuses to parse the connection.
++//
++// The id is the cgroup v2 node this process runs in, resolved in userspace
++// (procs.OwnCgroup). Zero turns everything below off: the option is disabled,
++// or the process runs in the root cgroup, which every task on the host
++// shares and so identifies nothing.
++volatile const u64 own_cgroup_id = 0;
++
++static __always_inline bool in_own_cgroup(void) {
++    return own_cgroup_id != 0 && bpf_get_current_cgroup_id() == own_cgroup_id;
++}
++
++// The key is the sorted tuple with the server address blanked. Destination
++// NAT on a published container port or a service IP rewrites that address
++// between the client's connect and the server's accept, while the client's
++// address and port and the server port survive it. The sort only looks at the
++// ports, so both ends spell the key the same way whatever happened to the
++// addresses. What can still defeat the lookup fails open: a port-remapping
++// NAT, source NAT, a userland proxy terminating the connection, or a server
++// on another host, none of which leave the client's tuple intact. A collision
++// with an unrelated connection needs the same client address and port towards
++// the same server port on a different server, at the same time.
++static __always_inline void own_cgroup_conn_key(const connection_info_t *conn,
++                                                connection_info_t *key) {
++    *key = *conn;
++    sort_connection_info(key);
++    __builtin_memset(key->d_addr, 0, sizeof(key->d_addr));
++}
++
++static __always_inline void own_cgroup_conn_record(const connection_info_t *conn) {
++    connection_info_t key;
++    own_cgroup_conn_key(conn, &key);
++    bpf_map_update_elem(&own_cgroup_conns, &key, &(u8){1}, BPF_ANY);
++}
++
++static __always_inline void own_cgroup_conn_forget(const connection_info_t *conn) {
++    if (own_cgroup_id == 0) {
++        return;
++    }
++    connection_info_t key;
++    own_cgroup_conn_key(conn, &key);
++    bpf_map_delete_elem(&own_cgroup_conns, &key);
++}
++
++static __always_inline bool is_own_cgroup_conn(const connection_info_t *conn) {
++    if (own_cgroup_id == 0) {
++        return false;
++    }
++    connection_info_t key;
++    own_cgroup_conn_key(conn, &key);
++    return bpf_map_lookup_elem(&own_cgroup_conns, &key) != NULL;
++}
++
++// Remembers an established socket that belongs to this cgroup: the connect
++// kprobe never saw the connections the cgroup already held when the tracer
++// loaded. The socket keeps the cgroup v2 node of the task that created it
++// (cgroup_sk_alloc). On a kernel whose sock_cgroup_data still packs that
++// pointer into a word, before the explicit layout of 5.15, the field is
++// absent and the connection stays visible. The caller skips accepted
++// sockets: those inherit their listener's cgroup, not their peer's.
++static __always_inline void own_cgroup_record_established(struct sock *sk) {
++    if (own_cgroup_id == 0) {
++        return;
++    }
++    if (!bpf_core_field_exists(((struct sock *)0)->sk_cgrp_data.cgroup)) {
++        return;
++    }
++    const u64 cgroup_id = BPF_CORE_READ(sk, sk_cgrp_data.cgroup, kn, id);
++    if (cgroup_id != own_cgroup_id) {
++        return;
++    }
++    connection_info_t conn;
++    if (parse_sock_info(sk, &conn)) {
++        own_cgroup_conn_record(&conn);
++    }
++}
+diff --git a/bpf/generictracer/protocol_handler.c b/bpf/generictracer/protocol_handler.c
+index 915c04d60..24341e0e1 100644
+--- a/bpf/generictracer/protocol_handler.c
++++ b/bpf/generictracer/protocol_handler.c
+@@ -14,6 +14,7 @@
+ #include <generictracer/protocol_aerospike.h>
+ #include <generictracer/protocol_http.h>
+ #include <generictracer/protocol_http2.h>
++#include <generictracer/own_cgroup.h>
+ #include <generictracer/protocol_kafka.h>
+ #include <generictracer/protocol_mysql.h>
+ #include <generictracer/protocol_postgres.h>
+@@ -30,6 +31,13 @@ int GUARDED_PROG(obi_handle_buf_with_args, void *, ctx) {
+         return 0;
+     }
+ 
++    // Every protocol parser is reached through here, so this is where a
++    // connection the instrumentation's own cgroup dialled stays unparsed: no
++    // request is ever started on it, and nothing later can finish one.
++    if (is_own_cgroup_conn(&args->pid_conn.conn)) {
++        return 0;
++    }
++
+     bpf_dbg_printk("=== kprobe buf=[%s], pid=%d, len=%d ===",
+                    args->small_buf,
+                    args->pid_conn.pid,
+diff --git a/pkg/appolly/discover/matcher.go b/pkg/appolly/discover/matcher.go
+index 4950a10ad..5fdde41a6 100644
+--- a/pkg/appolly/discover/matcher.go
++++ b/pkg/appolly/discover/matcher.go
+@@ -18,6 +18,7 @@ import (
+ 	"go.opentelemetry.io/obi/pkg/appolly/app"
+ 	"go.opentelemetry.io/obi/pkg/appolly/services"
+ 	ebpfcommon "go.opentelemetry.io/obi/pkg/ebpf/common"
++	"go.opentelemetry.io/obi/pkg/internal/procs"
+ 	"go.opentelemetry.io/obi/pkg/obi"
+ 	"go.opentelemetry.io/obi/pkg/pipe/msg"
+ 	"go.opentelemetry.io/obi/pkg/pipe/swarm"
+@@ -27,8 +28,45 @@ var (
+ 	namespaceFetcherFunc = ebpfcommon.FindNetworkNamespace
+ 	hasHostPidAccess     = ebpfcommon.HasHostPidAccess
+ 	osPidFunc            = os.Getpid
++	ownCgroupFunc        = func() (cgroupMembership, error) {
++		own, err := procs.OwnCgroup()
++		if err != nil {
++			return nil, err
++		}
++		return own, nil
++	}
+ )
+ 
++// cgroupMembership answers whether a process shares the instrumentation's own
++// cgroup; procs.Cgroup in production.
++type cgroupMembership interface {
++	Contains(app.PID) bool
++	String() string
++}
++
++// ownCgroupExclusion resolves the cgroup discovery.exclude_own_cgroup keeps
++// out of instrumentation, or nil when there is none to exclude: the option is
++// off, or this process runs in the root cgroup, or its cgroup cannot be read.
++func ownCgroupExclusion(cfg *obi.Config, log *slog.Logger) cgroupMembership {
++	if !cfg.Discovery.ExcludeOwnCgroup {
++		return nil
++	}
++	own, err := ownCgroupFunc()
++	if err != nil {
++		switch {
++		case errors.Is(err, procs.ErrRootCgroup):
++			log.Info("not excluding the instrumentation's own cgroup: it is the root cgroup, shared by every process on this host")
++		case errors.Is(err, procs.ErrHybridCgroup):
++			log.Info("not excluding the instrumentation's own cgroup: on this host the unified cgroup hierarchy does not tell containers apart", "error", err)
++		default:
++			log.Warn("cannot identify the instrumentation's own cgroup; its processes stay eligible for instrumentation", "error", err)
++		}
++		return nil
++	}
++	log.Info("excluding the instrumentation's own cgroup from instrumentation", "cgroup", own.String())
++	return own
++}
++
+ // criteriaMatcherProvider filters the processes that match the discovery criteria.
+ // When dynamicSelector is non-nil, only the dynamic selector is used (no config criteria),
+ // and the matcher listens to the selector's RemovedNotify() channel for synthetic deletes.
+@@ -58,6 +96,7 @@ func criteriaMatcherProvider(
+ 		Namespace:           instrumenterNamespace,
+ 		HasHostPidAccess:    hasHostPidAccess(),
+ 		Denied:              ebpfcommon.NewDeniedPIDs(eventContext, log),
++		OwnCgroup:           ownCgroupExclusion(cfg, log),
+ 	}
+ 	return swarm.DirectInstance(m.Run)
+ }
+@@ -80,6 +119,11 @@ type Matcher struct {
+ 	// Denied mirrors the exclusion decisions taken here into the BPF pid
+ 	// filter, which cannot derive them: see ebpfcommon.DeniedPIDs.
+ 	Denied *ebpfcommon.DeniedPIDs
++	// OwnCgroup, when set, is the instrumentation's own cgroup: the processes
++	// in it are excluded ahead of any criteria (discovery.exclude_own_cgroup).
++	OwnCgroup cgroupMembership
++	// set once the exclusion has dropped a process the criteria selected
++	ownCgroupMatchNoted bool
+ }
+ 
+ // ProcessMatch matches a found process with the first selection criteria it fulfilled.
+@@ -258,6 +302,14 @@ func (m *Matcher) filterDeleted(obj ProcessAttrs) (Event[ProcessMatch], bool) {
+ }
+ 
+ func (m *Matcher) isExcluded(obj *ProcessAttrs, proc *services.ProcessInfo) bool {
++	// The instrumentation's own container is excluded whatever the criteria
++	// say: an exporter it runs next to may well listen on a port, but what it
++	// does is not the application's traffic.
++	if m.OwnCgroup != nil && m.OwnCgroup.Contains(obj.pid) {
++		m.Log.Debug("excluding process in the instrumentation's own cgroup", "pid", proc.Pid, "comm", proc.ExePath)
++		m.noteOwnCgroupMatch(obj, proc)
++		return true
++	}
+ 	for i := range m.ExcludeCriteria {
+ 		m.Log.Debug("checking exclusion criteria", "pid", proc.Pid, "comm", proc.ExePath)
+ 		if m.matchProcess(obj, proc, m.ExcludeCriteria[i]) {
+@@ -267,6 +319,25 @@ func (m *Matcher) isExcluded(obj *ProcessAttrs, proc *services.ProcessInfo) bool
+ 	return false
+ }
+ 
++// noteOwnCgroupMatch says once, above debug level, that the cgroup exclusion
++// dropped a process the criteria had selected. Next to a collector that is
++// the exporter listening on a port and no surprise, but an agent sharing its
++// cgroup with the application it was meant to instrument would otherwise
++// instrument nothing and say nothing.
++func (m *Matcher) noteOwnCgroupMatch(obj *ProcessAttrs, proc *services.ProcessInfo) {
++	if m.ownCgroupMatchNoted {
++		return
++	}
++	for i := range m.Criteria {
++		if m.matchProcess(obj, proc, m.Criteria[i]) {
++			m.ownCgroupMatchNoted = true
++			m.Log.Info("a process matching the instrumentation criteria shares the instrumentation's own cgroup and is excluded; set discovery.exclude_own_cgroup to false if that cgroup is the application's",
++				"pid", proc.Pid, "comm", proc.ExePath, "cgroup", m.OwnCgroup.String())
++			return
++		}
++	}
++}
++
+ func (m *Matcher) matchProcess(obj *ProcessAttrs, p *services.ProcessInfo, a services.Selector) bool {
+ 	log := m.Log.With("pid", p.Pid, "exe", p.ExePath)
+ 	pids, hasPIDs := a.GetPIDs()
+diff --git a/pkg/appolly/discover/matcher_test.go b/pkg/appolly/discover/matcher_test.go
+index eb0579480..41ed2bf24 100644
+--- a/pkg/appolly/discover/matcher_test.go
++++ b/pkg/appolly/discover/matcher_test.go
+@@ -4,6 +4,7 @@
+ package discover
+ 
+ import (
++	"fmt"
+ 	"log/slog"
+ 	"testing"
+ 	"time"
+@@ -16,6 +17,7 @@ import (
+ 	"go.opentelemetry.io/obi/pkg/appolly/app/svc"
+ 	"go.opentelemetry.io/obi/pkg/appolly/services"
+ 	attr "go.opentelemetry.io/obi/pkg/export/attributes/names"
++	"go.opentelemetry.io/obi/pkg/internal/procs"
+ 	"go.opentelemetry.io/obi/pkg/internal/testutil"
+ 	"go.opentelemetry.io/obi/pkg/obi"
+ 	"go.opentelemetry.io/obi/pkg/pipe/msg"
+@@ -1107,3 +1109,156 @@ func TestCriteriaMatcher_Granular(t *testing.T) {
+ 	assert.True(t, asteroidAttrs.ExportModes.CanExportMetrics())
+ 	require.Nil(t, asteroidAttrs.Sampler)
+ }
++
++// fakeCgroup stands in for procs.Cgroup: the pids it lists share the
++// instrumentation's cgroup.
++type fakeCgroup map[app.PID]struct{}
++
++func (f fakeCgroup) Contains(pid app.PID) bool { _, ok := f[pid]; return ok }
++func (f fakeCgroup) String() string            { return "fake" }
++
++func TestCriteriaMatcher_ExcludesOwnCgroup(t *testing.T) {
++	pipeConfig := obi.Config{}
++	require.NoError(t, yaml.Unmarshal([]byte(`discovery:
++  exclude_own_cgroup: true
++  instrument:
++  - name: port-only
++    open_ports: 80
++`), &pipeConfig))
++
++	originalOwnCgroup := ownCgroupFunc
++	t.Cleanup(func() { ownCgroupFunc = originalOwnCgroup })
++	ownCgroupFunc = func() (cgroupMembership, error) {
++		return fakeCgroup{3: {}, 4: {}}, nil
++	}
++
++	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
++	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
++	filteredProcesses := filteredProcessesQu.Subscribe()
++	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil, nil)(t.Context())
++	require.NoError(t, err)
++	go matcherFunc(t.Context())
++	defer filteredProcessesQu.Close()
++
++	processInfo = func(pp ProcessAttrs) (*services.ProcessInfo, error) {
++		proc := map[app.PID]struct {
++			Exe  string
++			PPid app.PID
++		}{
++			1: {Exe: "/bin/app"},
++			2: {Exe: "/bin/app-worker", PPid: 1},
++			// an exporter in the instrumentation's own container, listening
++			// on a port the criteria select
++			3: {Exe: "/usr/local/bin/mysqld_exporter"},
++			// its child, which would otherwise inherit the match of a
++			// matched parent; here the parent is excluded too
++			4: {Exe: "/usr/local/bin/mysqld_exporter", PPid: 3},
++		}[pp.pid]
++		return &services.ProcessInfo{Pid: pp.pid, ExePath: proc.Exe, PPid: proc.PPid, OpenPorts: pp.openPorts}, nil
++	}
++
++	discoveredProcesses.Send([]Event[ProcessAttrs]{
++		{Type: EventCreated, Obj: ProcessAttrs{pid: 1, openPorts: []uint32{80}}},
++		{Type: EventCreated, Obj: ProcessAttrs{pid: 2}},
++		{Type: EventCreated, Obj: ProcessAttrs{pid: 3, openPorts: []uint32{80}}},
++		{Type: EventCreated, Obj: ProcessAttrs{pid: 4}},
++	})
++
++	matches := testutil.ReadChannel(t, filteredProcesses, testTimeout)
++	require.Len(t, matches, 2)
++	assert.Equal(t, app.PID(1), matches[0].Obj.Process.Pid)
++	assert.Equal(t, app.PID(2), matches[1].Obj.Process.Pid)
++}
++
++// The exclusion is a property of the matcher, not of the criteria: a process
++// in the instrumentation's cgroup stays excluded under a parent that matched.
++func TestCriteriaMatcher_OwnCgroupChildOfMatchedParent(t *testing.T) {
++	pipeConfig := obi.Config{}
++	require.NoError(t, yaml.Unmarshal([]byte(`discovery:
++  exclude_own_cgroup: true
++  instrument:
++  - name: port-only
++    open_ports: 80
++`), &pipeConfig))
++
++	originalOwnCgroup := ownCgroupFunc
++	t.Cleanup(func() { ownCgroupFunc = originalOwnCgroup })
++	ownCgroupFunc = func() (cgroupMembership, error) {
++		return fakeCgroup{2: {}}, nil
++	}
++
++	discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
++	filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
++	filteredProcesses := filteredProcessesQu.Subscribe()
++	matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil, nil)(t.Context())
++	require.NoError(t, err)
++	go matcherFunc(t.Context())
++	defer filteredProcessesQu.Close()
++
++	processInfo = func(pp ProcessAttrs) (*services.ProcessInfo, error) {
++		proc := map[app.PID]struct {
++			Exe  string
++			PPid app.PID
++		}{
++			1: {Exe: "/bin/supervisor"},
++			2: {Exe: "/bin/probe", PPid: 1},
++			3: {Exe: "/bin/worker", PPid: 1},
++		}[pp.pid]
++		return &services.ProcessInfo{Pid: pp.pid, ExePath: proc.Exe, PPid: proc.PPid, OpenPorts: pp.openPorts}, nil
++	}
++
++	discoveredProcesses.Send([]Event[ProcessAttrs]{
++		{Type: EventCreated, Obj: ProcessAttrs{pid: 1, openPorts: []uint32{80}}},
++		{Type: EventCreated, Obj: ProcessAttrs{pid: 2}},
++		{Type: EventCreated, Obj: ProcessAttrs{pid: 3}},
++	})
++
++	matches := testutil.ReadChannel(t, filteredProcesses, testTimeout)
++	require.Len(t, matches, 2)
++	assert.Equal(t, app.PID(1), matches[0].Obj.Process.Pid)
++	assert.Equal(t, app.PID(3), matches[1].Obj.Process.Pid)
++}
++
++// Off by configuration, or with nothing to exclude, the matcher behaves as
++// before.
++func TestCriteriaMatcher_OwnCgroupDisabled(t *testing.T) {
++	for name, cgroup := range map[string]func() (cgroupMembership, error){
++		"root cgroup":     func() (cgroupMembership, error) { return nil, procs.ErrRootCgroup },
++		"no cgroup v2":    func() (cgroupMembership, error) { return nil, procs.ErrNoCgroupV2 },
++		"option disabled": func() (cgroupMembership, error) { t.Fatal("must not be consulted"); return nil, nil },
++	} {
++		t.Run(name, func(t *testing.T) {
++			pipeConfig := obi.Config{}
++			enabled := name != "option disabled"
++			require.NoError(t, yaml.Unmarshal([]byte(fmt.Sprintf(`discovery:
++  exclude_own_cgroup: %t
++  instrument:
++  - name: port-only
++    open_ports: 80
++`, enabled)), &pipeConfig))
++
++			originalOwnCgroup := ownCgroupFunc
++			t.Cleanup(func() { ownCgroupFunc = originalOwnCgroup })
++			ownCgroupFunc = cgroup
++
++			discoveredProcesses := msg.NewQueue[[]Event[ProcessAttrs]](msg.ChannelBufferLen(10))
++			filteredProcessesQu := msg.NewQueue[[]Event[ProcessMatch]](msg.ChannelBufferLen(10))
++			filteredProcesses := filteredProcessesQu.Subscribe()
++			matcherFunc, err := criteriaMatcherProvider(&pipeConfig, discoveredProcesses, filteredProcessesQu, FindingCriteria(&pipeConfig), nil, nil)(t.Context())
++			require.NoError(t, err)
++			go matcherFunc(t.Context())
++			defer filteredProcessesQu.Close()
++
++			processInfo = func(pp ProcessAttrs) (*services.ProcessInfo, error) {
++				return &services.ProcessInfo{Pid: pp.pid, ExePath: "/any/exe", OpenPorts: pp.openPorts}, nil
++			}
++			discoveredProcesses.Send([]Event[ProcessAttrs]{
++				{Type: EventCreated, Obj: ProcessAttrs{pid: 3, openPorts: []uint32{80}}},
++			})
++
++			matches := testutil.ReadChannel(t, filteredProcesses, testTimeout)
++			require.Len(t, matches, 1)
++			assert.Equal(t, app.PID(3), matches[0].Obj.Process.Pid)
++		})
++	}
++}
+diff --git a/pkg/appolly/services/criteria.go b/pkg/appolly/services/criteria.go
+index 60cce56f4..23b8cdedc 100644
+--- a/pkg/appolly/services/criteria.go
++++ b/pkg/appolly/services/criteria.go
+@@ -120,6 +120,16 @@ type DiscoveryConfig struct {
+ 	// Disables instrumentation of services which are already instrumented
+ 	ExcludeOTelInstrumentedServices bool `yaml:"exclude_otel_instrumented_services" env:"OTEL_EBPF_EXCLUDE_OTEL_INSTRUMENTED_SERVICES"`
+ 
++	// ExcludeOwnCgroup keeps the instrumentation's own container out of the
++	// telemetry. Processes in the same cgroup v2 node as this process, which
++	// is its container when it runs in one, are never instrumented whatever
++	// Instrument selects, and the requests they make to instrumented servers on
++	// this host are not reported as those servers' spans either: the metric
++	// scrapers, health checks and runtime inspectors that run next to the
++	// instrumentation are not the application's traffic. Ignored when this
++	// process runs in the root cgroup, which every process on the host shares.
++	ExcludeOwnCgroup bool `yaml:"exclude_own_cgroup" env:"OTEL_EBPF_EXCLUDE_OWN_CGROUP"`
++
+ 	// DefaultOtlpGRPCPort specifies the default OTLP gRPC port (4317) to fallback on when missing environment variables on service, for
+ 	// checking for grpc export requests, defaults to 4317
+ 	DefaultOtlpGRPCPort int `yaml:"default_otlp_grpc_port" env:"OTEL_EBPF_DEFAULT_OTLP_GRPC_PORT" validate:"gte=0,lte=65535"`
+diff --git a/pkg/internal/ebpf/generictracer/generictracer.go b/pkg/internal/ebpf/generictracer/generictracer.go
+index c3869f3fa..287e2bce8 100644
+--- a/pkg/internal/ebpf/generictracer/generictracer.go
++++ b/pkg/internal/ebpf/generictracer/generictracer.go
+@@ -36,6 +36,7 @@ import (
+ 	"go.opentelemetry.io/obi/pkg/internal/goexec"
+ 	"go.opentelemetry.io/obi/pkg/internal/netns"
+ 	"go.opentelemetry.io/obi/pkg/internal/netolly/ifaces"
++	"go.opentelemetry.io/obi/pkg/internal/procs"
+ 	"go.opentelemetry.io/obi/pkg/obi"
+ 	"go.opentelemetry.io/obi/pkg/pipe/msg"
+ )
+@@ -57,6 +58,7 @@ type Tracer struct {
+ 	libsMux            sync.Mutex
+ 	jvmGenerations     sync.Map
+ 	iters              []*ebpfcommon.Iter
++	ownCgroupID        uint64
+ 	iterMu             sync.Mutex
+ 	seenNetns          *expirable.LRU[uint64, struct{}]
+ 	eventCtx           *ebpfcommon.EBPFEventContext
+@@ -300,6 +302,17 @@ func (p *Tracer) constants() map[string]any {
+ 
+ 	m["g_traces_ctx_v1_enabled"] = p.traceCtxMapEnabled
+ 
++	// Connections dialled from this cgroup are not parsed on the server side
++	// (bpf/generictracer/own_cgroup.h). Zero leaves the lookups out: the
++	// option is off, or the cgroup is the root, which identifies nothing.
++	p.ownCgroupID = 0
++	if p.cfg.Discovery.ExcludeOwnCgroup {
++		if own, err := procs.OwnCgroup(); err == nil {
++			p.ownCgroupID = own.ID
++		}
++	}
++	m["own_cgroup_id"] = p.ownCgroupID
++
+ 	return m
+ }
+ 
+@@ -795,6 +808,12 @@ func (p *Tracer) Run(
+ 	defer timeoutTicker.Stop()
+ 
+ 	p.runItersForPids()
++	// The socket iterator also records the connections the instrumentation's
++	// own cgroup already holds, which live in this process's network
++	// namespace; discovery may not select anything there.
++	if p.ownCgroupID != 0 {
++		p.runItersForPID(app.PID(os.Getpid()))
++	}
+ 
+ 	p.log.Info("Launching p.Tracer")
+ 
+diff --git a/pkg/internal/procs/own_cgroup_linux.go b/pkg/internal/procs/own_cgroup_linux.go
+new file mode 100644
+index 000000000..68ac44766
+--- /dev/null
++++ b/pkg/internal/procs/own_cgroup_linux.go
+@@ -0,0 +1,294 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++//go:build linux
++
++package procs // import "go.opentelemetry.io/obi/pkg/internal/procs"
++
++import (
++	"bufio"
++	"errors"
++	"fmt"
++	"io/fs"
++	"os"
++	"path/filepath"
++	"slices"
++	"strconv"
++	"strings"
++	"sync"
++	"syscall"
++
++	"golang.org/x/sys/unix"
++
++	"go.opentelemetry.io/obi/pkg/appolly/app"
++)
++
++// Cgroup is the cgroup v2 node this process runs in: its container, when it
++// has one.
++type Cgroup struct {
++	// ID is the kernel's id for the cgroup, the inode number of its directory.
++	// It is what bpf_get_current_cgroup_id() returns for a task in the cgroup
++	// and what a socket such a task creates remembers in sk_cgrp_data.
++	ID uint64
++	// Dir is the cgroup's directory in the cgroup2 filesystem.
++	Dir string
++	// membership is this process's unified-hierarchy line in
++	// /proc/<pid>/cgroup, "0::<path>". The kernel renders that path relative
++	// to the reader's cgroup namespace, so two processes' lines read by the
++	// same reader are equal exactly when the processes share the cgroup,
++	// whether or not the reader is in a private namespace.
++	membership string
++}
++
++var (
++	// ErrNoCgroupV2 means the process has no cgroup v2 membership, or the
++	// hierarchy is not mounted where it can be read.
++	ErrNoCgroupV2 = errors.New("no cgroup v2 membership")
++	// ErrRootCgroup means the process runs in the root of the hierarchy, which
++	// every process on a host without cgroup-managed containers shares, so it
++	// identifies nothing.
++	ErrRootCgroup = errors.New("process is in the root cgroup")
++	// ErrHybridCgroup means the host mounts cgroup v1 controllers next to the
++	// unified hierarchy, and the unified hierarchy does not tell this process's
++	// container apart from the others.
++	ErrHybridCgroup = errors.New("the unified hierarchy does not isolate this process on this hybrid cgroup host")
++)
++
++// The root of a kernfs hierarchy is the first node it allocates an id for.
++const rootCgroupID = 1
++
++const cgroupProcsFile = "cgroup.procs"
++
++// injectable for tests
++var (
++	cgroup2Mounts  = []string{"/sys/fs/cgroup", "/sys/fs/cgroup/unified"}
++	mountInfoPath  = "/proc/self/mountinfo"
++	isCgroup2FS    = statfsIsCgroup2
++	cgroupDirInode = dirInode
++	ownPID         = os.Getpid
++)
++
++var ownCgroup = sync.OnceValues(findOwnCgroup)
++
++// OwnCgroup identifies the cgroup this process runs in. The answer is
++// computed once: a process does not move between cgroups on its own.
++func OwnCgroup() (*Cgroup, error) {
++	return ownCgroup()
++}
++
++func findOwnCgroup() (*Cgroup, error) {
++	pid := app.PID(ownPID())
++	membership, controllers, err := cgroupLines(pid)
++	if err != nil {
++		return nil, err
++	}
++	if err := hybridHierarchyIsolates(membership, controllers); err != nil {
++		return nil, err
++	}
++	mount, err := cgroup2Mount()
++	if err != nil {
++		return nil, err
++	}
++	dir, err := cgroupDirOf(mount, membership, pid)
++	if err != nil {
++		return nil, err
++	}
++	id, err := cgroupDirInode(dir)
++	if err != nil {
++		return nil, fmt.Errorf("identifying cgroup %s: %w", dir, err)
++	}
++	if id == rootCgroupID {
++		return nil, fmt.Errorf("%w: %s", ErrRootCgroup, dir)
++	}
++	return &Cgroup{ID: id, Dir: dir, membership: membership}, nil
++}
++
++// Contains reports whether pid runs in this cgroup. A process that is gone,
++// or whose membership cannot be read, is not in it.
++func (c *Cgroup) Contains(pid app.PID) bool {
++	membership, err := unifiedCgroupLine(pid)
++	return err == nil && membership == c.membership
++}
++
++func (c *Cgroup) String() string {
++	return fmt.Sprintf("%s (id %d)", c.Dir, c.ID)
++}
++
++// unifiedCgroupLine returns the "0::<path>" line of /proc/<pid>/cgroup.
++func unifiedCgroupLine(pid app.PID) (string, error) {
++	unified, _, err := cgroupLines(pid)
++	return unified, err
++}
++
++// cgroupLines reads /proc/<pid>/cgroup: the unified hierarchy's "0::<path>"
++// line, and the cgroup v1 controller lines ("12:memory:<path>") a hybrid
++// host adds next to it.
++func cgroupLines(pid app.PID) (unified string, controllers []string, err error) {
++	path := filepath.Join(procRootPath, strconv.Itoa(int(pid)), "cgroup")
++	f, err := os.Open(path)
++	if err != nil {
++		return "", nil, err
++	}
++	defer f.Close()
++
++	scanner := bufio.NewScanner(f)
++	for scanner.Scan() {
++		line := scanner.Text()
++		if strings.HasPrefix(line, "0::") {
++			unified = line
++		} else if line != "" {
++			controllers = append(controllers, line)
++		}
++	}
++	if err := scanner.Err(); err != nil {
++		return "", nil, err
++	}
++	if unified == "" {
++		return "", nil, fmt.Errorf("%w: %s has no unified hierarchy entry", ErrNoCgroupV2, path)
++	}
++	return unified, controllers, nil
++}
++
++// hybridHierarchyIsolates decides whether, on a host that mounts cgroup v1
++// controllers next to the unified hierarchy, the unified hierarchy still
++// tells containers apart.
++//
++// A systemd-driven runtime creates its scope in every hierarchy, so a
++// process's v1 paths equal its unified path and the unified cgroup is the
++// container. A runtime that only populates the v1 controllers, which is what
++// Docker's cgroupfs driver does and what it defaults to on such hosts, leaves
++// every container's processes in the unified cgroup they inherited from the
++// runtime's own service. "Own cgroup" would then cover every container on
++// the host, so the feature stays off. Behind a private cgroup namespace on
++// such a host every path reads "/" and nothing can be compared, so it stays
++// off there too.
++func hybridHierarchyIsolates(membership string, controllers []string) error {
++	if len(controllers) == 0 {
++		return nil
++	}
++	unifiedPath := strings.TrimPrefix(membership, "0::")
++	if unifiedPath == "/" {
++		return fmt.Errorf("%w: every hierarchy reads as its root", ErrHybridCgroup)
++	}
++	for _, line := range controllers {
++		parts := strings.SplitN(line, ":", 3)
++		if len(parts) != 3 {
++			continue
++		}
++		if parts[2] != unifiedPath {
++			return fmt.Errorf("%w: cgroup v1 %q is at %s, the unified hierarchy at %s",
++				ErrHybridCgroup, parts[1], parts[2], unifiedPath)
++		}
++	}
++	return nil
++}
++
++// cgroup2Mount finds a mount point of the cgroup2 filesystem: the usual places
++// first, then whatever /proc/self/mountinfo lists.
++func cgroup2Mount() (string, error) {
++	for _, mount := range cgroup2Mounts {
++		if isCgroup2FS(mount) {
++			return mount, nil
++		}
++	}
++
++	f, err := os.Open(mountInfoPath)
++	if err != nil {
++		return "", fmt.Errorf("%w: %w", ErrNoCgroupV2, err)
++	}
++	defer f.Close()
++
++	scanner := bufio.NewScanner(f)
++	for scanner.Scan() {
++		// 559 466 0:30 / /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup2 rw,nsdelegate
++		fields := strings.Fields(scanner.Text())
++		sep := slices.Index(fields, "-")
++		if sep < 5 || sep+1 >= len(fields) || fields[sep+1] != "cgroup2" {
++			continue
++		}
++		if mount := unescapeMountInfo(fields[4]); isCgroup2FS(mount) {
++			return mount, nil
++		}
++	}
++	if err := scanner.Err(); err != nil {
++		return "", fmt.Errorf("%w: %w", ErrNoCgroupV2, err)
++	}
++	return "", fmt.Errorf("%w: no cgroup2 filesystem mounted", ErrNoCgroupV2)
++}
++
++// mountinfo octal-escapes the characters that would break its format.
++var mountInfoUnescaper = strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
++
++func unescapeMountInfo(field string) string {
++	return mountInfoUnescaper.Replace(field)
++}
++
++// cgroupDirOf locates pid's cgroup directory under mount.
++//
++// The membership path is relative to this process's cgroup namespace, while
++// the mount shows the hierarchy from the mount's own root, and the two only
++// compose when they agree on that root. They do not when a container runtime
++// bind-mounts the host's whole hierarchy into a private cgroup namespace: the
++// process then reads "0::/" for a cgroup several levels down. So the path is
++// only a first guess, and the directory whose cgroup.procs lists pid is the
++// answer wherever it is.
++func cgroupDirOf(mount, membership string, pid app.PID) (string, error) {
++	candidate := filepath.Join(mount, strings.TrimPrefix(membership, "0::"))
++	if cgroupLists(candidate, pid) {
++		return candidate, nil
++	}
++
++	found := ""
++	err := filepath.WalkDir(mount, func(path string, d fs.DirEntry, err error) error {
++		if err != nil || !d.IsDir() {
++			return nil
++		}
++		if cgroupLists(path, pid) {
++			found = path
++			return fs.SkipAll
++		}
++		return nil
++	})
++	if err != nil {
++		return "", fmt.Errorf("walking %s: %w", mount, err)
++	}
++	if found == "" {
++		return "", fmt.Errorf("%w: pid %d is not listed under %s", ErrNoCgroupV2, pid, mount)
++	}
++	return found, nil
++}
++
++// cgroupLists reports whether dir's cgroup.procs names pid.
++func cgroupLists(dir string, pid app.PID) bool {
++	f, err := os.Open(filepath.Join(dir, cgroupProcsFile))
++	if err != nil {
++		return false
++	}
++	defer f.Close()
++
++	want := strconv.Itoa(int(pid))
++	scanner := bufio.NewScanner(f)
++	for scanner.Scan() {
++		if scanner.Text() == want {
++			return true
++		}
++	}
++	return false
++}
++
++func statfsIsCgroup2(path string) bool {
++	var st unix.Statfs_t
++	return unix.Statfs(path, &st) == nil && st.Type == unix.CGROUP2_SUPER_MAGIC
++}
++
++func dirInode(dir string) (uint64, error) {
++	info, err := os.Stat(dir)
++	if err != nil {
++		return 0, err
++	}
++	st, ok := info.Sys().(*syscall.Stat_t)
++	if !ok {
++		return 0, fmt.Errorf("no inode for %s", dir)
++	}
++	return st.Ino, nil
++}
+diff --git a/pkg/internal/procs/own_cgroup_linux_test.go b/pkg/internal/procs/own_cgroup_linux_test.go
+new file mode 100644
+index 000000000..60296cbf1
+--- /dev/null
++++ b/pkg/internal/procs/own_cgroup_linux_test.go
+@@ -0,0 +1,227 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++//go:build linux
++
++package procs
++
++import (
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++
++	"go.opentelemetry.io/obi/pkg/appolly/app"
++)
++
++const fixturePID = 4242
++
++// cgroupFixture fakes /proc and a cgroup2 mount in temporary directories.
++type cgroupFixture struct {
++	proc  string
++	mount string
++}
++
++func newCgroupFixture(t *testing.T) *cgroupFixture {
++	t.Helper()
++	fx := &cgroupFixture{proc: t.TempDir(), mount: t.TempDir()}
++
++	origRoot, origMounts, origInfo := procRootPath, cgroup2Mounts, mountInfoPath
++	origIsFS, origInode, origPID := isCgroup2FS, cgroupDirInode, ownPID
++	t.Cleanup(func() {
++		procRootPath, cgroup2Mounts, mountInfoPath = origRoot, origMounts, origInfo
++		isCgroup2FS, cgroupDirInode, ownPID = origIsFS, origInode, origPID
++	})
++	procRootPath = fx.proc
++	cgroup2Mounts = []string{fx.mount}
++	mountInfoPath = filepath.Join(fx.proc, "self-mountinfo")
++	isCgroup2FS = func(path string) bool { return path == fx.mount }
++	ownPID = func() int { return fixturePID }
++
++	return fx
++}
++
++// process fakes /proc/<pid>/cgroup.
++func (fx *cgroupFixture) process(t *testing.T, pid int, cgroupFile string) {
++	t.Helper()
++	dir := filepath.Join(fx.proc, strconv.Itoa(pid))
++	require.NoError(t, os.MkdirAll(dir, 0o755))
++	require.NoError(t, os.WriteFile(filepath.Join(dir, "cgroup"), []byte(cgroupFile), 0o644))
++}
++
++// cgroup fakes a cgroup directory whose cgroup.procs lists pids.
++func (fx *cgroupFixture) cgroup(t *testing.T, rel string, pids ...int) string {
++	t.Helper()
++	dir := filepath.Join(fx.mount, rel)
++	require.NoError(t, os.MkdirAll(dir, 0o755))
++	var procs strings.Builder
++	for _, pid := range pids {
++		procs.WriteString(strconv.Itoa(pid) + "\n")
++	}
++	require.NoError(t, os.WriteFile(filepath.Join(dir, cgroupProcsFile), []byte(procs.String()), 0o644))
++	return dir
++}
++
++func realInode(t *testing.T, dir string) uint64 {
++	t.Helper()
++	ino, err := dirInode(dir)
++	require.NoError(t, err)
++	return ino
++}
++
++func TestOwnCgroupInHostNamespace(t *testing.T) {
++	fx := newCgroupFixture(t)
++	fx.process(t, fixturePID, "0::/system.slice/obi.service\n")
++	fx.cgroup(t, "", 1)
++	fx.cgroup(t, "system.slice", 2)
++	own := fx.cgroup(t, "system.slice/obi.service", fixturePID)
++
++	got, err := findOwnCgroup()
++	require.NoError(t, err)
++	assert.Equal(t, own, got.Dir)
++	assert.Equal(t, realInode(t, own), got.ID)
++	assert.NotEqual(t, uint64(rootCgroupID), got.ID)
++
++	fx.process(t, 7, "0::/system.slice/obi.service\n")
++	fx.process(t, 8, "0::/system.slice/app.service\n")
++	fx.process(t, 9, "0::/system.slice/obi.service/worker\n")
++	assert.True(t, got.Contains(7), "a process in the same cgroup")
++	assert.False(t, got.Contains(8), "a process in a sibling cgroup")
++	assert.False(t, got.Contains(9), "a process in a child cgroup")
++	assert.False(t, got.Contains(10), "a process that is gone")
++}
++
++// A container runtime that bind-mounts the host hierarchy into a private
++// cgroup namespace: the membership reads "0::/" while the cgroup is two
++// levels down the mount, and the mount root lists other processes.
++func TestOwnCgroupBehindPrivateNamespaceBindMount(t *testing.T) {
++	fx := newCgroupFixture(t)
++	fx.process(t, fixturePID, "0::/\n")
++	fx.cgroup(t, "", 1, 2)
++	fx.cgroup(t, "system.slice", 3)
++	own := fx.cgroup(t, "system.slice/docker-0123abcd.scope", 4241, fixturePID, 4243)
++
++	got, err := findOwnCgroup()
++	require.NoError(t, err)
++	assert.Equal(t, own, got.Dir)
++	assert.Equal(t, realInode(t, own), got.ID)
++
++	fx.process(t, 4243, "0::/\n")
++	fx.process(t, 1, "0::/../../init.scope\n")
++	fx.process(t, 3, "0::/../other-0123.scope\n")
++	assert.True(t, got.Contains(4243), "a process in the same container")
++	assert.False(t, got.Contains(1), "a process outside the namespace")
++	assert.False(t, got.Contains(3), "a process in a sibling container")
++}
++
++func TestOwnCgroupRejectsTheHierarchyRoot(t *testing.T) {
++	fx := newCgroupFixture(t)
++	fx.process(t, fixturePID, "0::/\n")
++	fx.cgroup(t, "", 1, fixturePID)
++	cgroupDirInode = func(string) (uint64, error) { return rootCgroupID, nil }
++
++	_, err := findOwnCgroup()
++	require.ErrorIs(t, err, ErrRootCgroup)
++}
++
++func TestOwnCgroupWithoutUnifiedHierarchy(t *testing.T) {
++	fx := newCgroupFixture(t)
++	fx.process(t, fixturePID, "12:memory:/docker/0123abcd\n1:name=systemd:/docker/0123abcd\n")
++	fx.cgroup(t, "", fixturePID)
++
++	_, err := findOwnCgroup()
++	require.ErrorIs(t, err, ErrNoCgroupV2)
++}
++
++func TestOwnCgroupFindsTheMountInMountInfo(t *testing.T) {
++	fx := newCgroupFixture(t)
++	fx.process(t, fixturePID, "0::/obi\n")
++	own := fx.cgroup(t, "obi", fixturePID)
++	cgroup2Mounts = []string{filepath.Join(fx.proc, "nowhere")}
++	require.NoError(t, os.WriteFile(mountInfoPath, []byte(
++		"30 24 0:27 / /sys/fs/cgroup/memory rw,nosuid - cgroup cgroup rw,memory\n"+
++			"559 466 0:30 / "+fx.mount+" ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup2 rw,nsdelegate\n"), 0o644))
++
++	got, err := findOwnCgroup()
++	require.NoError(t, err)
++	assert.Equal(t, own, got.Dir)
++}
++
++func TestOwnCgroupWithoutAnyMount(t *testing.T) {
++	fx := newCgroupFixture(t)
++	fx.process(t, fixturePID, "0::/obi\n")
++	cgroup2Mounts = []string{filepath.Join(fx.proc, "nowhere")}
++	require.NoError(t, os.WriteFile(mountInfoPath, []byte(
++		"30 24 0:27 / /sys/fs/cgroup/memory rw,nosuid - cgroup cgroup rw,memory\n"), 0o644))
++
++	_, err := findOwnCgroup()
++	require.ErrorIs(t, err, ErrNoCgroupV2)
++}
++
++func TestOwnCgroupNotListedAnywhere(t *testing.T) {
++	fx := newCgroupFixture(t)
++	fx.process(t, fixturePID, "0::/\n")
++	fx.cgroup(t, "", 1)
++	fx.cgroup(t, "system.slice/other.scope", 2)
++
++	_, err := findOwnCgroup()
++	require.ErrorIs(t, err, ErrNoCgroupV2)
++}
++
++func TestUnescapeMountInfo(t *testing.T) {
++	assert.Equal(t, "/mnt/with space\\back", unescapeMountInfo(`/mnt/with\040space\134back`))
++}
++
++func TestCgroupContainsUsesTheSameReader(t *testing.T) {
++	fx := newCgroupFixture(t)
++	c := &Cgroup{membership: "0::/a/b"}
++	fx.process(t, 5, "11:pids:/a/b\n0::/a/b\n")
++	fx.process(t, 6, "0::/a/b/c\n")
++	assert.True(t, c.Contains(app.PID(5)))
++	assert.False(t, c.Contains(app.PID(6)))
++}
++
++// A hybrid host whose runtime creates its scope in every hierarchy: the
++// unified cgroup is the container, and the feature works.
++func TestOwnCgroupOnHybridHostWithSystemdDriver(t *testing.T) {
++	fx := newCgroupFixture(t)
++	fx.process(t, fixturePID, "12:memory:/system.slice/docker-0123abcd.scope\n"+
++		"1:name=systemd:/system.slice/docker-0123abcd.scope\n"+
++		"0::/system.slice/docker-0123abcd.scope\n")
++	fx.cgroup(t, "", 1)
++	own := fx.cgroup(t, "system.slice/docker-0123abcd.scope", fixturePID)
++
++	got, err := findOwnCgroup()
++	require.NoError(t, err)
++	assert.Equal(t, own, got.Dir)
++}
++
++// A hybrid host whose runtime only populates the v1 controllers: every
++// container shares the unified cgroup of the runtime's service, so "own
++// cgroup" would cover them all.
++func TestOwnCgroupOnHybridHostWithCgroupfsDriver(t *testing.T) {
++	fx := newCgroupFixture(t)
++	fx.process(t, fixturePID, "12:memory:/docker/0123abcd\n"+
++		"1:name=systemd:/system.slice/containerd.service\n"+
++		"0::/system.slice/containerd.service\n")
++	fx.cgroup(t, "system.slice/containerd.service", fixturePID, 4243, 4244)
++
++	_, err := findOwnCgroup()
++	require.ErrorIs(t, err, ErrHybridCgroup)
++}
++
++// Behind a private cgroup namespace on a hybrid host every path reads as
++// the root, so the two layouts above cannot be told apart.
++func TestOwnCgroupOnHybridHostBehindPrivateNamespace(t *testing.T) {
++	fx := newCgroupFixture(t)
++	fx.process(t, fixturePID, "12:memory:/\n0::/\n")
++	fx.cgroup(t, "", 1)
++	fx.cgroup(t, "system.slice/docker-0123abcd.scope", fixturePID)
++
++	_, err := findOwnCgroup()
++	require.ErrorIs(t, err, ErrHybridCgroup)
++}
+diff --git a/pkg/internal/procs/own_cgroup_notlinux.go b/pkg/internal/procs/own_cgroup_notlinux.go
+new file mode 100644
+index 000000000..e4151bd6d
+--- /dev/null
++++ b/pkg/internal/procs/own_cgroup_notlinux.go
+@@ -0,0 +1,30 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++//go:build !linux
++
++package procs // import "go.opentelemetry.io/obi/pkg/internal/procs"
++
++import (
++	"errors"
++
++	"go.opentelemetry.io/obi/pkg/appolly/app"
++)
++
++// Cgroup is the cgroup v2 node this process runs in. Only Linux has them.
++type Cgroup struct {
++	ID  uint64
++	Dir string
++}
++
++var (
++	ErrNoCgroupV2   = errors.New("no cgroup v2 membership")
++	ErrRootCgroup   = errors.New("process is in the root cgroup")
++	ErrHybridCgroup = errors.New("the unified hierarchy does not isolate this process on this hybrid cgroup host")
++)
++
++func OwnCgroup() (*Cgroup, error) { return nil, ErrNoCgroupV2 }
++
++func (c *Cgroup) Contains(app.PID) bool { return false }
++
++func (c *Cgroup) String() string { return "" }
+diff --git a/pkg/obi/config.go b/pkg/obi/config.go
+index 388acbcde..6a83b6de6 100644
+--- a/pkg/obi/config.go
++++ b/pkg/obi/config.go
+@@ -346,6 +346,7 @@ var DefaultConfig = Config{
+ 				Metadata: map[string]*services.GlobAttr{"k8s_namespace": &k8sDefaultNamespacesGlob},
+ 			},
+ 		},
++		ExcludeOwnCgroup:           true,
+ 		MinProcessAge:              5 * time.Second,
+ 		ProcessContextPollInterval: time.Second,
+ 		DefaultOtlpGRPCPort:        4317,
+diff --git a/pkg/obi/config_test.go b/pkg/obi/config_test.go
+index 5a1f01346..f026388eb 100644
+--- a/pkg/obi/config_test.go
++++ b/pkg/obi/config_test.go
+@@ -399,6 +399,7 @@ discovery:
+ 		},
+ 		Discovery: services.DiscoveryConfig{
+ 			ExcludeOTelInstrumentedServices: true,
++			ExcludeOwnCgroup:                true,
+ 			MinProcessAge:                   5 * time.Second,
+ 			ProcessContextPollInterval:      time.Second,
+ 			DefaultExcludeServices: services.RegexDefinitionCriteria{

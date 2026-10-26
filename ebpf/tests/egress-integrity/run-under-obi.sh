@@ -11,6 +11,7 @@ start_file=/tmp/egress-integrity.start
 obi_pid=
 payload_pid=
 early_pid=
+own_early_pid=
 
 cleanup() {
   status=$?
@@ -18,6 +19,7 @@ cleanup() {
   [ -n "$payload_pid" ] && kill "$payload_pid" 2>/dev/null
   [ -n "$obi_pid" ] && kill "$obi_pid" 2>/dev/null
   [ -n "$early_pid" ] && kill -9 "$early_pid" 2>/dev/null
+  [ -n "$own_early_pid" ] && kill "$own_early_pid" 2>/dev/null
   sleep 1
   [ -n "$payload_pid" ] && kill -9 "$payload_pid" 2>/dev/null
   [ -n "$obi_pid" ] && kill -9 "$obi_pid" 2>/dev/null
@@ -51,6 +53,17 @@ if ! grep -q ' /sys/kernel/tracing tracefs ' /proc/mounts; then
   mount -t tracefs tracefs /sys/kernel/tracing
 fi
 
+# OBI leaves its own cgroup out of the traces (patch 016), and in this
+# container everything starts in the root cgroup, the payload included. Give
+# OBI a cgroup of its own, as a container runtime would, and tell the payload
+# where it is: the own-cgroup scenario moves its subject in there.
+obi_cgroup=/sys/fs/cgroup/obi
+if ! test -w /sys/fs/cgroup; then
+  echo "the cgroup2 hierarchy is read-only here; cannot give OBI a cgroup of its own"
+  exit 1
+fi
+mkdir -p "$obi_cgroup"
+
 # The deny-child scenario needs '*deny-child*' excluded from instrumentation,
 # and it is the runner's job rather than each caller's: the scenario is part of
 # this harness, so its precondition travels with it. Inserted right after the
@@ -81,10 +94,33 @@ echo "$early_pid" >"$early_pid_file"
 # keeps bash from printing a job notification when cleanup kills it
 disown "$early_pid"
 
+# Connections older than OBI, for the own-cgroup scenario's other half: the
+# socket iterator has to find them, the connect kprobe never saw them. The
+# payload runs as their parent before OBI exists, its children connect, and
+# they all sit on the gate until the runner opens it once the payload proper
+# is done. Started at the discovered path, so the parent is instrumented.
+own_early_gate=/tmp/own-cgroup-early.gate
+own_early_log=/tmp/own-cgroup-early.log
+rm -f "$own_early_gate"
+OBI_CGROUP_DIR="$obi_cgroup" "$payload" -own-cgroup-early-role parent -early-gate "$own_early_gate" \
+  >"$own_early_log" 2>&1 &
+own_early_pid=$!
+for _ in {1..50}; do
+  grep -q "connections established" "$own_early_log" && break
+  sleep 0.2
+done
+if ! grep -q "connections established" "$own_early_log"; then
+  echo "the early own-cgroup connections did not come up"
+  cat "$own_early_log"
+  exit 1
+fi
+
 rm -f "$start_file"
-"$obi" -config "$config" >"$obi_log" 2>&1 &
+# the shell joins the cgroup, then becomes OBI, so $! is OBI's pid
+bash -c 'echo $$ >"$1/cgroup.procs" && shift && exec "$@"' obi-in-cgroup \
+  "$obi_cgroup" "$obi" -config "$config" >"$obi_log" 2>&1 &
 obi_pid=$!
-timeout --signal=TERM --kill-after=10s 150s \
+OBI_CGROUP_DIR="$obi_cgroup" timeout --signal=TERM --kill-after=10s 150s \
   "$payload" -start-file "$start_file" >"$payload_log" 2>&1 &
 payload_pid=$!
 
@@ -118,6 +154,15 @@ if grep -qE "couldn't load tracer.*Obi(PacketExtender|SockmapTracker|InjectorTcp
   exit 1
 fi
 
+# The own-cgroup scenario is only meaningful if OBI identified its cgroup;
+# in the root cgroup, or without one, it would exclude nothing and the
+# scenario's subject would be instrumented like its parent.
+if ! grep -q "excluding the instrumentation's own cgroup" "$obi_log"; then
+  echo "OBI did not identify its own cgroup"
+  grep -i "own cgroup" "$obi_log" || true
+  exit 1
+fi
+
 case "$expected_tracer" in
   go)
     grep -Fq 'program=*gotracer.Tracer' "$obi_log"
@@ -135,6 +180,16 @@ touch "$start_file"
 wait "$payload_pid"
 cat "$payload_log"
 
+# release the connections older than OBI, now that it has long since loaded
+touch "$own_early_gate"
+if ! wait "$own_early_pid"; then
+  echo "own-cgroup-early: the early connections failed"
+  cat "$own_early_log"
+  exit 1
+fi
+own_early_pid=
+cat "$own_early_log"
+
 # declined-upgrade: a socket parked by an Upgrade request must stay observable,
 # so each request after the refused upgrade needs a client span in the trace
 # printer output. Only the generic tracer parses this raw-syscall traffic.
@@ -148,6 +203,59 @@ if [ "$expected_tracer" = generic ]; then
   done
   if [ "$spans" -lt 3 ]; then
     echo "declined-upgrade: OBI printed $spans of 3 client spans for the requests after the refused upgrade"
+    exit 1
+  fi
+
+  # own-cgroup: the request from the instrumentation's cgroup must not become
+  # a server span of the instrumented payload, while the control request sent
+  # right after it must. The control proves the server side is being parsed
+  # at all, so a missing own-cgroup span is an exclusion and not an outage.
+  # the printer follows the path with the route in parentheses
+  control_pattern='HTTP\(subType=[0-9]+\) 204 GET /own-cgroup-control[ (]'
+  controls=0
+  for _ in {1..30}; do
+    controls=$(grep -cE "$control_pattern" "$obi_log" || true)
+    [ "$controls" -ge 1 ] && break
+    sleep 1
+  done
+  if [ "$controls" -lt 1 ]; then
+    echo "own-cgroup: OBI printed no server span for the control request"
+    exit 1
+  fi
+  leaked=$(grep -cE 'GET /own-cgroup[ (]' "$obi_log" || true)
+  if [ "$leaked" -ne 0 ]; then
+    echo "own-cgroup: OBI printed $leaked spans for the request from its own cgroup"
+    grep -E 'GET /own-cgroup[ (]' "$obi_log"
+    exit 1
+  fi
+
+  # own-cgroup-early: the same on connections that existed before OBI, which
+  # only the socket iterator can have recorded, plus the accepted direction:
+  # the instrumented early parent's request to a listener in OBI's cgroup
+  # must keep its client span, because that connection was accepted into
+  # OBI's cgroup, not dialled from it.
+  early_control='HTTP\(subType=[0-9]+\) 204 GET /own-cgroup-early-control[ (]'
+  early_accepted='HTTPClient\(subType=[0-9]+\) [0-9]+ GET /own-cgroup-early-accepted[ (]'
+  controls=0
+  accepted=0
+  for _ in {1..30}; do
+    controls=$(grep -cE "$early_control" "$obi_log" || true)
+    accepted=$(grep -cE "$early_accepted" "$obi_log" || true)
+    [ "$controls" -ge 1 ] && [ "$accepted" -ge 1 ] && break
+    sleep 1
+  done
+  if [ "$controls" -lt 1 ]; then
+    echo "own-cgroup-early: OBI printed no server span for the control request on a connection older than it"
+    exit 1
+  fi
+  if [ "$accepted" -lt 1 ]; then
+    echo "own-cgroup-early: OBI printed no client span for the request to the listener in its own cgroup"
+    exit 1
+  fi
+  leaked=$(grep -cE 'GET /own-cgroup-early[ (]' "$obi_log" || true)
+  if [ "$leaked" -ne 0 ]; then
+    echo "own-cgroup-early: OBI printed $leaked spans for the request from its own cgroup on a connection older than it"
+    grep -E 'GET /own-cgroup-early[ (]' "$obi_log"
     exit 1
   fi
 fi
