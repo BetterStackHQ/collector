@@ -24,6 +24,8 @@ digest is pinned in `ebpf/Dockerfile`.
 | 017 | New | Names MongoDB spans from cut-short captures and adds `db.query.text`. Upstream candidate; no upstream equivalent yet. |
 | 018 | New | Accepts the whole int32 range of MongoDB request ids. Upstream candidate; no upstream equivalent yet. |
 | 019 | New | Postgres: skips statements without a query (BEGIN, COMMIT, SET) instead of falling back to a `PREPARED STATEMENT` span, so the pipelined query behind them is traced. Upstream candidate; no upstream equivalent yet. |
+| 020 | New | Names HTTP client spans from their own path when the only harvested route they match is a catch-all, and keeps the Host header's port in `url.full`. Upstream candidate; no upstream equivalent yet. |
+
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
 bounds are part of the base now. A successful fill can copy less than `msg->size`
@@ -558,4 +560,44 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   Verified on the box with pgjdbc 42.7.4 and PHP 8.3 pdo_pgsql against
   Postgres 17; the unit tests build the pipelined and the PDO writes from
   the captured message shapes.
+* 020-client-spans-own-path.patch
+  Name HTTP client spans from the request's own path. OBI harvests a
+  process's routes from its source (Django and Flask url patterns, Express
+  routers, Rails routes, Spring and JAX-RS annotations) and uses them to name
+  the spans of the requests the process *serves*, which is mostly what they
+  describe; both route providers apply the same harvested matcher to the
+  process's *outgoing* calls too, as a last resort before the unmatched-route
+  policy, which is right for the few that do describe outgoing calls (a
+  Spring Feign client's annotated interface). A Django project routinely ends
+  its urlpatterns with a catch-all `path("<path:url>", ...)`, which the
+  matcher honours as a whole-path wildcard, so every call a Django service
+  made to another service was named `GET /<path:url>` or `POST /<path:url>`
+  whatever it fetched, while the same calls from Node or Ruby were named
+  `POST /reserve` and `GET /stock/*`. A harvested route without a single
+  literal segment (`/<path:url>`, a bare `/{slug}`, `/*`), or with a
+  catch-all segment anywhere (`/api/<path:rest>`, a gateway that forwards
+  what it receives), now names incoming requests only; a client span that
+  matches one falls through to the unmatched-route policy like everyone
+  else's, which clusters it heuristically by default, while a Feign-style
+  `/users/{id}` still names the call it describes. The rule applies to route
+  tables harvested whole (Django's urlpatterns) and to the fragments most
+  other frameworks' routes are harvested as alike; a template the partial
+  matcher composes from fragments keeps naming a call when a literal fragment
+  is part of it, as before.
 
+  `url.full` on client spans also keeps the port the request's Host header
+  named: `http://inventory:4000/reserve` rather than
+  `http://inventory/reserve`, with `server.port` saying 4000 next to it. The
+  header parser splits the header into host and port and used to drop the
+  port; the span now carries it apart from the host (`HostHeaderPort`), so
+  `server.address` and the name resolver keep seeing the bare host while
+  `url.full` gets the authority the client wrote. The connection's port is
+  never used for this: through a forward proxy or a socket-level load
+  balancer it is not the URL's port.
+
+  Not changed: a SQL span without a table is still named `{operation}
+  {db.namespace}` (`SELECT bookstore` for `SELECT 1`), which is what the
+  OpenTelemetry database semantic conventions prescribe when there is no
+  collection to name; the same query shows up as plain `SELECT` only on
+  connections whose startup message the tracer never saw, so the namespace
+  is unknown.
