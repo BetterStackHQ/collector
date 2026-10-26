@@ -28,6 +28,7 @@ digest is pinned in `ebpf/Dockerfile`.
 | 021 | New | Python: a request's trace follows the copied context into anyio's worker threads (FastAPI sync endpoints). Upstream candidate; no upstream equivalent yet. |
 | 022 | New | Java: a thread hand-off reported by the Java agent links the worker to the thread holding the request's server span, not only to the submitter, so actor-style dispatchers (Pekko, Akka) keep their traces stitched. Upstream candidate; no upstream equivalent yet. |
 | 023 | New | FastCGI: a server that reads a request header first and the rest after (PHP-FPM) keeps up to 248 of the 256 captured bytes instead of 152, and the params parser honours four-byte lengths and stops at a cut value, so PHP-FPM spans are named `POST /orders` rather than `POST` or `GET /*`. Upstream candidate; no upstream equivalent yet. |
+| 024 | New | Memcached binary protocol (dalli 3, pylibmc, spymemcached) is reported as memcached with server and client spans, and a miss, an existing key or a failed conditional store is not an error; a connection is Couchbase only when it negotiated like one or uses Couchbase's KV ports. Upstream candidate; no upstream equivalent yet. |
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
 bounds are part of the base now. A successful fill can copy less than `msg->size`
@@ -716,3 +717,41 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   Not changed: the request still appears as three spans, two of them server
   spans, which is how nginx and PHP-FPM really talk; naming them
   consistently is what the ticket asked for.
+* 024-memcached-binary-protocol.patch
+  Tell memcached from Couchbase on the binary protocol they share. OBI's
+  Couchbase parser recognises memcached's binary protocol, which Couchbase
+  inherited, and labelled every such connection `db.system.name: couchbase`
+  with `kind: client` on both ends, and every non-success status an error.
+  Ruby's dalli 3 (Rails' `:mem_cache_store`; dalli 4 moved to the meta text
+  protocol), Python's pylibmc and Java's spymemcached all use that protocol,
+  so a Rails app showed a "Couchbase"
+  database it does not have, its memcached server's spans were clients too,
+  and every cache miss (`KeyNotFound`, status 1) was a red error although
+  the request succeeded. Node's `memcached` package uses the text protocol
+  and was fine.
+
+  A Couchbase client negotiates before its first KV operation (HELLO,
+  SELECT_BUCKET, GET_CLUSTER_CONFIG, GET_ERROR_MAP, collections) and the KV
+  service listens on 11210, 11207 or 11209; memcached clients send plain
+  GET/SET from the first byte. The parser now marks a connection as
+  Couchbase when it sees any Couchbase-only operation (those above plus
+  replica reads, observe, locks, *_WITH_META, sub-document and DCP
+  commands) or a selected bucket, or when either port is a Couchbase KV
+  port; anything else on the binary protocol is memcached and produces the
+  same span the text protocol does: a memcached client or server span by
+  direction, the key as the path, no namespace, and `KeyNotFound`,
+  `KeyExists` and `ItemNotStored` as normal results (the text parser lets
+  NOT_FOUND, EXISTS and NOT_STORED through the same way). SASL is not a
+  Couchbase signal: memcached speaks it too (`memcached -S`), and a
+  Couchbase SDK says HELLO first anyway. Couchbase spans and their error
+  semantics are unchanged; a Couchbase client on a non-standard port whose
+  negotiation happened before OBI watched the connection is the one case
+  that is now labelled memcached. Tests cover the default, the negotiation,
+  SASL, the ports, SELECT_BUCKET, the conditional outcomes and a key with
+  raw bytes.
+
+  Verified on the box with dalli 3.2.8 against memcached 1.6 (a miss, a set,
+  a hit and a delete every two seconds): every span `memcached`, the client's
+  as `client` and the memcached process's as `server`, 294 `GET`s and not one
+  error, where the stock build had 36 of 86 `GET`s red and both sides as
+  Couchbase clients.
