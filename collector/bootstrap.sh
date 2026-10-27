@@ -82,6 +82,11 @@ if [ -f "$BOOTSTRAPPED_FILE" ]; then
     fi
 fi
 
+# Hide the collector secret before a URL goes into the log
+redact_url() {
+    printf '%s' "$1" | sed -E 's/(collector_secret=)[^&]*/\1[REDACTED]/g'
+}
+
 # Function to make API request with error handling
 make_api_request() {
     local url="$1"
@@ -91,7 +96,6 @@ make_api_request() {
     local http_code
 
     while [ $retry_count -lt $max_retries ]; do
-      echo "$url"
         if [ -n "$output_file" ]; then
             http_code=$(curl -s -w "%{http_code}" -o "$output_file" "$url")
         else
@@ -104,7 +108,7 @@ make_api_request() {
             log_error "Authentication failed (HTTP $http_code). Check COLLECTOR_SECRET."
             exit 2
         elif [ "$http_code" = "404" ]; then
-            log_error "Endpoint not found (HTTP $http_code). URL: $url"
+            log_error "Endpoint not found (HTTP $http_code). URL: $(redact_url "$url")"
             exit 3
         else
             retry_count=$((retry_count + 1))
