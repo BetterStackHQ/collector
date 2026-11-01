@@ -168,6 +168,44 @@ def agent_pin(path):
     return match[1], match[2], match[3]
 
 
+AGENT_BINARIES = (("ebpf-agent", "ebpf-agent"), ("coroot", "node-agent"), ("obi", "ebpf-instrument"))
+
+
+def shipped_components(path):
+    """The agents the eBPF image ships: what its final stage copies from other stages, in the gauntlet's order."""
+    text = Path(path).read_text()
+    require(re.search(r"^FROM \$\{EBPF_AGENT_IMAGE\} AS ebpf-agent-source\s*$", text, re.MULTILINE),
+            "Dockerfile must build the ebpf-agent-source stage from EBPF_AGENT_IMAGE")
+    # Docker drops comment lines, including inside continuations, before joining them.
+    lines = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+    instructions = re.sub(r"\\[ \t]*\n", " ", "\n".join(lines)).splitlines()
+    starts = [i for i, line in enumerate(instructions) if re.match(r"\s*FROM\s", line, re.IGNORECASE)]
+    destinations = set()
+    for line in instructions[starts[-1] + 1 if starts else 0:]:
+        match = re.match(r"\s*COPY\s+(.*)", line, re.IGNORECASE)
+        if not match:
+            continue
+        arguments = match[1].strip()
+        flags = []
+        while arguments.startswith("--"):
+            flag, _, arguments = arguments.partition(" ")
+            flags.append(flag)
+            arguments = arguments.lstrip()
+        if not any(flag.startswith("--from=") for flag in flags):
+            continue
+        paths = json.loads(arguments) if arguments.startswith("[") else arguments.split()
+        if len(paths) < 2:
+            continue
+        *sources, destination = paths
+        if destination.rstrip("/") == "/usr/local/bin":
+            destinations.update("/usr/local/bin/" + source.rstrip("/").rsplit("/", 1)[-1] for source in sources)
+        else:
+            destinations.add(destination)
+    components = [name for name, binary in AGENT_BINARIES if "/usr/local/bin/" + binary in destinations]
+    require(components, "eBPF Dockerfile ships no known agent")
+    return components
+
+
 def make_bundle(args):
     require(SHA.fullmatch(args.source_sha), "full source SHA required")
     require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository), "invalid source repository")
@@ -180,14 +218,15 @@ def make_bundle(args):
         images[role] = resolve(repository, index)
     require(set(images) == ({"agent"} if args.kind == "agent" else {"collector", "collector-ebpf"}),
             "candidate must contain exactly its owned image roles")
-    components = {}
+    components, shipped = {}, {}
     if args.kind == "collector":
         require(args.dockerfile, "collector requires the actual eBPF Dockerfile")
         repository, _, index = agent_pin(args.dockerfile)
         components["agent"] = resolve(repository, index)
+        shipped["shipped_components"] = shipped_components(args.dockerfile)
     candidate = {"kind": args.kind, "origin": "ci", "repository": args.repository, "source_sha": args.source_sha,
                  "profile": environment("GAUNTLET_PROFILE"), "profile_revision": None,
-                 "bundle": {"images": images, "components": components, "config_bundle_hash": None}}
+                 "bundle": {"images": images, "components": components, "config_bundle_hash": None, **shipped}}
     save(args.output, candidate)
 
 

@@ -14,6 +14,11 @@ g = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g)
 SHA = "a" * 40
 OTHER = "b" * 40
+PIN = "ARG EBPF_AGENT_IMAGE=registry.example/agent:1.2.3@sha256:" + "4" * 64 + "\nFROM ${EBPF_AGENT_IMAGE} AS ebpf-agent-source\n"
+BUILDERS = PIN + "FROM debian:13.5 AS node-agent-builder\nRUN go build -o /usr/local/bin/node-agent .\n" \
+    "FROM obi-generator:0.2.16 AS obi-builder\nFROM debian:13.5-slim\n# COPY --from=node-agent-builder /n /usr/local/bin/node-agent\n"
+AGENT = "COPY --from=ebpf-agent-source --chmod=755 /ebpf-agent /usr/local/bin/ebpf-agent\n"
+OBI = "COPY --from=obi-builder --chmod=755 /tmp/obi/bin/obi /usr/local/bin/ebpf-instrument\n"
 
 
 def candidate():
@@ -22,7 +27,8 @@ def candidate():
     return {"kind": "collector", "origin": "ci", "repository": "example/collector", "source_sha": SHA,
             "profile": "collector", "profile_revision": "profile-1",
             "bundle": {"images": {"collector": image, "collector-ebpf": {**image, "repository": "registry.example/collector-ebpf"}},
-                       "components": {"agent": {**image, "repository": "registry.example/agent"}}, "config_bundle_hash": "config-1"}}
+                       "components": {"agent": {**image, "repository": "registry.example/agent"}},
+                       "shipped_components": ["ebpf-agent", "obi"], "config_bundle_hash": "config-1"}}
 
 
 class ClientChecks(unittest.TestCase):
@@ -78,7 +84,7 @@ class ClientChecks(unittest.TestCase):
             dockerfile = Path(folder, "Dockerfile")
             pin = "sha256:" + "4" * 64
             dockerfile.write_text("ARG EBPF_AGENT_IMAGE=registry.example/agent:1.2.3@" + pin +
-                                  "\nFROM ${EBPF_AGENT_IMAGE} AS ebpf-agent-source\n")
+                                  "\nFROM ${EBPF_AGENT_IMAGE} AS ebpf-agent-source\nFROM debian:13.5-slim\n" + AGENT)
             output = Path(folder, "candidate.json")
             args = argparse.Namespace(kind="collector", repository="example/collector", source_sha=SHA,
                                       image=[role + "=" + value["repository"] + "@" + value["index_digest"]
@@ -91,8 +97,40 @@ class ClientChecks(unittest.TestCase):
             api.assert_not_called()
             bundled = g.load(output)
             self.assertEqual(bundled["bundle"]["components"]["agent"]["index_digest"], pin)
+            self.assertEqual(bundled["bundle"]["shipped_components"], ["ebpf-agent"])
             self.assertEqual((bundled["profile"], bundled["profile_revision"], bundled["bundle"]["config_bundle_hash"]),
                              ("collector", None, None))
+
+    def test_shipped_components_are_what_the_final_stage_copies_in(self):
+        coroot = ["ebpf-agent", "coroot", "obi"]
+        cases = {
+            "leftover builder stages copy nothing": (BUILDERS + AGENT + OBI, ["ebpf-agent", "obi"]),
+            "file destination": (BUILDERS + AGENT + "COPY --from=node-agent-builder /usr/bin/coroot-node-agent "
+                                 "/usr/local/bin/node-agent\n" + OBI, coroot),
+            "renamed stage": (BUILDERS + AGENT + "COPY --from=coroot /node-agent /usr/local/bin/node-agent\n" + OBI, coroot),
+            "indented": (BUILDERS + "  " + AGENT + "\tCOPY --from=x /node-agent /usr/local/bin/node-agent\n" + OBI, coroot),
+            "continued": (BUILDERS + AGENT + "COPY --from=node-agent-builder \\\n    --chmod=755 \\\n"
+                          "    # node-agent\n    /usr/bin/node-agent /usr/local/bin/node-agent\n" + OBI, coroot),
+            "into the directory": (BUILDERS + "COPY --from=ebpf-agent-source /ebpf-agent /usr/local/bin/\n"
+                                   "COPY --from=x /build/node-agent /tmp/obi/bin/ebpf-instrument /usr/local/bin/\n", coroot),
+            "json form": (BUILDERS + 'COPY --from=ebpf-agent-source ["/ebpf-agent", "/usr/local/bin/ebpf-agent"]\n', ["ebpf-agent"]),
+            "only from build stages": (BUILDERS + AGENT + "COPY ebpf/node-agent /usr/local/bin/node-agent\n", ["ebpf-agent"]),
+            "only the final stage": (PIN + "FROM debian:13.5 AS early\n" + OBI + "FROM debian:13.5-slim\n" + AGENT,
+                                     ["ebpf-agent"]),
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            dockerfile = Path(folder, "Dockerfile")
+            for name, (text, expected) in cases.items():
+                dockerfile.write_text(text)
+                with self.subTest(name):
+                    self.assertEqual(g.shipped_components(dockerfile), expected)
+            for text, message in ((BUILDERS.replace(PIN, "FROM agent:1 AS ebpf-agent-source\n") + AGENT, "ebpf-agent-source"),
+                                  (BUILDERS, "no known agent")):
+                dockerfile.write_text(text)
+                with self.subTest(message), self.assertRaisesRegex(ValueError, message):
+                    g.shipped_components(dockerfile)
+        actual = Path(__file__).resolve().parents[2] / "ebpf" / "Dockerfile"
+        self.assertEqual(g.shipped_components(actual), ["ebpf-agent", "obi"])
 
     def test_post_has_longer_bounded_timeout_and_http_auth_is_not_transient(self):
         connection = Mock()
