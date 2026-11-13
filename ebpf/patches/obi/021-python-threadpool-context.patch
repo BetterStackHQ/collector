@@ -1,5 +1,5 @@
 diff --git a/bpf/common/python_task.h b/bpf/common/python_task.h
-index 1f093766c..afb9b8b54 100644
+index 1f09376..afb9b8b 100644
 --- a/bpf/common/python_task.h
 +++ b/bpf/common/python_task.h
 @@ -120,6 +120,38 @@ static __always_inline u8 resolve_python_context_task(u64 pid_tgid,
@@ -42,7 +42,7 @@ index 1f093766c..afb9b8b54 100644
  // Fallback is allowed with no active context or an explicitly ownerless context.
  static __always_inline python_task_resolution_t
 diff --git a/bpf/generictracer/python.c b/bpf/generictracer/python.c
-index b3b8da908..5eb8873a1 100644
+index b3b8da9..5eb8873 100644
 --- a/bpf/generictracer/python.c
 +++ b/bpf/generictracer/python.c
 @@ -198,6 +198,17 @@ int GUARDED_PROG(obi_uretprobe_context_run, struct pt_regs *, ctx) {

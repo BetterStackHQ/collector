@@ -1,8 +1,8 @@
 diff --git a/pkg/appolly/app/request/metric_attributes.go b/pkg/appolly/app/request/metric_attributes.go
-index 10bfb03e9..aee0a14f3 100644
+index 435913d..0d3ad89 100644
 --- a/pkg/appolly/app/request/metric_attributes.go
 +++ b/pkg/appolly/app/request/metric_attributes.go
-@@ -113,6 +113,10 @@ func DBQueryText(val string) attribute.KeyValue {
+@@ -114,6 +114,10 @@ func DBQueryText(val string) attribute.KeyValue {
  	return attribute.Key(attr.DBQueryText).String(val)
  }
  
@@ -14,10 +14,10 @@ index 10bfb03e9..aee0a14f3 100644
  	return attribute.Key(attr.DBNamespace).String(val)
  }
 diff --git a/pkg/appolly/app/request/span.go b/pkg/appolly/app/request/span.go
-index c1668e505..b5e8421a0 100644
+index 33ccb9e..c8267b0 100644
 --- a/pkg/appolly/app/request/span.go
 +++ b/pkg/appolly/app/request/span.go
-@@ -1544,7 +1544,11 @@ type Span struct {
+@@ -1550,7 +1550,11 @@ type Span struct {
  	// ParentConditional marks a parent that may already have finished when this
  	// span started: BPF cannot tell at that moment, so the pipeline settles the
  	// link against the parent span's real end timestamp before export.
@@ -30,7 +30,7 @@ index c1668e505..b5e8421a0 100644
  	TraceFlags        uint8          `json:"traceFlags,string"`
  	Links             []SpanLink     `json:"links,omitempty"`
  	Pid               PidInfo        `json:"-"`
-@@ -1980,7 +1984,12 @@ func SpanStatusCode(span *Span) string {
+@@ -2000,7 +2004,12 @@ func SpanStatusCode(span *Span) string {
  		return HTTPSpanStatusCode(span)
  	case EventTypeGRPC, EventTypeGRPCClient:
  		return GrpcSpanStatusCode(span)
@@ -44,7 +44,7 @@ index c1668e505..b5e8421a0 100644
  		if span.Status != 0 {
  			return StatusCodeError
  		}
-@@ -2019,6 +2028,15 @@ func (s *Span) IsDBSpan() bool {
+@@ -2039,6 +2048,15 @@ func (s *Span) IsDBSpan() bool {
  	return false
  }
  
@@ -60,7 +60,7 @@ index c1668e505..b5e8421a0 100644
  func SpanStatusMessage(span *Span) string {
  	switch span.Type {
  	case EventTypeManualSpan:
-@@ -2031,7 +2049,7 @@ func SpanStatusMessage(span *Span) string {
+@@ -2051,7 +2069,7 @@ func SpanStatusMessage(span *Span) string {
  			return mcp.ErrorMessage
  		}
  	case EventTypeDNS:
@@ -70,10 +70,10 @@ index c1668e505..b5e8421a0 100644
  		}
  	}
 diff --git a/pkg/appolly/app/request/span_test.go b/pkg/appolly/app/request/span_test.go
-index db150ef5a..f1e37b770 100644
+index 2d0e41d..5624a04 100644
 --- a/pkg/appolly/app/request/span_test.go
 +++ b/pkg/appolly/app/request/span_test.go
-@@ -2248,3 +2248,19 @@ func TestJSONRPCQualifiedMethodLeavesPayloadExtractedMethodsAlone(t *testing.T)
+@@ -2294,3 +2294,19 @@ func TestJSONRPCQualifiedMethodLeavesPayloadExtractedMethodsAlone(t *testing.T)
  		})
  	}
  }
@@ -94,10 +94,10 @@ index db150ef5a..f1e37b770 100644
 +	assert.Empty(t, DNSRCodeName(ok))
 +}
 diff --git a/pkg/ebpf/common/common.go b/pkg/ebpf/common/common.go
-index aad836b90..365cde1cb 100644
+index 46dc3ba..1f741aa 100644
 --- a/pkg/ebpf/common/common.go
 +++ b/pkg/ebpf/common/common.go
-@@ -327,6 +327,7 @@ type EBPFParseContext struct {
+@@ -331,6 +331,7 @@ type EBPFParseContext struct {
  	payloadExtraction           config.PayloadExtraction
  	httpEnricher                *ebpfhttp.HTTPEnricher
  	dnsEvents                   *expirable.LRU[dnsparser.DNSId, *request.Span]
@@ -105,7 +105,7 @@ index aad836b90..365cde1cb 100644
  	pendingSpanLinks            *pendingSpanLinks
  	pendingGoHTTPClientRequests *expirable.LRU[pendingGoHTTPClientKey, *pendingGoHTTPClientRequest]
  	goHTTPClientMaxPendingTime  time.Duration
-@@ -517,6 +518,12 @@ func NewEBPFParseContext(cfg *config.EBPFTracer, spansChan *msg.Queue[[]request.
+@@ -521,6 +522,12 @@ func NewEBPFParseContext(cfg *config.EBPFTracer, spansChan *msg.Queue[[]request.
  		stopEmitting:               stopEmitting,
  	}
  
@@ -119,7 +119,7 @@ index aad836b90..365cde1cb 100644
  		parseCtx.goHTTPClientMaxPendingTime = cfg.MaxTransactionTime
  		parseCtx.pendingGoHTTPClientRequests = expirable.NewLRU(
 diff --git a/pkg/ebpf/common/dns_request_transform.go b/pkg/ebpf/common/dns_request_transform.go
-index f3cceff6a..538d2d014 100644
+index f3cceff..538d2d0 100644
 --- a/pkg/ebpf/common/dns_request_transform.go
 +++ b/pkg/ebpf/common/dns_request_transform.go
 @@ -6,6 +6,8 @@ package ebpfcommon // import "go.opentelemetry.io/obi/pkg/ebpf/common"
@@ -286,7 +286,7 @@ index f3cceff6a..538d2d014 100644
  	return *span, false, nil
  }
 diff --git a/pkg/ebpf/common/dns_request_transform_test.go b/pkg/ebpf/common/dns_request_transform_test.go
-index efe69e54b..db5706a05 100644
+index efe69e5..db5706a 100644
 --- a/pkg/ebpf/common/dns_request_transform_test.go
 +++ b/pkg/ebpf/common/dns_request_transform_test.go
 @@ -4,6 +4,7 @@
@@ -509,10 +509,10 @@ index efe69e54b..db5706a05 100644
 +	assert.Eventually(t, func() bool { return len(emitted.list()) == 1 && !emitted.list()[0].DNSSearchProbe }, 2*time.Second, 5*time.Millisecond)
 +}
 diff --git a/pkg/export/attributes/names/attrs.go b/pkg/export/attributes/names/attrs.go
-index 6b4f029b7..73f7d3e0d 100644
+index 967a050..7b7aa09 100644
 --- a/pkg/export/attributes/names/attrs.go
 +++ b/pkg/export/attributes/names/attrs.go
-@@ -367,6 +367,9 @@ const (
+@@ -370,6 +370,9 @@ const (
  // DNS events
  const (
  	DNSQuestionName = Name(semconv.DNSQuestionNameKey)
@@ -524,7 +524,7 @@ index 6b4f029b7..73f7d3e0d 100644
  // GenAI events
 diff --git a/pkg/export/otel/tracesgen/dns_rcode_test.go b/pkg/export/otel/tracesgen/dns_rcode_test.go
 new file mode 100644
-index 000000000..290492e89
+index 0000000..290492e
 --- /dev/null
 +++ b/pkg/export/otel/tracesgen/dns_rcode_test.go
 @@ -0,0 +1,37 @@
@@ -566,10 +566,10 @@ index 000000000..290492e89
 +	}
 +}
 diff --git a/pkg/export/otel/tracesgen/tracesgen.go b/pkg/export/otel/tracesgen/tracesgen.go
-index 40093e986..dc3eddef7 100644
+index df31d64..19726e1 100644
 --- a/pkg/export/otel/tracesgen/tracesgen.go
 +++ b/pkg/export/otel/tracesgen/tracesgen.go
-@@ -1680,6 +1680,9 @@ func traceAttributesSelectorInternal(span *request.Span, optionalAttrs map[attr.
+@@ -1757,6 +1757,9 @@ func traceAttributesSelectorInternal(span *request.Span, optionalAttrs map[attr.
  		if _, ok := optionalAttrs[attr.DNSQuestionName]; ok {
  			attrs = appendIfSet(attrs, semconv.DNSQuestionName, span.Path)
  		}
