@@ -93,8 +93,10 @@ common tracer's `AllowPID` and retracts it from `BlockPID`. Explicit exclusions
 are checked before admission on every send. Non-excluded workers still inherit
 from a discovered parent. Parent and child are both numbered in OBI's pid
 namespace, as upstream's `valid_pid()` numbers them, so inheritance also
-follows a child into a nested pid namespace, for example a container started
-by an admitted parent. The generic tracer's filter remains separate so
+follows a direct child into a nested pid namespace (`unshare --pid --fork`,
+bwrap). A container started through Docker, containerd or podman is a child of
+the runtime's shim, not of the process that asked for it, so it inherits
+nothing from that process. The generic tracer's filter remains separate so
 admitting Go cannot enable duplicate generic spans.
 
 A required injector `tcp_connect` kprobe records socket admission in the dialing
