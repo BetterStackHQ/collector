@@ -1,4 +1,5 @@
 diff --git a/metrics/postgres/collector.go b/metrics/postgres/collector.go
+index a189750..71a4a30 100644
 --- a/metrics/postgres/collector.go
 +++ b/metrics/postgres/collector.go
 @@ -559,11 +559,6 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
