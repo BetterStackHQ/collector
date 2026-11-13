@@ -1,3 +1,15 @@
+diff --git a/metrics/exporter/exporter.go b/metrics/exporter/exporter.go
+index ecf1f83..242dc77 100644
+--- a/metrics/exporter/exporter.go
++++ b/metrics/exporter/exporter.go
+@@ -158,6 +158,7 @@ func New(cfg Config, opts Options, logger logger.Logger) (*Exporter, error) {
+ 			ConnectionTimeouts:             opts.CollectTimeout,
+ 			RedisMetricsOnly:               true,
+ 			ExcludeLatencyHistogramMetrics: true,
++			ExcludeCommandlogMetrics:       true,
+ 		}
+ 		if strings.Contains(cfg.Description, "elasticache:") || strings.Contains(cfg.Description, "memorystore:") || strings.Contains(cfg.Description, "ocicache:") { // managed services don't allow the CONFIG command
+ 			redisOpts.ConfigCommandName = "-"
 diff --git a/metrics/ksm/ksm.go b/metrics/ksm/ksm.go
 index 1c26f2d..d8bf913 100644
 --- a/metrics/ksm/ksm.go
