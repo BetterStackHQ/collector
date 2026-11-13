@@ -1,5 +1,5 @@
 diff --git a/pkg/ebpf/common/mongo_bson_partial_test.go b/pkg/ebpf/common/mongo_bson_partial_test.go
-index 14b6e4849..54d99030d 100644
+index 14b6e48..54d9903 100644
 --- a/pkg/ebpf/common/mongo_bson_partial_test.go
 +++ b/pkg/ebpf/common/mongo_bson_partial_test.go
 @@ -20,11 +20,12 @@ import (
@@ -71,7 +71,7 @@ index 14b6e4849..54d99030d 100644
 +	assert.True(t, info.Success)
 +}
 diff --git a/pkg/ebpf/common/mongo_detect_transform.go b/pkg/ebpf/common/mongo_detect_transform.go
-index 283ac3c17..cf366e717 100644
+index 283ac3c..cf366e7 100644
 --- a/pkg/ebpf/common/mongo_detect_transform.go
 +++ b/pkg/ebpf/common/mongo_detect_transform.go
 @@ -41,8 +41,6 @@ var (
@@ -104,7 +104,7 @@ index 283ac3c17..cf366e717 100644
  }
  
 diff --git a/pkg/ebpf/common/mongo_detect_transform_fuzz_test.go b/pkg/ebpf/common/mongo_detect_transform_fuzz_test.go
-index e00af635d..d3288025d 100644
+index e00af63..d328802 100644
 --- a/pkg/ebpf/common/mongo_detect_transform_fuzz_test.go
 +++ b/pkg/ebpf/common/mongo_detect_transform_fuzz_test.go
 @@ -121,7 +121,7 @@ func assertAcceptedMongoHeader(t *testing.T, payload []byte) {

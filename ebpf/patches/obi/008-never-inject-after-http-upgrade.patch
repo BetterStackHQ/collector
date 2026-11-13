@@ -1,8 +1,18 @@
 diff --git a/bpf/tpinjector/tpinjector.c b/bpf/tpinjector/tpinjector.c
-index e2e4bc6..90323d2 100644
+index 795a743..69c0e71 100644
 --- a/bpf/tpinjector/tpinjector.c
 +++ b/bpf/tpinjector/tpinjector.c
-@@ -210,11 +210,19 @@ h2_resume_after(struct sk_msg_md *msg, tailcall_ctx *t_ctx, u32 next_pos) {
+@@ -217,7 +217,8 @@ h2_resume_after(struct sk_msg_md *msg, tailcall_ctx *t_ctx, u32 next_pos) {
+ 
+ // Per-socket HTTP/2 detection state (sk_h2_conn_flag values). States only ever
+ // move towards confirmed or rejected; rejected is final, and confirmed can still
+-// become rejected when the SSL uprobes mark the socket.
++// become rejected when the SSL uprobes mark the socket. Upgraded (below) is
++// final too, and is only ever entered from none.
+ //
+ // We only splice an HPACK traceparent once we've confirmed a *genuine* HTTP/2
+ // stream. RFC 7540 §3.4/§3.5 require the client connection preface
+@@ -227,6 +228,13 @@ h2_resume_after(struct sk_msg_md *msg, tailcall_ctx *t_ctx, u32 next_pos) {
  // SETTINGS frame as the next bytes on the raw socket; instead the peer's framing
  // header follows. Injecting into such a stream shifts the outer framing and
  // corrupts the connection, so those sockets must be rejected.
@@ -16,23 +26,26 @@ index e2e4bc6..90323d2 100644
  enum {
      k_h2_sock_none = 0,      // nothing seen yet
      k_h2_sock_preface = 1,   // preface seen, awaiting the mandatory SETTINGS frame
-     k_h2_sock_confirmed = 2, // SETTINGS seen after preface — genuine HTTP/2, inject
-     k_h2_sock_rejected = 3,  // post-preface bytes were not SETTINGS — never inject
-+    k_h2_sock_upgraded = 4,  // 101 Switching Protocols seen: never inject
+@@ -237,6 +245,7 @@ enum {
+     // own length-prefixed messages matches once, then its own framing does not.
+     // A send longer than the frame walk decides nothing and leaves it here.
+     k_h2_sock_probation = 4,
++    k_h2_sock_upgraded = 5, // 101 Switching Protocols seen: never inject
  };
  
  static __always_inline u8 h2_sock_state(struct sk_msg_md *msg) {
-@@ -298,13 +306,43 @@ static __always_inline void set_h2_sock_state(struct sk_msg_md *msg, u8 state) {
+@@ -320,14 +329,44 @@ static __always_inline void set_h2_sock_state(struct sk_msg_md *msg, u8 state) {
  }
  
- // True while the socket is in an HTTP/2 scanning state (preface seen or
--// confirmed) — i.e. detect_h2 should keep driving its state machine. Rejected
+ // True while the socket is in an HTTP/2 scanning state (preface seen, probation
+-// or confirmed) — i.e. detect_h2 should keep driving its state machine. Rejected
 -// and never-seen sockets are excluded.
-+// confirmed) — i.e. detect_h2 should keep driving its state machine. Rejected,
++// or confirmed) — i.e. detect_h2 should keep driving its state machine. Rejected,
 +// upgraded, and never-seen sockets are excluded.
  static __always_inline bool is_h2_socket(struct sk_msg_md *msg) {
      const u8 state = h2_sock_state(msg);
-     return state == k_h2_sock_preface || state == k_h2_sock_confirmed;
+     return state == k_h2_sock_preface || state == k_h2_sock_probation ||
+            state == k_h2_sock_confirmed;
  }
  
 +// Terminal classifications: no payload on this socket may ever be injected into.
@@ -68,7 +81,7 @@ index e2e4bc6..90323d2 100644
  #ifndef ENOMSG
  #define ENOMSG 42
  #endif
-@@ -1014,10 +1052,10 @@ static __always_inline void wrap_http2_traceparent(struct sk_msg_md *msg,
+@@ -1130,10 +1169,10 @@ static __always_inline void wrap_http2_traceparent(struct sk_msg_md *msg,
      if (msg->size < k_h2_frame_header_len) {
          return;
      }
@@ -83,7 +96,7 @@ index e2e4bc6..90323d2 100644
          return;
      }
      if (is_h2_socket(msg)) {
-@@ -1103,6 +1141,25 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1245,6 +1284,25 @@ int obi_packet_extender(struct sk_msg_md *msg) {
          return SK_PASS;
      }
  
@@ -109,7 +122,7 @@ index e2e4bc6..90323d2 100644
      tailcall_ctx *t_ctx = tailcall_ctx_mem();
  
      if (!t_ctx) {
-@@ -1389,7 +1446,7 @@ int obi_packet_extender_detect_h2(struct sk_msg_md *msg) {
+@@ -1556,7 +1614,7 @@ int obi_packet_extender_detect_h2(struct sk_msg_md *msg) {
      u32 pos = t_ctx->h2_scan_pos;
  
      u8 state = h2_sock_state(msg);

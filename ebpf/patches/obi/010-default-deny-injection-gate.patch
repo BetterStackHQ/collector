@@ -1,6 +1,6 @@
 diff --git a/bpf/tpinjector/maps/sk_inject_gate.h b/bpf/tpinjector/maps/sk_inject_gate.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..0b634fbbe420c7cd9580e386d853768eba7d56b4
+index 0000000..0b634fb
 --- /dev/null
 +++ b/bpf/tpinjector/maps/sk_inject_gate.h
 @@ -0,0 +1,22 @@
@@ -27,7 +27,7 @@ index 0000000000000000000000000000000000000000..0b634fbbe420c7cd9580e386d853768e
 +    __type(value, u8);
 +} sk_inject_gate SEC(".maps");
 diff --git a/bpf/tpinjector/tpinjector.c b/bpf/tpinjector/tpinjector.c
-index 2e87b3e6cdc66c2e857ad02a704b676c71657698..f816d2ef3573bf048aa4affaefa9b145d53b23c7 100644
+index 69c0e71..92ebd0f 100644
 --- a/bpf/tpinjector/tpinjector.c
 +++ b/bpf/tpinjector/tpinjector.c
 @@ -50,6 +50,7 @@
@@ -87,25 +87,25 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..f816d2ef3573bf048aa4affaefa9b145
 -//   ├── pull_data + fill_msg_buffers   │  Committed to processing
 +//   ├── !valid_pid → SK_PASS           │  Unmonitored process
  //   │                                  │
- //   ├── is_h2_socket?                  │  Preface seen / confirmed H2: skip
- //   │     └─ tail-call detect_h2       │  preface check, drive the H2 chain
+ //   ├── is_h2_socket?                  │  Preface / probation / confirmed:
+ //   │     └─ tail-call detect_h2       │  skip HTTP/1, drive the H2 chain
  //   │                                 │
 -//   ├── HTTP/1 detected?              │  ── find_existing_tp ── create_tp ──
 +//   ├── HTTP/1 gate passed?           │  ── find_existing_tp ── create_tp ──
  //   │                                 │     write_msg_traceparent
  //   │                                 │
  //   └── fall through ─────────────────┴─▶ wrap_http2_traceparent
-@@ -139,6 +163,9 @@ enum {
-     k_tail_validate_h2_tp,
+@@ -143,6 +167,9 @@ enum {
      k_tail_detect_h2,
      k_tail_sniff_h2,
+     k_tail_parse_existing_tp,
 +    k_tail_http1_request_line,
 +    k_tail_http1_upgrade,
 +    k_tail_http1_dispatch,
  };
  
  int obi_packet_extender_write_msg_tp(struct sk_msg_md *msg);
-@@ -150,10 +177,13 @@ int obi_packet_extender_find_existing_h2_tp(struct sk_msg_md *msg);
+@@ -155,10 +182,13 @@ int obi_packet_extender_find_existing_h2_tp(struct sk_msg_md *msg);
  int obi_packet_extender_validate_h2_tp(struct sk_msg_md *msg);
  int obi_packet_extender_detect_h2(struct sk_msg_md *msg);
  int obi_packet_extender_sniff_h2(struct sk_msg_md *msg);
@@ -115,41 +115,42 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..f816d2ef3573bf048aa4affaefa9b145
  
  struct {
      __uint(type, BPF_MAP_TYPE_PROG_ARRAY);
--    __uint(max_entries, 9);
-+    __uint(max_entries, 12);
+-    __uint(max_entries, 10);
++    __uint(max_entries, 13);
      __uint(key_size, sizeof(u32));
      __array(values, int(void *));
  } extender_jump_table SEC(".maps") = {
-@@ -168,6 +198,9 @@ struct {
-             [k_tail_validate_h2_tp] = (void *)&obi_packet_extender_validate_h2_tp,
+@@ -174,6 +204,9 @@ struct {
              [k_tail_detect_h2] = (void *)&obi_packet_extender_detect_h2,
              [k_tail_sniff_h2] = (void *)&obi_packet_extender_sniff_h2,
+             [k_tail_parse_existing_tp] = (void *)&obi_packet_extender_parse_existing_tp,
 +            [k_tail_http1_request_line] = (void *)&obi_packet_extender_http1_request_line,
 +            [k_tail_http1_upgrade] = (void *)&obi_packet_extender_http1_upgrade,
 +            [k_tail_http1_dispatch] = (void *)&obi_packet_extender_http1_dispatch,
          },
  };
  
-@@ -183,6 +216,7 @@ typedef struct tailcall_ctx {
-     u32 h2_hpack_len;             // HPACK length (frame payload minus prefix and trailing pad)
+@@ -190,6 +223,7 @@ typedef struct tailcall_ctx {
      u32 h2_scan_pos;              // resume offset for detect_h2 across tail calls
      u32 h2_tp_candidate_pos;      // HPACK scan start or found candidate offset (>= max = none)
+     u32 http1_tp_offset;          // start of the HTTP/1 traceparent header
 +    u32 http1_buf_size;           // bytes copied from the current mapped message window
+     h2_sniff_state_t h2_framing;  // strict frame rules, carried across detect_h2 hops
      u8 niter;                     // HTTP/1 find-existing scan iteration counter
      u8 h2_frames;                 // H2 frames already injected this packet (capped)
-     u8 h2_tp_retries;             // malformed HPACK traceparent candidates retried this packet
-@@ -190,7 +224,10 @@ typedef struct tailcall_ctx {
+@@ -198,8 +232,10 @@ typedef struct tailcall_ctx {
      bool go_grpc_conn;            // Go gRPC egress: use uprobe-stored tps, never create
      bool tp_present;              // frame already carries a traceparent we cannot adopt
      bool scan_exhausted;          // retry budget ran out before the block was walked
 +    bool http1_req;               // gate verdict: this message is an injectable HTTP/1 request
 +    bool http1_h2c;               // gate verdict: this request asks for h2c
      u8 opener;                    // first HPACK field byte of the frame being considered
-+    u8 _pad[2];                   // -Wpadded is an error here, keep the tail explicit
+-    u8 _pad[4];
++    u8 _pad[6];                   // -Wpadded is an error here, keep the tail explicit
  } tailcall_ctx;
  
  SCRATCH_MEM(tailcall_ctx);
-@@ -349,6 +386,266 @@ static __always_inline bool http1_upgrade_completed(struct sk_msg_md *msg) {
+@@ -367,6 +403,266 @@ static __always_inline bool http1_upgrade_completed(struct sk_msg_md *msg) {
      return is_http1_101_response(msg->data, msg->data_end);
  }
  
@@ -416,7 +417,7 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..f816d2ef3573bf048aa4affaefa9b145
  #ifndef ENOMSG
  #define ENOMSG 42
  #endif
-@@ -1063,6 +1360,15 @@ static __always_inline void schedule_write_tcp_option(struct sk_msg_md *msg, tp_
+@@ -1081,6 +1377,15 @@ static __always_inline void schedule_write_tcp_option(struct sk_msg_md *msg, tp_
      tp_p->written = 1;
  }
  
@@ -432,7 +433,7 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..f816d2ef3573bf048aa4affaefa9b145
  static __always_inline void write_http_traceparent(struct sk_msg_md *msg, tp_info_pid_t *tp_pid) {
      // used for the upcoming tailcall
      tp_info_pid_t *tp_p = (tp_info_pid_t *)tp_info_mem();
-@@ -1193,41 +1499,48 @@ int obi_packet_extender_sniff_h2(struct sk_msg_md *msg) {
+@@ -1237,41 +1542,48 @@ int obi_packet_extender_sniff_h2(struct sk_msg_md *msg) {
  }
  
  // HTTP/1 only. Caller must skip this for H2 sockets — connection-scoped tp_pid
@@ -499,7 +500,7 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..f816d2ef3573bf048aa4affaefa9b145
  }
  
  // Sock_msg program which detects packets where it should add space for
-@@ -1240,6 +1553,13 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1284,6 +1596,13 @@ int obi_packet_extender(struct sk_msg_md *msg) {
          return SK_PASS;
      }
  
@@ -513,7 +514,7 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..f816d2ef3573bf048aa4affaefa9b145
      // A connection that legally left HTTP/1 via 101 Switching Protocols
      // (kubectl port-forward SPDY/3.1, WebSockets) carries an opaque tunnel
      // from then on: injecting into tunneled bytes that merely resemble an
-@@ -1251,12 +1571,10 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1295,12 +1614,10 @@ int obi_packet_extender(struct sk_msg_md *msg) {
      const u8 sock_state = h2_sock_state(msg);
  
      if (sock_is_never_inject(sock_state)) {
@@ -529,9 +530,9 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..f816d2ef3573bf048aa4affaefa9b145
      }
  
      tailcall_ctx *t_ctx = tailcall_ctx_mem();
-@@ -1278,17 +1596,179 @@ int obi_packet_extender(struct sk_msg_md *msg) {
-     t_ctx->h2_frames = 0;
+@@ -1323,17 +1640,179 @@ int obi_packet_extender(struct sk_msg_md *msg) {
      t_ctx->h2_tp_retries = 0;
+     bpf_memset(&t_ctx->h2_framing, 0, sizeof(t_ctx->h2_framing));
      t_ctx->go_grpc_conn = false;
 +    t_ctx->http1_h2c = false;
  
@@ -715,7 +716,7 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..f816d2ef3573bf048aa4affaefa9b145
          // per-stream decision in the h2 chain: inject only streams the uprobe left written=0
          t_ctx->go_grpc_conn = true;
          bpf_tail_call_static(msg, &extender_jump_table, k_tail_detect_h2);
-@@ -1299,17 +1779,12 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1344,17 +1823,12 @@ int obi_packet_extender(struct sk_msg_md *msg) {
          return SK_PASS;
      }
  
@@ -735,7 +736,7 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..f816d2ef3573bf048aa4affaefa9b145
          return SK_PASS;
      }
  
-@@ -1317,7 +1792,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1362,7 +1836,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
      bpf_dbg_printk("MSG TO=%llx:%d", conn.d_ip[3], conn.d_port);
      bpf_dbg_printk("MSG SIZE=%u", msg->size);
  
@@ -744,7 +745,7 @@ index 2e87b3e6cdc66c2e857ad02a704b676c71657698..f816d2ef3573bf048aa4affaefa9b145
      if (is_http) {
          bpf_dbg_printk("len=%d, s_port=%d", msg->size, msg->local_port);
          init_tp_ctx_parent_tp(t_ctx);
-@@ -1326,6 +1801,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
+@@ -1371,6 +1845,7 @@ int obi_packet_extender(struct sk_msg_md *msg) {
      }
  
      wrap_http2_traceparent(msg, &t_ctx->p_conn);

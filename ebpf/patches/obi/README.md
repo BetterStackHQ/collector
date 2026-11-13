@@ -4,38 +4,81 @@ Patches here are applied in lexical order (`NNN-description.patch`) on top of th
 tag pinned by `ARG OBI_VERSION` / `OBI_REVISION` in `ebpf/Dockerfile`. The build and
 `obi-patch-ci.yml` tolerate an empty directory.
 
-## v0.14.0 rebase
+## v0.15.2 rebase
 
-Pinned to `13d9b0c3f600a060bd78820a63ebec882b10757e`, using
-`obi-generator:0.2.16` (the v0.14.0 Makefile default). The generator's multi-arch
+Pinned to `b28e4e7fe0a01f1961b7c4747a13b8ff486d6fec`, using
+`obi-generator:0.2.17` (the v0.15.2 Makefile default). The generator's multi-arch
 digest is pinned in `ebpf/Dockerfile`.
 
 | Patch | Decision | Upstream comparison |
 | --- | --- | --- |
-| 008 | Keep unchanged | No HTTP/1 upgrade parking upstream. |
-| 009 | Already removed | [#3257](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3257) gates both HTTP detector paths on a fresh fill. [#3298](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3298) bounds copies by the mapped window; [#3304](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3304) invalidates failed fills for the other readers. |
-| 010 | Restack | Preserve upstream buffer, socket-cookie, and HTTP/2 ownership changes while retaining the default-deny injection gate and copied-window scan bounds. |
-| 011 | Keep unchanged | Upstream still checks discovery after the existing-trace and Go-gRPC routes. |
-| 012 | Restack | Preserve upstream socket-cookie handling while retaining discovery-scoped enrollment and inode-scoped backfill. |
-| 013 | Restack | Adapt to the `DynamicSelector` rename and new matcher test callers. Explicit exclusions still take precedence over admitted parents. |
-| 014 | Remove | [#3514](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3514) sizes the environment map with `validEnvCount()`, ignoring empty entries left by `setproctitle`. |
-| 015 | Restack | Preserve upstream socket-cookie includes and tracer detach lifecycle state while retaining injector-owned Go PID admission and connect tracking. |
-| 016 | New | Keeps OBI's own cgroup out of the traces. Upstream candidate; no upstream equivalent yet. |
-| 017 | New | Names MongoDB spans from cut-short captures and adds `db.query.text`. Upstream candidate; no upstream equivalent yet. |
-| 018 | New | Accepts the whole int32 range of MongoDB request ids. Upstream candidate; no upstream equivalent yet. |
-| 019 | New | Postgres: skips statements without a query (BEGIN, COMMIT, SET) instead of falling back to a `PREPARED STATEMENT` span, so the pipelined query behind them is traced. Upstream candidate; no upstream equivalent yet. |
-| 020 | New | Names HTTP client spans from their own path when the only harvested route they match is a catch-all, and keeps the Host header's port in `url.full`. Upstream candidate; no upstream equivalent yet. |
-| 021 | New | Python: a request's trace follows the copied context into anyio's worker threads (FastAPI sync endpoints). Upstream candidate; no upstream equivalent yet. |
-| 022 | New | Java: a thread hand-off reported by the Java agent links the worker to the thread holding the request's server span, not only to the submitter, so actor-style dispatchers (Pekko, Akka) keep their traces stitched. Upstream candidate; no upstream equivalent yet. |
-| 023 | New | FastCGI: a server that reads a request header first and the rest after (PHP-FPM) keeps up to 248 of the 256 captured bytes instead of 152, and the params parser honours four-byte lengths and stops at a cut value, so PHP-FPM spans are named `POST /orders` rather than `POST` or `GET /*`. Upstream candidate; no upstream equivalent yet. |
-| 024 | New | Memcached binary protocol (dalli 3, pylibmc, spymemcached) is reported as memcached with server and client spans, and a miss, an existing key or a failed conditional store is not an error; a connection is Couchbase only when it negotiated like one or uses Couchbase's KV ports. Upstream candidate; no upstream equivalent yet. |
-| 025 | New | DNS: an NXDOMAIN for one candidate of a resolver's search-list walk is not an error when another candidate of the same lookup resolves within two seconds; a lookup that fails on every candidate keeps its errors. Adds `dns.response.rcode`. Upstream candidate; no upstream equivalent yet. |
-| 026 | New | Python: derive the addresses of `context_run`, `context_tp_dealloc`, `context_new_empty`, `context_new_from_vars`, `_asyncio_Task___init__` and `task_step` from type slots, method tables and tail jumps when `libpython`/`_asyncio` carry no symbol table (the official `python:3.x-slim` images), so Python context tracking works there too. Upstream candidate; no upstream equivalent yet. |
+| 008 | Restack | Upstream's HTTP/2 probation state took value 4 of `sk_h2_conn_flag`; the upgraded state is now 5. No HTTP/1 upgrade parking upstream. |
+| 009 | Stays removed | The fill invalidation and mapped-window bounds of [#3257](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3257), [#3298](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3298) and [#3304](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3304) are still in the base. |
+| 010 | Restack | Upstream moved the existing-traceparent decode into its own tail call (`k_tail_parse_existing_tp`, slot 9), added the HTTP/2 probation state and rejects known-TLS sockets in `detect_h2`. Our three gate programs take slots 10 to 12 of a 13-entry jump table, and `tailcall_ctx` keeps upstream's new fields with a 6-byte tail pad. |
+| 011 | Restack | Upstream still checks discovery only after the existing-trace and Go-gRPC routes. Only the comment describing the PID filter changed. |
+| 012 | Keep unchanged | Upstream still enrolls every outgoing socket and backfills whole network namespaces. |
+| 013 | Reworked | Upstream replaced the hashed (namespaced pid, pid-namespace inode) filter and its `pid_cache` with an exact bitmap indexed by the pid as OBI's `/proc` numbers it. `denied_pids` now uses the same single-pid key, and the cache eviction is gone with the cache. Explicit exclusions still take precedence over admitted parents. |
+| 014 | Stays removed | [#3514](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation/pull/3514) sizes the environment map with `validEnvCount()`. |
+| 015 | Reworked | `inject_pids` uses the same single-pid key, derived with upstream's `obi_pid()` and `obi_parent_pid()`. Upstream still deletes Go HTTP/1 egress keys with unsorted ports. |
+| 016 | Keep unchanged | No upstream equivalent. |
+| 017 | Keep unchanged | No upstream equivalent. Upstream's span naming now appends the database to a command without a collection. |
+| 018 | Keep unchanged | No upstream equivalent. |
+| 019 | Keep unchanged | No upstream equivalent. |
+| 020 | Restack | Upstream already imports `net` where the patch needed it. Upstream now reports `server.address` without the Host header's port. |
+| 021 | Keep unchanged | No upstream equivalent. |
+| 022 | Keep unchanged | No upstream equivalent. |
+| 023 | Keep unchanged | No upstream equivalent. |
+| 024 | Keep unchanged | No upstream equivalent. |
+| 025 | Keep unchanged | No upstream equivalent. |
+| 026 | Keep unchanged | No upstream equivalent. |
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
-bounds are part of the base now. A successful fill can copy less than `msg->size`
+bounds are part of the base. A successful fill can copy less than `msg->size`
 after a failed pull; `http1_buf_size` carries that copied length across the gate's
 tail calls so they cannot classify stale bytes beyond it.
+
+### PID filter model
+
+Upstream v0.15.2 numbers every process the way OBI's `/proc` does: the host
+tgid when OBI runs in the initial pid namespace, its pid in OBI's namespace
+otherwise (`obi_pid()` and `obi_parent_pid()` in `bpf/pid/pid.h`, configured by
+the `pid_ns_mode` and `obi_pid_ns_ino` constants). `valid_pids` is one bit per
+such pid. 013 and 015 follow it: `denied_pids` and `inject_pids` are hashes keyed
+by that one u32, and userspace publishes the pid exactly as discovery and
+`AllowPID` receive it, the number `PIDsFilter.ProcPIDs()` writes into the
+bitmap. Nothing translates between namespaces any more.
+
+### Verifier cost
+
+Verified instruction counts on kernel 7.0.0-38, loading the injector
+collections directly with production settings (`filter_pids` on, `inject_flags`
+for both headers and TCP options). "Host" is the initial pid namespace,
+"container" a pid namespace of its own, which makes `obi_pid()` search for its
+level. The baseline is v0.14.0 with 008 to 016, measured the same way on the
+same kernel. Unpatched v0.15.2 is measured in the initial pid namespace; in a
+container its `obi_packet_extender` verifies at 21783.
+
+| Program | v0.14.0 + patches | v0.15.2 + patches, host | v0.15.2 + patches, container | v0.15.2 unpatched, host |
+| --- | --- | --- | --- | --- |
+| `obi_packet_extender` | 4368 | 2747 | 6256 | 7844 |
+| `obi_injector_tcp_connect` | 223 | 97 | 3595 | n/a |
+| `obi_packet_extender_http1_request_line` | 48810 | 48810 | 48810 | n/a |
+| `obi_packet_extender_http1_upgrade` | 102164 | 102164 | 102164 | n/a |
+| `obi_packet_extender_http1_dispatch` | 4293 | 4249 | 4249 | n/a |
+| `obi_sockmap_tracker` | 431 | 431 | 431 | 416 |
+| `obi_sk_iter_tcp` | 324 | 324 | 324 | 285 |
+
+Upstream's own tail programs keep their unpatched counts, except
+`obi_packet_extender_detect_h2` (3368 to 3388, the never-inject check of 008);
+the largest is `obi_packet_extender_write_msg_tp` at 391852.
+
+The generic tracer, loaded by OBI itself with the `ebpf` settings the collector
+ships (`track_request_headers`, `heuristic_sql_detect`, `context_propagation:
+headers,tcp`) in a container pid namespace, verifies every program with all
+patches applied. Its largest program, `obi_continue_protocol_http_tp`, stays at
+498410 with and without the patches. The largest increases are
+`obi_handle_buf_with_args` (53559 to 107963), `obi_kprobe_tcp_close` (57936 to
+67492) and `obi_protocol_tcp` (156332 to 164863).
 
 ## Go discovery admission correction
 
@@ -45,11 +88,16 @@ tracing registers `PIDTypeGo` in userspace; the generic tracer publishes only
 `sock_pids`. Requiring those maps therefore suppresses socket-level propagation
 for Go-specific tracing, including when no generic tracer is loaded.
 
-The injector now publishes its own namespace/PID allow-list from the common
-tracer's `AllowPID` and retracts it from `BlockPID`. Explicit exclusions are
-checked before admission on every send. Non-excluded workers still inherit
-from a discovered parent in the same PID namespace. The generic tracer's
-filter remains separate so admitting Go cannot enable duplicate generic spans.
+The injector now publishes its own PID allow-list (`inject_pids`) from the
+common tracer's `AllowPID` and retracts it from `BlockPID`. Explicit exclusions
+are checked before admission on every send. Non-excluded workers still inherit
+from a discovered parent. Parent and child are both numbered in OBI's pid
+namespace, as upstream's `valid_pid()` numbers them, so inheritance also
+follows a direct child into a nested pid namespace (`unshare --pid --fork`,
+bwrap). A container started through Docker, containerd or podman is a child of
+the runtime's shim, not of the process that asked for it, so it inherits
+nothing from that process. The generic tracer's filter remains separate so
+admitting Go cannot enable duplicate generic spans.
 
 A required injector `tcp_connect` kprobe records socket admission in the dialing
 task. The established sockops callback consumes that decision by socket pointer,
@@ -121,6 +169,20 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   request on the connection, for example after a refused WebSocket upgrade.
   The egress-integrity `declined-upgrade` scenario covers this.
 
+  Upstream's HTTP/2 states do not reopen either verdict. A send that tiles as
+  HTTP/2 frames on a socket with no preface only puts it on probation, and the
+  next send confirms or rejects it; both happen inside the HTTP/2 chain, which
+  is reached only through `k_tail_http1_dispatch`. A parked socket returns in
+  the entry program, and an h2c-gated one returns in dispatch unless the
+  message is itself an HTTP/1 request asking for h2c, which does not tile as
+  frames, so neither is ever sniffed onto probation or confirmed. The reverse
+  order fails safe: on a socket already on probation, preface or confirmed the
+  HTTP/1 gate is skipped as for any HTTP/2 socket, and an HTTP/1 request on a
+  probation socket fails the frame walk and rejects it. `detect_h2` tests the
+  never-inject states before upstream's TLS rejection, so that rejection cannot
+  overwrite an upgraded socket; both are final. TLS sends never get a fresh
+  fill, so the HTTP/1 gate refuses them as well.
+
   The gate's two bounded scans and the dispatch that follows them are three
   separate sk_msg programs (`k_tail_http1_request_line`,
   `k_tail_http1_upgrade`, `k_tail_http1_dispatch`). That is not decoration: the
@@ -147,9 +209,9 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   which is not passive observation: `sock_hash_update` runs `sk_psock_init` ->
   `tcp_bpf_update_proto` and replaces the socket's `sk_prot` with the tcp_bpf
   one. Those paths have now stalled unrelated workloads three times (a GitHub
-  runner's log stream, tailscaled's control-channel long poll; forensics in
-  T-20708). After this patch a socket is enrolled only if the process that
-  opened it passed `valid_pid`.
+  runner's log stream, tailscaled's control-channel long poll). After this
+  patch a socket is enrolled only if the process that opened it passed
+  `valid_pid`.
 
   Why the enrolling callback could not just test `valid_pid` itself: it does
   not run in the owner's context, and on the supported kernel floor it cannot
@@ -217,10 +279,7 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   duration of the walk. That also makes the walk per-pid rather than per-netns,
   since the allow-set is per-pid.
 
-  Verifier cost: the whole sk_msg chain is byte-identical to 011
-  (`obi_packet_extender` stays at 851 instructions, every tail-called program
-  unchanged); `obi_sockmap_tracker` goes 1801 -> 1881 and `obi_sk_iter_tcp`
-  428 -> 468.
+  Verifier cost: see the table under the v0.15.2 rebase.
 
   `ebpf/tests/egress-integrity` grows a `sockhash-scoping` scenario that proves
   it with a control: a second copy of the harness binary, at a path discovery
@@ -234,7 +293,7 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
 * 013-deny-before-parent-fallback.patch
   Make discovery's exclusions real in the kernel. `valid_pid()` (bpf/pid/pid.h)
   looks the calling process up in the allow bitmap and, on a miss, retries with
-  its namespaced parent pid. That fallback is deliberate — it is how OBI follows
+  its parent's pid. That fallback is deliberate — it is how OBI follows
   an instrumented process into its workers, and 012's scenario depends on it
   staying intact — but userspace only ever *declined to add* an excluded process
   to the allow-list; nothing ever told BPF what had been excluded. So with
@@ -244,21 +303,22 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   `tailscaled` enrolled 2/2 into the sockhash, because systemd was discovered
   through open_ports.
 
-  Semantics. A new `denied_pids` hash, keyed exactly like the allow-list
-  (`pid_data_t` = namespaced pid + pid-namespace inode), is consulted in
-  `valid_pid` ahead of both the allow bitmap and the parent fallback. Only the
-  caller's *own* identity is looked up: a denied parent does not taint its
-  children, because a supervisor the user excluded may legitimately fork the
-  workload they asked for, and that workload has its own allow-list entry.
-  Allowed processes and their non-excluded children are unaffected — the
-  fork-following fallback is untouched, and the per-event hot path is unchanged
-  because a `pid_cache` hit still returns before any of this.
+  Semantics. A new `denied_pids` hash, keyed like the allow bitmap by the u32
+  pid as OBI's `/proc` numbers the process, is consulted in `valid_pid` right
+  after `obi_pid()` derives that number, ahead of both the allow bitmap and the
+  parent fallback. Only the caller's *own* pid is looked up: a denied parent
+  does not taint its children, because a supervisor the user excluded may
+  legitimately fork the workload they asked for, and that workload has its own
+  allow-list bit. Allowed processes and their non-excluded children are
+  unaffected — the fork-following fallback is untouched. Upstream removed the
+  `pid_cache` memo in v0.15.2, so nothing returns ahead of the lookup: a denial
+  takes effect on the process's next event, and every event that reaches the
+  filter (with `filter_pids` on) pays one extra hash lookup.
 
-  An exact hash rather than a second copy of the bitmap: `valid_pids` hashes
-  (ns, pid) into 192053 bits with no collision resolution, which upstream can
-  afford because a collision there fails *open* and merely lets an extra process
-  through. The same collision in a deny structure fails closed and would
-  silently stop instrumenting a process the user did select.
+  An exact hash rather than a second bitmap: the deny set is small and sparse,
+  and an exact key can never deny a process the user did select because of a
+  stale or colliding entry, which would fail closed and silently stop
+  instrumenting it.
 
   Who publishes it. The criteria matcher (`filterCreated` in
   pkg/appolly/discover/matcher.go) is the only component that evaluates
@@ -268,20 +328,13 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   matches an exclusion and retracts when the same pid matches the criteria
   instead; `filterDeleted` retracts on exit, because pids are reused and a
   denial that outlived its process would silently stop instrumenting the next
-  owner. The keys are every NSpid level of the process under its pid-namespace
-  inode, exactly as `PIDsFilter.addPID()` records the allow side, so the two
-  sides agree whichever level the kernel derives. The map is reached by name
+  owner. The key is the pid as the matcher receives it, the same number
+  `PIDsFilter.ProcPIDs()` writes into the allow bitmap, so the two sides agree
+  in every pid namespace mode. The map is reached by name
   through `EBPFEventContext.EBPFMaps` — the agent-wide store of
   OBI_PIN_INTERNAL maps that `ResolveMaps()` fills — which is one map object
   shared by every collection that includes pid.h, with a lifetime independent of
   any single ProcessTracer.
-
-  Each denial also evicts the pid from `pid_cache`, and that is not
-  housekeeping. `pid_cache` is a positive memo of a `valid_pid` pass, consulted
-  before anything else; an excluded process that made egress before discovery
-  reached it was accepted on its parent's ticket and cached, so publishing the
-  denial alone would change nothing for that process for as long as the entry
-  lives. The eviction is what makes the cheap check order safe.
 
   Residual staleness, all of it fail-open, and none of it removable without
   matching executables inside BPF:
@@ -299,9 +352,9 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
     existing behaviour, and the retraction on any later match closes it as soon
     as the pipeline sees the pid again.
   - A process that exits between the poll and the publish has no
-    `/proc/<pid>/{status,ns/pid}` left to read, so nothing is published — and it
+    `/proc/<pid>/ns/pid` left to read, so nothing is published — and it
     generates no more egress either.
-  - A full `denied_pids` (3001 entries, sized like `valid_pids`) refuses new
+  - A full `denied_pids` (3001 entries, one per excluded process) refuses new
     denials and logs a warning. It is a plain hash, not an LRU, so an existing
     denial can never quietly lapse.
 
@@ -312,16 +365,11 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   younger than the 5.15 support floor. No new program, no new attachment, no new
   helper, and the per-program map count is unchanged in kind (one more shared
   map, far below MAX_USED_MAPS). The programs that consult `valid_pid` are
-  generictracer's kprobes/uprobes and tpinjector's sk_msg entry; the Go uprobes
-  are scoped by being attached per discovered executable and their objects come
-  out byte-identical.
+  generictracer's kprobes/uprobes and the CUDA probes; tpinjector consults the
+  same map through its own admission check (015). The Go uprobes never call
+  `valid_pid`: they are scoped by being attached per discovered executable.
 
-  Verifier cost vs 012: `obi_packet_extender` 851 -> 860, every tail-called
-  sk_msg program unchanged, `obi_sockmap_tracker` and `obi_sk_iter_tcp`
-  unchanged. generictracer's programs move by +8..+82 where `valid_pid` is
-  inlined (its largest, `obi_kprobe_tcp_close`, 29506 -> 29516) and a handful
-  shrink by up to 139 as LLVM re-lays them out; the collection's total falls by
-  58 instructions.
+  Verifier cost: see the table under the v0.15.2 rebase.
 
   `ebpf/tests/egress-integrity` grows a `deny-child` scenario, with a control on
   both sides. The instrumented harness spawns a *direct* child — no reparenting,
@@ -484,11 +532,12 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   header-only path; one cut after `ok: 0` is a failure that says its message
   was not captured; a complete reply without `ok` is still rejected, as is a
   reply whose first section is not a body. `getMore` takes its collection
-  from the `collection` field, a database-level `{aggregate: 1}` keeps its
-  name without a collection, and pymongo's lowercase `ismaster` is a
-  heartbeat like `isMaster`. Numeric `ok` fields of any width are accepted.
-  The walk bounds nesting at 32 levels and never splits a character when
-  capping the text.
+  from the `collection` field, a database-level `{aggregate: 1}` has no
+  collection and, with upstream's naming, is named after the command with the
+  database appended (`aggregate shop`, like `listCollections shop`), and
+  pymongo's lowercase `ismaster` is a heartbeat like `isMaster`. Numeric `ok`
+  fields of any width are accepted. The walk bounds nesting at 32 levels and
+  never splits a character when capping the text.
 
   Spans also gain `db.query.text`: the command's shape with every value
   replaced by `?`, the collection a collection command names kept (the first
@@ -599,6 +648,9 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   `url.full` gets the authority the client wrote. The connection's port is
   never used for this: through a forward proxy or a socket-level load
   balancer it is not the URL's port.
+  Upstream v0.15.2 also reports `server.address` without the Host header's
+  port on the path where its own parser keeps the port; `url.full` keeps it
+  there too.
 
   Not changed: a SQL span without a table is still named `{operation}
   {db.namespace}` (`SELECT bookstore` for `SELECT 1`), which is what the

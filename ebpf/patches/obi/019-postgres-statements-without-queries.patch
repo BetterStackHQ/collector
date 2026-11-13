@@ -1,5 +1,5 @@
 diff --git a/pkg/ebpf/common/sql_detect_postgres.go b/pkg/ebpf/common/sql_detect_postgres.go
-index 66c67bbbb..9bb45a9f8 100644
+index 66c67bb..9bb45a9 100644
 --- a/pkg/ebpf/common/sql_detect_postgres.go
 +++ b/pkg/ebpf/common/sql_detect_postgres.go
 @@ -231,23 +231,26 @@ func msgBodyReader(b *largebuf.LargeBuffer) (largebuf.LargeBufferReader, error)
@@ -221,7 +221,7 @@ index 66c67bbbb..9bb45a9f8 100644
  		return span, errFallback
  	}
 diff --git a/pkg/ebpf/common/sql_detect_postgres_test.go b/pkg/ebpf/common/sql_detect_postgres_test.go
-index a3eb0beab..651ff5925 100644
+index a3eb0be..651ff59 100644
 --- a/pkg/ebpf/common/sql_detect_postgres_test.go
 +++ b/pkg/ebpf/common/sql_detect_postgres_test.go
 @@ -496,3 +496,285 @@ func TestParsePostgresStartupTruncationSafety(t *testing.T) {
@@ -511,7 +511,7 @@ index a3eb0beab..651ff5925 100644
 +	assert.Equal(t, "COMMIT", span.Statement)
 +}
 diff --git a/pkg/ebpf/common/sql_detect_transform_test.go b/pkg/ebpf/common/sql_detect_transform_test.go
-index 880150218..6a4f386e5 100644
+index 8801502..6a4f386 100644
 --- a/pkg/ebpf/common/sql_detect_transform_test.go
 +++ b/pkg/ebpf/common/sql_detect_transform_test.go
 @@ -35,8 +35,8 @@ func TestPostgresBindParsing(t *testing.T) {
