@@ -1,6 +1,6 @@
 diff --git a/pkg/ebpf/common/mongo_bson_partial.go b/pkg/ebpf/common/mongo_bson_partial.go
 new file mode 100644
-index 000000000..ee51aad9f
+index 0000000..ee51aad
 --- /dev/null
 +++ b/pkg/ebpf/common/mongo_bson_partial.go
 @@ -0,0 +1,358 @@
@@ -364,7 +364,7 @@ index 000000000..ee51aad9f
 +}
 diff --git a/pkg/ebpf/common/mongo_bson_partial_test.go b/pkg/ebpf/common/mongo_bson_partial_test.go
 new file mode 100644
-index 000000000..14b6e4849
+index 0000000..14b6e48
 --- /dev/null
 +++ b/pkg/ebpf/common/mongo_bson_partial_test.go
 @@ -0,0 +1,424 @@
@@ -793,7 +793,7 @@ index 000000000..14b6e4849
 +	assert.NotPanics(t, func() { _ = mongoQueryText(doc, false) })
 +}
 diff --git a/pkg/ebpf/common/mongo_detect_transform.go b/pkg/ebpf/common/mongo_detect_transform.go
-index 56fd8dcdd..283ac3c17 100644
+index 56fd8dc..283ac3c 100644
 --- a/pkg/ebpf/common/mongo_detect_transform.go
 +++ b/pkg/ebpf/common/mongo_detect_transform.go
 @@ -7,6 +7,7 @@ import (
@@ -1067,7 +1067,7 @@ index 56fd8dcdd..283ac3c17 100644
  	coll := cstr(event.Coll[:])
  	db := cstr(event.Db[:])
 diff --git a/pkg/ebpf/common/mongo_detect_transform_fuzz_test.go b/pkg/ebpf/common/mongo_detect_transform_fuzz_test.go
-index 2f9d0928f..e00af635d 100644
+index 2f9d092..e00af63 100644
 --- a/pkg/ebpf/common/mongo_detect_transform_fuzz_test.go
 +++ b/pkg/ebpf/common/mongo_detect_transform_fuzz_test.go
 @@ -148,6 +148,10 @@ func assertAcceptedMongoSections(t *testing.T, sections []byte, completeMessage
@@ -1095,7 +1095,7 @@ index 2f9d0928f..e00af635d 100644
  		default:
  			t.Fatalf("accepted unsupported section kind %d", kind)
 diff --git a/pkg/ebpf/common/mongo_detect_transform_test.go b/pkg/ebpf/common/mongo_detect_transform_test.go
-index 2de06d54e..e83686a17 100644
+index 2de06d5..e83686a 100644
 --- a/pkg/ebpf/common/mongo_detect_transform_test.go
 +++ b/pkg/ebpf/common/mongo_detect_transform_test.go
 @@ -369,7 +369,9 @@ func TestProcessMongoEventSuccessWhenCannotParseBsonInRequest(t *testing.T) {
@@ -1134,10 +1134,10 @@ index 2de06d54e..e83686a17 100644
  	mongoRequest := MongoRequestValue{
  		RequestSections: []mongoSection{
 diff --git a/pkg/export/otel/tracesgen/tracesgen.go b/pkg/export/otel/tracesgen/tracesgen.go
-index 40093e986..9ed1afb68 100644
+index 6d09eda..17f72c9 100644
 --- a/pkg/export/otel/tracesgen/tracesgen.go
 +++ b/pkg/export/otel/tracesgen/tracesgen.go
-@@ -1595,6 +1595,9 @@ func traceAttributesSelectorInternal(span *request.Span, optionalAttrs map[attr.
+@@ -1669,6 +1669,9 @@ func traceAttributesSelectorInternal(span *request.Span, optionalAttrs map[attr.
  		operation := span.Method
  		attrs = appendIfSet(attrs, request.DBOperationName, operation)
  		attrs = appendIfSet(attrs, request.DBCollectionName, span.Path)
@@ -1148,12 +1148,12 @@ index 40093e986..9ed1afb68 100644
  			attrs = appendIfSet(attrs, request.DBResponseStatusCode, span.DBError.ErrorCode)
  			attrs = append(attrs, attributes.DBResponseErrorAttr(optionalAttrs, span.DBError.Description)...)
 diff --git a/pkg/export/otel/tracesgen/tracesgen_test.go b/pkg/export/otel/tracesgen/tracesgen_test.go
-index 8b43ac941..25857d75a 100644
+index b88ab42..c02a778 100644
 --- a/pkg/export/otel/tracesgen/tracesgen_test.go
 +++ b/pkg/export/otel/tracesgen/tracesgen_test.go
-@@ -2134,3 +2134,22 @@ func TestGenerateTracesSetsOBISchemaURL(t *testing.T) {
- 	require.Equal(t, 1, traces.ResourceSpans().Len())
- 	assert.Equal(t, attr.OBISchemaURL, traces.ResourceSpans().At(0).SchemaUrl())
+@@ -2255,3 +2255,22 @@ func TestGenAISpanNameMatchesEmittedAttributes(t *testing.T) {
+ 		})
+ 	}
  }
 +
 +func TestTraceAttributesSelector_MongoQueryText(t *testing.T) {

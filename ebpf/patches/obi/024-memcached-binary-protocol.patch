@@ -1,5 +1,5 @@
 diff --git a/pkg/ebpf/common/common.go b/pkg/ebpf/common/common.go
-index aad836b90..4ddde3dd4 100644
+index 70bfcd6..46dc3ba 100644
 --- a/pkg/ebpf/common/common.go
 +++ b/pkg/ebpf/common/common.go
 @@ -290,10 +290,14 @@ type MisclassifiedEvent struct {
@@ -18,7 +18,7 @@ index aad836b90..4ddde3dd4 100644
  
  const maxPendingGoHTTPClientRequests = 1024
 diff --git a/pkg/ebpf/common/couchbase_detect_transform.go b/pkg/ebpf/common/couchbase_detect_transform.go
-index 40e4f9221..2aff31910 100644
+index 40e4f92..2aff319 100644
 --- a/pkg/ebpf/common/couchbase_detect_transform.go
 +++ b/pkg/ebpf/common/couchbase_detect_transform.go
 @@ -30,6 +30,80 @@ type CouchbaseInfo struct {
@@ -173,7 +173,7 @@ index 40e4f9221..2aff31910 100644
  		Type:          reqType,
  		Method:        data.Operation,
 diff --git a/pkg/ebpf/common/couchbase_detect_transform_test.go b/pkg/ebpf/common/couchbase_detect_transform_test.go
-index fed9ff237..2918d5371 100644
+index fed9ff2..2918d53 100644
 --- a/pkg/ebpf/common/couchbase_detect_transform_test.go
 +++ b/pkg/ebpf/common/couchbase_detect_transform_test.go
 @@ -1112,3 +1112,152 @@ func TestProcessCouchbaseEvent_StatementPopulated(t *testing.T) {

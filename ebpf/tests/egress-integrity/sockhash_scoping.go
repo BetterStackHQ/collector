@@ -162,8 +162,9 @@ func bpfMapFDs(name string, mapType uint32) ([]int, error) {
 
 // bpfMapKeys returns the key set of every map of this name and type, or
 // ok=false when no such map exists (selfcheck runs, where OBI never loaded).
-// Both maps this harness reads have 8-byte keys: sock_dir is keyed by socket
-// cookie, denied_pids by pid_data_t (namespaced pid in the low half).
+// Keys are read into a uint64, a shorter key into its low bytes (OBI supports
+// only little-endian architectures): sock_dir is keyed by an 8-byte socket
+// cookie, denied_pids by a 4-byte pid.
 func bpfMapKeys(name string, mapType uint32) (keys map[uint64]struct{}, ok bool, err error) {
 	fds, err := bpfMapFDs(name, mapType)
 	if err != nil {
