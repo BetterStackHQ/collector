@@ -1,9 +1,9 @@
 diff --git a/bpf/pid/maps/denied_pids.h b/bpf/pid/maps/denied_pids.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..fb49317f92170f1d89f816b2e1d95de1e71c75bd
+index 0000000..72ab8c5
 --- /dev/null
 +++ b/bpf/pid/maps/denied_pids.h
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,33 @@
 +// Copyright The OpenTelemetry Authors
 +// SPDX-License-Identifier: Apache-2.0
 +
@@ -16,78 +16,70 @@ index 0000000000000000000000000000000000000000..fb49317f92170f1d89f816b2e1d95de1
 +
 +#include <pid/maps/map_sizing.h>
 +
-+#include <pid/types/pid_data.h>
-+
-+// Processes discovery excluded, keyed exactly like the allow-list that
-+// pid_matches() reads: the pid as seen inside its own pid namespace, plus that
-+// namespace's inode. Filled from userspace by the criteria matcher, which is
-+// the only component that evaluates exclude_instrument and the only one that
-+// sees the processes it drops.
++// Processes discovery excluded, keyed exactly like the allow bitmap that
++// pid_selected() reads: the pid as OBI's /proc numbers it, which is what
++// obi_pid() derives for the current task. Filled from userspace by the
++// criteria matcher, which is the only component that evaluates
++// exclude_instrument and the only one that sees the processes it drops.
 +//
-+// An exact-match hash rather than a second copy of the `valid_pids` bitmap on
-+// purpose. That bitmap hashes (ns, pid) into 192053 bits with no collision
-+// resolution, which upstream can afford because a collision there fails *open*:
-+// some extra process passes the filter. The same collision in a deny structure
-+// would fail closed and silently stop instrumenting a process the user did
-+// select, so this side has to be exact.
++// An exact-match hash rather than a second bitmap: the allow side can afford
++// a dense array because every pid has its own bit, but a deny set is small and
++// sparse, and a hash keeps a stale or colliding entry from ever denying a
++// process the user did select.
 +//
-+// Sized like `valid_pids` (1000 processes * 3 namespace levels). A full map
-+// means new denials are refused, which userspace reports; it does not evict, so
-+// an existing denial can never quietly lapse.
++// Sized by k_max_concurrent_pids (3001 entries, one per excluded process). A
++// full map means new denials are refused, which userspace reports; it does not
++// evict, so an existing denial can never quietly lapse.
 +struct {
 +    __uint(type, BPF_MAP_TYPE_HASH);
 +    __uint(max_entries, k_max_concurrent_pids);
-+    __type(key, pid_data_t);
++    __type(key, u32);
 +    __type(value, u8);
 +    __uint(pinning, OBI_PIN_INTERNAL);
 +} denied_pids SEC(".maps");
 diff --git a/bpf/pid/pid.h b/bpf/pid/pid.h
-index 7cea1b777a3d4832a09a0384b9febed36b397950..88866c03ffbc57965b6345b58082c3f4bb477bff 100644
+index 7a5d185..17f737b 100644
 --- a/bpf/pid/pid.h
 +++ b/bpf/pid/pid.h
-@@ -8,6 +8,7 @@
- 
- #include <logger/bpf_dbg.h>
+@@ -7,6 +7,7 @@
+ #include <bpfcore/bpf_helpers.h>
+ #include <bpfcore/bpf_core_read.h>
  
 +#include <pid/maps/denied_pids.h>
- #include <pid/maps/pid_cache.h>
  #include <pid/maps/valid_pids.h>
  
-@@ -66,6 +67,32 @@ static __always_inline u32 valid_pid(u64 id) {
-     if (a_pid != 0) {
-         pid_data_t p_key = {.pid = a_pid, .ns = pid_ns_id};
+ #include <pid/pid_helpers.h>
+@@ -132,6 +133,28 @@ static __always_inline u32 valid_pid(u64 id) {
+         return 0;
+     }
  
-+        // Discovery exclusions, honoured before the allow-list and before the
-+        // parent fallback below.
-+        //
-+        // The fallback is deliberate — it is how OBI follows an instrumented
-+        // process into its children — but it also let an *excluded* process
-+        // pass on its parent's ticket. That is not hypothetical: with
-+        // `open_ports` discovery, pid 1 is routinely instrumented, and every
-+        // process on the machine descends from pid 1, so `exclude_instrument`
-+        // meant nothing in the kernel. It was measured on a real host, where
-+        // an excluded tailscaled enrolled into the sockhash 2/2 times.
-+        //
-+        // Only the process's own identity is consulted. A denied parent does
-+        // not taint its children: a supervisor the user excluded may well fork
-+        // the workload they asked for, and that workload has its own entry in
-+        // the allow-list. So this rejects exactly what userspace rejected, and
-+        // the fork-following below is otherwise untouched.
-+        //
-+        // Placed after the pid_cache lookup, not before it, because the cache
-+        // is a positive memo and the publisher evicts the pids it denies (see
-+        // pkg/ebpf/common/denied_pids.go). Checking here leaves the hot path
-+        // for allowed processes exactly as it was: one cache lookup, no task
-+        // walk, no second map.
-+        if (bpf_map_lookup_elem(&denied_pids, &p_key)) {
-+            return 0;
-+        }
++    // Discovery exclusions, honoured before the allow-list and before the
++    // parent fallback below.
++    //
++    // The fallback is deliberate — it is how OBI follows an instrumented
++    // process into its children — but it also let an *excluded* process pass
++    // on its parent's ticket. That is not hypothetical: with `open_ports`
++    // discovery, pid 1 is routinely instrumented, and every process on the
++    // machine descends from pid 1, so `exclude_instrument` meant nothing in the
++    // kernel. It was measured on a real host, where an excluded tailscaled
++    // enrolled into the sockhash 2/2 times.
++    //
++    // Only the process's own pid is consulted, numbered like the allow bitmap
++    // (OBI's /proc numbering). A denied parent does not taint its children: a
++    // supervisor the user excluded may well fork the workload they asked for,
++    // and that workload has its own bit in the allow-list. So this rejects
++    // exactly what userspace rejected, and the fork-following below is
++    // otherwise untouched. Nothing memoises a pass ahead of this lookup, so a
++    // denial takes effect on the caller's next event.
++    if (bpf_map_lookup_elem(&denied_pids, &pid)) {
++        return 0;
++    }
 +
-         const u8 found_ns_pid = pid_matches(&p_key);
- 
-         if (found_ns_pid) {
+     if (pid_selected(pid) || pid_selected(obi_parent_pid())) {
+         return pid;
+     }
 diff --git a/pkg/appolly/discover/finder.go b/pkg/appolly/discover/finder.go
-index 8e72f949acac9ba96b3f5b76ad6946084bd450d4..b26153f92eeea659fe6b7f3a843407e6240ae20c 100644
+index 7c8a220..3f833af 100644
 --- a/pkg/appolly/discover/finder.go
 +++ b/pkg/appolly/discover/finder.go
 @@ -129,7 +129,7 @@ func (pf *ProcessFinder) Start(ctx context.Context, opts ...ProcessFinderStartOp
@@ -100,7 +92,7 @@ index 8e72f949acac9ba96b3f5b76ad6946084bd450d4..b26153f92eeea659fe6b7f3a843407e6
  	swi.Add(dynamicMatcherProvider(langEnrichedEvents, criteriaFilteredEvents, appDynamicSelector),
  		swarm.WithID("DynamicMatcher"))
 diff --git a/pkg/appolly/discover/matcher.go b/pkg/appolly/discover/matcher.go
-index 6ce6bbbbce31f59d5f41681ab9ffd837761ca67d..0a59af5e1ab25e4e3be702ca4f9b651fed4eb7f0 100644
+index 6ce6bbb..0a59af5 100644
 --- a/pkg/appolly/discover/matcher.go
 +++ b/pkg/appolly/discover/matcher.go
 @@ -38,6 +38,7 @@ func criteriaMatcherProvider(
@@ -186,7 +178,7 @@ index 6ce6bbbbce31f59d5f41681ab9ffd837761ca67d..0a59af5e1ab25e4e3be702ca4f9b651f
  	if !ok {
  		m.Log.Debug("deleted untracked process. Ignoring", "pid", obj.pid)
 diff --git a/pkg/appolly/discover/matcher_test.go b/pkg/appolly/discover/matcher_test.go
-index ef23bfa1601d29fb17fb86f5f0681c6a0a2b47ff..eb057948095f4a2e3cebc5695cc04f562ef8406a 100644
+index ef23bfa..eb05794 100644
 --- a/pkg/appolly/discover/matcher_test.go
 +++ b/pkg/appolly/discover/matcher_test.go
 @@ -50,7 +50,7 @@ func TestMatchersMutuallyExclusive(t *testing.T) {
@@ -334,7 +326,7 @@ index ef23bfa1601d29fb17fb86f5f0681c6a0a2b47ff..eb057948095f4a2e3cebc5695cc04f56
  	require.NoError(t, err)
  
 diff --git a/pkg/appolly/discover/watcher_kube_test.go b/pkg/appolly/discover/watcher_kube_test.go
-index 738ed0df58f668e4f1b5850a36fbd2d37665c4d3..05a232484b89a758ae00f47f35de50793ff682c4 100644
+index 738ed0d..05a2324 100644
 --- a/pkg/appolly/discover/watcher_kube_test.go
 +++ b/pkg/appolly/discover/watcher_kube_test.go
 @@ -204,7 +204,7 @@ func TestWatcherKubeEnricherWithMatcher(t *testing.T) {
@@ -357,10 +349,10 @@ index 738ed0df58f668e4f1b5850a36fbd2d37665c4d3..05a232484b89a758ae00f47f35de5079
  	require.NoError(t, err)
 diff --git a/pkg/ebpf/common/denied_pids.go b/pkg/ebpf/common/denied_pids.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..03e25c633ecc15b38c1b66cf7ec9c47ce6e079fb
+index 0000000..4ecaa02
 --- /dev/null
 +++ b/pkg/ebpf/common/denied_pids.go
-@@ -0,0 +1,224 @@
+@@ -0,0 +1,155 @@
 +// Copyright The OpenTelemetry Authors
 +// SPDX-License-Identifier: Apache-2.0
 +
@@ -377,22 +369,13 @@ index 0000000000000000000000000000000000000000..03e25c633ecc15b38c1b66cf7ec9c47c
 +	"go.opentelemetry.io/obi/pkg/internal/procs"
 +)
 +
-+// Both maps are declared in bpf/pid/maps/ with OBI_PIN_INTERNAL, so
-+// ResolveMaps() creates exactly one of each per agent and hands the same
-+// object to every collection that includes pid.h. Reaching them by name
-+// through EBPFEventContext.EBPFMaps is therefore reaching the maps the kernel
-+// side actually reads, and it does not depend on which tracer happens to be
-+// loaded: the entry outlives any single ProcessTracer.
-+const (
-+	deniedPIDsMapName = "denied_pids"
-+	pidCacheMapName   = "pid_cache"
-+)
-+
-+// deniedPIDKey mirrors pid_data_t (bpf/pid/types/pid_data.h).
-+type deniedPIDKey struct {
-+	Pid uint32
-+	Ns  uint32
-+}
++// The map is declared in bpf/pid/maps/ with OBI_PIN_INTERNAL, so ResolveMaps()
++// creates exactly one per agent and hands the same object to every collection
++// that includes pid.h. Reaching it by name through EBPFEventContext.EBPFMaps is
++// therefore reaching the map the kernel side actually reads, and it does not
++// depend on which tracer happens to be loaded: the entry outlives any single
++// ProcessTracer.
++const deniedPIDsMapName = "denied_pids"
 +
 +// DeniedPIDs publishes discovery's exclusions to the BPF pid filter.
 +//
@@ -402,21 +385,20 @@ index 0000000000000000000000000000000000000000..03e25c633ecc15b38c1b66cf7ec9c47c
 +// *excluded*, so an excluded process under an instrumented parent — and with
 +// `open_ports` discovery, pid 1 is often instrumented — passed the filter
 +// anyway. This is the missing half: the criteria matcher records what it
-+// excluded here, and valid_pid() rejects those identities before it consults
-+// either the allow-list or the parent.
++// excluded here, and valid_pid() rejects those pids before it consults either
++// the allow-list or the parent.
 +//
-+// Keys are per namespaced pid, exactly as PIDsFilter.addPID() records the
-+// allow side: /proc/<pid>/status NSpid lists the process's pid at every level,
-+// and BPF only ever derives the innermost one, so publishing all of them makes
-+// the two sides agree without having to guess which level the kernel will see.
++// Keys are the pid as OBI's /proc numbers the process, the same number
++// PIDsFilter.ProcPIDs() hands to the allow bitmap and obi_pid() derives in
++// BPF, so the two sides agree in every pid namespace mode.
 +type DeniedPIDs struct {
 +	mu  sync.Mutex
 +	ctx *EBPFEventContext
 +	log *slog.Logger
-+	// keys published per host pid, kept because the process is gone from /proc
-+	// by the time it has to be retracted
-+	published map[app.PID][]deniedPIDKey
-+	// set when an entry in published is not in the BPF map. The maps do not
++	// pids published, kept so a deferred publish can be retried and a
++	// retraction knows whether there is anything to delete
++	published map[app.PID]struct{}
++	// set when an entry in published is not in the BPF map. The map does not
 +	// exist until the first tracer loads, and the first discovery poll
 +	// normally runs before that.
 +	backlog bool
@@ -429,7 +411,7 @@ index 0000000000000000000000000000000000000000..03e25c633ecc15b38c1b66cf7ec9c47c
 +	return &DeniedPIDs{
 +		ctx:       eventContext,
 +		log:       log,
-+		published: map[app.PID][]deniedPIDKey{},
++		published: map[app.PID]struct{}{},
 +	}
 +}
 +
@@ -443,18 +425,20 @@ index 0000000000000000000000000000000000000000..03e25c633ecc15b38c1b66cf7ec9c47c
 +	defer d.mu.Unlock()
 +
 +	if _, known := d.published[pid]; !known {
-+		keys := d.keysFor(pid)
-+		if len(keys) == 0 {
++		// the process exited between the poll and here: the next poll reports
++		// it deleted, and there is nothing left to deny
++		if _, err := procs.FindNamespace(pid); err != nil {
++			d.log.Debug("excluded process is gone, not denying it", "pid", pid, "error", err)
 +			return
 +		}
-+		d.log.Debug("excluding pid from the BPF pid filter", "pid", pid, "nspids", len(keys))
-+		d.published[pid] = keys
++		d.log.Debug("excluding pid from the BPF pid filter", "pid", pid)
++		d.published[pid] = struct{}{}
 +		d.backlog = true
 +	}
 +
 +	if d.backlog {
 +		// one failed publish retries every recorded pid, so a denial recorded
-+		// before the maps existed cannot be lost
++		// before the map existed cannot be lost
 +		d.flushLocked()
 +	}
 +}
@@ -470,25 +454,21 @@ index 0000000000000000000000000000000000000000..03e25c633ecc15b38c1b66cf7ec9c47c
 +	d.mu.Lock()
 +	defer d.mu.Unlock()
 +
-+	keys, known := d.published[pid]
-+	if !known {
++	if _, known := d.published[pid]; !known {
 +		return
 +	}
 +	delete(d.published, pid)
 +
-+	denied, _ := d.maps()
++	denied := d.deniedMap()
 +	if denied == nil {
 +		return
 +	}
-+	for _, key := range keys {
-+		// a pid namespace teardown can take the whole key set with it
-+		if err := denied.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-+			d.log.Debug("cannot retract excluded pid", "pid", pid, "error", err)
-+		}
++	if err := denied.Delete(uint32(pid)); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
++		d.log.Debug("cannot retract excluded pid", "pid", pid, "error", err)
 +	}
 +}
 +
-+// Flush retries denials recorded while the BPF maps were still unavailable.
++// Flush retries denials recorded while the BPF map was still unavailable.
 +// Cheap and a no-op in the common case; the matcher calls it once per batch of
 +// process events.
 +func (d *DeniedPIDs) Flush() {
@@ -505,83 +485,26 @@ index 0000000000000000000000000000000000000000..03e25c633ecc15b38c1b66cf7ec9c47c
 +}
 +
 +func (d *DeniedPIDs) flushLocked() {
-+	denied, cache := d.maps()
++	denied := d.deniedMap()
 +	if denied == nil {
 +		d.log.Debug("BPF pid filter not loaded yet, deferring exclusions", "pids", len(d.published))
 +		return
 +	}
 +
 +	d.backlog = false
-+	for pid, keys := range d.published {
-+		for _, key := range keys {
-+			if err := denied.Put(key, uint8(1)); err != nil {
-+				// A full map is the interesting case: it means new exclusions
-+				// stop reaching the kernel, which fails open.
-+				d.log.Warn("cannot publish excluded pid to the BPF pid filter",
-+					"pid", pid, "nspid", key.Pid, "ns", key.Ns, "error", err)
-+				d.backlog = true
-+				continue
-+			}
-+			evictPIDCache(cache, key.Pid)
++	for pid := range d.published {
++		if err := denied.Put(uint32(pid), uint8(1)); err != nil {
++			// A full map is the interesting case: it means new exclusions
++			// stop reaching the kernel, which fails open.
++			d.log.Warn("cannot publish excluded pid to the BPF pid filter", "pid", pid, "error", err)
++			d.backlog = true
 +		}
-+		evictPIDCache(cache, uint32(pid))
 +	}
 +}
 +
-+// evictPIDCache drops a memoised valid_pid() pass.
-+//
-+// pid_cache is a positive cache: valid_pid() writes it only for a pid it just
-+// accepted, and returns from it without looking at anything else. An excluded
-+// process that made egress before discovery got to it was accepted on its
-+// parent's ticket and cached, so publishing the denial without this would
-+// change nothing for that process for as long as the entry lives.
-+//
-+// The map is keyed by a bare u32 with no namespace, and upstream looks it up
-+// with the host tgid while storing under the namespaced pid, so both spellings
-+// are evicted. A number that collides with an unrelated host pid costs that
-+// process one re-evaluation of valid_pid(), which is what BlockPID() has
-+// always done too.
-+func evictPIDCache(cache *ebpf.Map, pid uint32) {
-+	if cache == nil {
-+		return
-+	}
-+	_ = cache.Delete(pid)
-+}
-+
-+// keysFor reads the identities BPF will see for a host pid. Mirrors
-+// PIDsFilter.addPID(): the pid namespace inode plus every level of NSpid.
-+func (d *DeniedPIDs) keysFor(pid app.PID) []deniedPIDKey {
-+	ns, err := procs.FindNamespace(pid)
-+	if err != nil {
-+		// the process exited between the poll and here; the next poll reports
-+		// it deleted and there is nothing left to deny
-+		d.log.Debug("cannot read pid namespace of excluded process", "pid", pid, "error", err)
-+		return nil
-+	}
-+
-+	nsPIDs, err := procs.FindNamespacedPids(pid)
-+	if err != nil {
-+		d.log.Debug("cannot read namespaced pids of excluded process", "pid", pid, "error", err)
-+		return nil
-+	}
-+	if len(nsPIDs) == 0 {
-+		// no NSpid line in /proc/<pid>/status: not a namespaced kernel, so the
-+		// pid BPF derives is this one. The allow side skips such a process
-+		// entirely; denying is the safe direction, so it is published instead.
-+		nsPIDs = []app.PID{pid}
-+	}
-+
-+	keys := make([]deniedPIDKey, 0, len(nsPIDs))
-+	for _, nsPID := range nsPIDs {
-+		keys = append(keys, deniedPIDKey{Pid: uint32(nsPID), Ns: ns})
-+	}
-+
-+	return keys
-+}
-+
-+func (d *DeniedPIDs) maps() (denied, cache *ebpf.Map) {
++func (d *DeniedPIDs) deniedMap() *ebpf.Map {
 +	d.ctx.MapsLock.Lock()
 +	defer d.ctx.MapsLock.Unlock()
 +
-+	return d.ctx.EBPFMaps[deniedPIDsMapName], d.ctx.EBPFMaps[pidCacheMapName]
++	return d.ctx.EBPFMaps[deniedPIDsMapName]
 +}

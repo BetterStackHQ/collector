@@ -1,5 +1,5 @@
 diff --git a/bpf/generictracer/protocol_tcp.h b/bpf/generictracer/protocol_tcp.h
-index da861e8fa..0642f9525 100644
+index d4e4f83..122ad61 100644
 --- a/bpf/generictracer/protocol_tcp.h
 +++ b/bpf/generictracer/protocol_tcp.h
 @@ -386,14 +386,31 @@ static __always_inline void handle_unknown_tcp_connection(pid_connection_info_t
@@ -42,7 +42,7 @@ index da861e8fa..0642f9525 100644
          existing->len += bytes_len;
          existing->req_len = existing->len;
 diff --git a/pkg/ebpf/common/fast_cgi_detect_transform.go b/pkg/ebpf/common/fast_cgi_detect_transform.go
-index 08f271241..236d417e4 100644
+index 08f2712..236d417 100644
 --- a/pkg/ebpf/common/fast_cgi_detect_transform.go
 +++ b/pkg/ebpf/common/fast_cgi_detect_transform.go
 @@ -71,20 +71,42 @@ func readFastCGIHeader(b []byte) *fastCGIHeader {
@@ -107,7 +107,7 @@ index 08f271241..236d417e4 100644
  			res[key] = val
  		}
 diff --git a/pkg/ebpf/common/fast_cgi_detect_transform_test.go b/pkg/ebpf/common/fast_cgi_detect_transform_test.go
-index b7b38b3cb..53650bca3 100644
+index b7b38b3..53650bc 100644
 --- a/pkg/ebpf/common/fast_cgi_detect_transform_test.go
 +++ b/pkg/ebpf/common/fast_cgi_detect_transform_test.go
 @@ -4,6 +4,7 @@

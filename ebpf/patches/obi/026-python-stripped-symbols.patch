@@ -1,5 +1,5 @@
 diff --git a/pkg/ebpf/instrumenter.go b/pkg/ebpf/instrumenter.go
-index f5ded2687..32e9c5846 100644
+index f5ded26..32e9c58 100644
 --- a/pkg/ebpf/instrumenter.go
 +++ b/pkg/ebpf/instrumenter.go
 @@ -34,6 +34,7 @@ import (
@@ -74,7 +74,7 @@ index f5ded2687..32e9c5846 100644
  	probe *ebpfcommon.ProbeDesc,
  	sym procs.Sym,
 diff --git a/pkg/ebpf/instrumenter_test.go b/pkg/ebpf/instrumenter_test.go
-index 8a4daf899..6ea401bc0 100644
+index 8a4daf8..6ea401b 100644
 --- a/pkg/ebpf/instrumenter_test.go
 +++ b/pkg/ebpf/instrumenter_test.go
 @@ -1546,3 +1546,33 @@ func TestMakeOtelBPFFSPathRejectsInaccessibleExistingDirectory(t *testing.T) {
@@ -113,7 +113,7 @@ index 8a4daf899..6ea401bc0 100644
 +}
 diff --git a/pkg/internal/pyelf/asyncio.go b/pkg/internal/pyelf/asyncio.go
 new file mode 100644
-index 000000000..c7424daf9
+index 0000000..c7424da
 --- /dev/null
 +++ b/pkg/internal/pyelf/asyncio.go
 @@ -0,0 +1,111 @@
@@ -230,7 +230,7 @@ index 000000000..c7424daf9
 +}
 diff --git a/pkg/internal/pyelf/code.go b/pkg/internal/pyelf/code.go
 new file mode 100644
-index 000000000..76885181b
+index 0000000..7688518
 --- /dev/null
 +++ b/pkg/internal/pyelf/code.go
 @@ -0,0 +1,232 @@
@@ -468,7 +468,7 @@ index 000000000..76885181b
 +}
 diff --git a/pkg/internal/pyelf/code_test.go b/pkg/internal/pyelf/code_test.go
 new file mode 100644
-index 000000000..8f691478d
+index 0000000..8f69147
 --- /dev/null
 +++ b/pkg/internal/pyelf/code_test.go
 @@ -0,0 +1,93 @@
@@ -567,7 +567,7 @@ index 000000000..8f691478d
 +}
 diff --git a/pkg/internal/pyelf/ehframe.go b/pkg/internal/pyelf/ehframe.go
 new file mode 100644
-index 000000000..fdd17c730
+index 0000000..fdd17c7
 --- /dev/null
 +++ b/pkg/internal/pyelf/ehframe.go
 @@ -0,0 +1,354 @@
@@ -927,7 +927,7 @@ index 000000000..fdd17c730
 +}
 diff --git a/pkg/internal/pyelf/ehframe_test.go b/pkg/internal/pyelf/ehframe_test.go
 new file mode 100644
-index 000000000..452dbc0be
+index 0000000..452dbc0
 --- /dev/null
 +++ b/pkg/internal/pyelf/ehframe_test.go
 @@ -0,0 +1,133 @@
@@ -1066,7 +1066,7 @@ index 000000000..452dbc0be
 +}
 diff --git a/pkg/internal/pyelf/image.go b/pkg/internal/pyelf/image.go
 new file mode 100644
-index 000000000..5857a1131
+index 0000000..5857a11
 --- /dev/null
 +++ b/pkg/internal/pyelf/image.go
 @@ -0,0 +1,517 @@
@@ -1589,7 +1589,7 @@ index 000000000..5857a1131
 +}
 diff --git a/pkg/internal/pyelf/libpython.go b/pkg/internal/pyelf/libpython.go
 new file mode 100644
-index 000000000..5a090715e
+index 0000000..5a09071
 --- /dev/null
 +++ b/pkg/internal/pyelf/libpython.go
 @@ -0,0 +1,91 @@
@@ -1686,7 +1686,7 @@ index 000000000..5a090715e
 +}
 diff --git a/pkg/internal/pyelf/oracle_test.go b/pkg/internal/pyelf/oracle_test.go
 new file mode 100644
-index 000000000..94bee28d7
+index 0000000..94bee28
 --- /dev/null
 +++ b/pkg/internal/pyelf/oracle_test.go
 @@ -0,0 +1,251 @@
@@ -1943,7 +1943,7 @@ index 000000000..94bee28d7
 +}
 diff --git a/pkg/internal/pyelf/pyelf.go b/pkg/internal/pyelf/pyelf.go
 new file mode 100644
-index 000000000..cc6e34474
+index 0000000..cc6e344
 --- /dev/null
 +++ b/pkg/internal/pyelf/pyelf.go
 @@ -0,0 +1,132 @@
@@ -2081,7 +2081,7 @@ index 000000000..cc6e34474
 +}
 diff --git a/pkg/internal/pyelf/reloc_test.go b/pkg/internal/pyelf/reloc_test.go
 new file mode 100644
-index 000000000..b477f8243
+index 0000000..b477f82
 --- /dev/null
 +++ b/pkg/internal/pyelf/reloc_test.go
 @@ -0,0 +1,62 @@
@@ -2149,7 +2149,7 @@ index 000000000..b477f8243
 +}
 diff --git a/pkg/internal/pyelf/synthetic_test.go b/pkg/internal/pyelf/synthetic_test.go
 new file mode 100644
-index 000000000..9be9d25e5
+index 0000000..9be9d25
 --- /dev/null
 +++ b/pkg/internal/pyelf/synthetic_test.go
 @@ -0,0 +1,482 @@
@@ -2637,7 +2637,7 @@ index 000000000..9be9d25e5
 +}
 diff --git a/pkg/internal/pyelf/types.go b/pkg/internal/pyelf/types.go
 new file mode 100644
-index 000000000..ea206e643
+index 0000000..ea206e6
 --- /dev/null
 +++ b/pkg/internal/pyelf/types.go
 @@ -0,0 +1,226 @@

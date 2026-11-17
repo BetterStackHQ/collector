@@ -131,30 +131,20 @@ func awaitDenyGate() error {
 	return err
 }
 
-// denyKeyFor builds the denied_pids key OBI publishes for a pid: pid_data_t
-// {u32 nspid; u32 ns}, which on the little-endian architectures OBI supports
-// is the namespaced pid in the low half of the 8-byte key and the pid
-// namespace inode in the high half.
+// denyKeyFor builds the denied_pids key OBI publishes for a pid: a u32 holding
+// the pid as OBI's /proc numbers the process, the same number its pid filter
+// bitmap is indexed by. bpfMapKeys reads keys into the low half of a uint64.
 //
 // The harness shares this container's pid namespace with OBI and with the
-// child, so the pid it knows is the namespaced one, and /proc/<pid>/ns/pid is
-// the same link OBI reads (procs.FindNamespace). Comparing the whole key keeps
-// the check exact: a match cannot be some other denied process's entry.
+// child, and OBI's /proc is this container's, so the pid the harness knows is
+// the one OBI publishes. Comparing it keeps the check exact: a match cannot be
+// some other denied process's entry.
 func denyKeyFor(pid int) (uint64, error) {
-	link, err := os.Readlink(fmt.Sprintf("/proc/%d/ns/pid", pid))
-	if err != nil {
-		return 0, err
-	}
-	openIdx, closeIdx := strings.LastIndex(link, "["), strings.LastIndex(link, "]")
-	if openIdx < 0 || closeIdx < openIdx {
-		return 0, fmt.Errorf("unexpected pid namespace link %q", link)
-	}
-	ns, err := strconv.ParseUint(link[openIdx+1:closeIdx], 10, 32)
-	if err != nil {
-		return 0, fmt.Errorf("unexpected pid namespace link %q: %w", link, err)
+	if pid <= 0 {
+		return 0, fmt.Errorf("bad pid %d", pid)
 	}
 
-	return uint64(ns)<<32 | uint64(uint32(pid)), nil
+	return uint64(uint32(pid)), nil
 }
 
 // deniedPIDs reports the published exclusions, and whether the map exists at

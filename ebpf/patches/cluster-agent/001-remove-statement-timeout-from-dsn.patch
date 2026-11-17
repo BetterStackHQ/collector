@@ -1,20 +1,20 @@
-diff --git a/metrics/target.go b/metrics/target.go
-index d392c5a..3e39831 100644
---- a/metrics/target.go
-+++ b/metrics/target.go
-@@ -6,7 +6,6 @@ import (
- 	"maps"
- 	"net"
+diff --git a/metrics/exporter/exporter.go b/metrics/exporter/exporter.go
+index 5f343d5..ecf1f83 100644
+--- a/metrics/exporter/exporter.go
++++ b/metrics/exporter/exporter.go
+@@ -3,7 +3,6 @@ package exporter
+ import (
+ 	"fmt"
  	"net/url"
 -	"strconv"
  	"strings"
- 	"sync"
  	"time"
-@@ -133,7 +132,6 @@ func (t *Target) StartExporter(reg *prometheus.Registry, credentials Credentials
- 		userPass := url.UserPassword(credentials.Username, credentials.Password)
+ 
+@@ -79,7 +78,6 @@ func New(cfg Config, opts Options, logger logger.Logger) (*Exporter, error) {
+ 		userPass := url.UserPassword(cfg.Credentials.Username, cfg.Credentials.Password)
  		query := url.Values{}
  		query.Set("connect_timeout", "1")
--		query.Set("statement_timeout", strconv.Itoa(int(collectTimeout.Milliseconds())))
- 		sslmode := t.Params["sslmode"]
+-		query.Set("statement_timeout", strconv.Itoa(int(opts.CollectTimeout.Milliseconds())))
+ 		sslmode := cfg.Params["sslmode"]
  		pqTLSName := ""
- 		if tlsCreds.CA != "" || (tlsCreds.Cert != "" && tlsCreds.Key != "") {
+ 		if cfg.TLS.CA != "" || (cfg.TLS.Cert != "" && cfg.TLS.Key != "") {

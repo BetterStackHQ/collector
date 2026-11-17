@@ -1,5 +1,5 @@
 diff --git a/bpf/generictracer/iter_tcp.c b/bpf/generictracer/iter_tcp.c
-index a34dedd31..fd0cec768 100644
+index a34dedd..fd0cec7 100644
 --- a/bpf/generictracer/iter_tcp.c
 +++ b/bpf/generictracer/iter_tcp.c
 @@ -9,6 +9,7 @@
@@ -33,7 +33,7 @@ index a34dedd31..fd0cec768 100644
          return 0;
      }
 diff --git a/bpf/generictracer/k_tracer.c b/bpf/generictracer/k_tracer.c
-index 8210c0b84..891a120d5 100644
+index 8210c0b..891a120 100644
 --- a/bpf/generictracer/k_tracer.c
 +++ b/bpf/generictracer/k_tracer.c
 @@ -34,6 +34,7 @@
@@ -89,7 +89,7 @@ index 8210c0b84..891a120d5 100644
      bpf_map_delete_elem(&active_send_args, &id);
 diff --git a/bpf/generictracer/maps/own_cgroup_conns.h b/bpf/generictracer/maps/own_cgroup_conns.h
 new file mode 100644
-index 000000000..70bd37ec2
+index 0000000..70bd37e
 --- /dev/null
 +++ b/bpf/generictracer/maps/own_cgroup_conns.h
 @@ -0,0 +1,24 @@
@@ -119,7 +119,7 @@ index 000000000..70bd37ec2
 +} own_cgroup_conns SEC(".maps");
 diff --git a/bpf/generictracer/own_cgroup.h b/bpf/generictracer/own_cgroup.h
 new file mode 100644
-index 000000000..4927db063
+index 0000000..4927db0
 --- /dev/null
 +++ b/bpf/generictracer/own_cgroup.h
 @@ -0,0 +1,98 @@
@@ -222,7 +222,7 @@ index 000000000..4927db063
 +    }
 +}
 diff --git a/bpf/generictracer/protocol_handler.c b/bpf/generictracer/protocol_handler.c
-index 915c04d60..24341e0e1 100644
+index 915c04d..24341e0 100644
 --- a/bpf/generictracer/protocol_handler.c
 +++ b/bpf/generictracer/protocol_handler.c
 @@ -14,6 +14,7 @@
@@ -248,7 +248,7 @@ index 915c04d60..24341e0e1 100644
                     args->small_buf,
                     args->pid_conn.pid,
 diff --git a/pkg/appolly/discover/matcher.go b/pkg/appolly/discover/matcher.go
-index 4950a10ad..5fdde41a6 100644
+index 4950a10..5fdde41 100644
 --- a/pkg/appolly/discover/matcher.go
 +++ b/pkg/appolly/discover/matcher.go
 @@ -18,6 +18,7 @@ import (
@@ -367,7 +367,7 @@ index 4950a10ad..5fdde41a6 100644
  	log := m.Log.With("pid", p.Pid, "exe", p.ExePath)
  	pids, hasPIDs := a.GetPIDs()
 diff --git a/pkg/appolly/discover/matcher_test.go b/pkg/appolly/discover/matcher_test.go
-index eb0579480..41ed2bf24 100644
+index eb05794..41ed2bf 100644
 --- a/pkg/appolly/discover/matcher_test.go
 +++ b/pkg/appolly/discover/matcher_test.go
 @@ -4,6 +4,7 @@
@@ -544,7 +544,7 @@ index eb0579480..41ed2bf24 100644
 +	}
 +}
 diff --git a/pkg/appolly/services/criteria.go b/pkg/appolly/services/criteria.go
-index 60cce56f4..23b8cdedc 100644
+index 60cce56..23b8cde 100644
 --- a/pkg/appolly/services/criteria.go
 +++ b/pkg/appolly/services/criteria.go
 @@ -120,6 +120,16 @@ type DiscoveryConfig struct {
@@ -565,10 +565,10 @@ index 60cce56f4..23b8cdedc 100644
  	// checking for grpc export requests, defaults to 4317
  	DefaultOtlpGRPCPort int `yaml:"default_otlp_grpc_port" env:"OTEL_EBPF_DEFAULT_OTLP_GRPC_PORT" validate:"gte=0,lte=65535"`
 diff --git a/pkg/internal/ebpf/generictracer/generictracer.go b/pkg/internal/ebpf/generictracer/generictracer.go
-index c3869f3fa..287e2bce8 100644
+index 76087d7..a0492c7 100644
 --- a/pkg/internal/ebpf/generictracer/generictracer.go
 +++ b/pkg/internal/ebpf/generictracer/generictracer.go
-@@ -36,6 +36,7 @@ import (
+@@ -37,6 +37,7 @@ import (
  	"go.opentelemetry.io/obi/pkg/internal/goexec"
  	"go.opentelemetry.io/obi/pkg/internal/netns"
  	"go.opentelemetry.io/obi/pkg/internal/netolly/ifaces"
@@ -576,15 +576,15 @@ index c3869f3fa..287e2bce8 100644
  	"go.opentelemetry.io/obi/pkg/obi"
  	"go.opentelemetry.io/obi/pkg/pipe/msg"
  )
-@@ -57,6 +58,7 @@ type Tracer struct {
+@@ -58,6 +59,7 @@ type Tracer struct {
  	libsMux            sync.Mutex
  	jvmGenerations     sync.Map
  	iters              []*ebpfcommon.Iter
 +	ownCgroupID        uint64
  	iterMu             sync.Mutex
- 	seenNetns          *expirable.LRU[uint64, struct{}]
- 	eventCtx           *ebpfcommon.EBPFEventContext
-@@ -300,6 +302,17 @@ func (p *Tracer) constants() map[string]any {
+ 	// the valid_pids words as last written to the BPF map
+ 	validPids      []uint64
+@@ -282,6 +284,17 @@ func (p *Tracer) constants() map[string]any {
  
  	m["g_traces_ctx_v1_enabled"] = p.traceCtxMapEnabled
  
@@ -602,7 +602,7 @@ index c3869f3fa..287e2bce8 100644
  	return m
  }
  
-@@ -795,6 +808,12 @@ func (p *Tracer) Run(
+@@ -777,6 +790,12 @@ func (p *Tracer) Run(
  	defer timeoutTicker.Stop()
  
  	p.runItersForPids()
@@ -617,7 +617,7 @@ index c3869f3fa..287e2bce8 100644
  
 diff --git a/pkg/internal/procs/own_cgroup_linux.go b/pkg/internal/procs/own_cgroup_linux.go
 new file mode 100644
-index 000000000..68ac44766
+index 0000000..68ac447
 --- /dev/null
 +++ b/pkg/internal/procs/own_cgroup_linux.go
 @@ -0,0 +1,294 @@
@@ -917,7 +917,7 @@ index 000000000..68ac44766
 +}
 diff --git a/pkg/internal/procs/own_cgroup_linux_test.go b/pkg/internal/procs/own_cgroup_linux_test.go
 new file mode 100644
-index 000000000..60296cbf1
+index 0000000..60296cb
 --- /dev/null
 +++ b/pkg/internal/procs/own_cgroup_linux_test.go
 @@ -0,0 +1,227 @@
@@ -1150,7 +1150,7 @@ index 000000000..60296cbf1
 +}
 diff --git a/pkg/internal/procs/own_cgroup_notlinux.go b/pkg/internal/procs/own_cgroup_notlinux.go
 new file mode 100644
-index 000000000..e4151bd6d
+index 0000000..e4151bd
 --- /dev/null
 +++ b/pkg/internal/procs/own_cgroup_notlinux.go
 @@ -0,0 +1,30 @@
@@ -1185,7 +1185,7 @@ index 000000000..e4151bd6d
 +
 +func (c *Cgroup) String() string { return "" }
 diff --git a/pkg/obi/config.go b/pkg/obi/config.go
-index 388acbcde..6a83b6de6 100644
+index 51b10dd..45986a7 100644
 --- a/pkg/obi/config.go
 +++ b/pkg/obi/config.go
 @@ -346,6 +346,7 @@ var DefaultConfig = Config{
@@ -1197,10 +1197,10 @@ index 388acbcde..6a83b6de6 100644
  		ProcessContextPollInterval: time.Second,
  		DefaultOtlpGRPCPort:        4317,
 diff --git a/pkg/obi/config_test.go b/pkg/obi/config_test.go
-index 5a1f01346..f026388eb 100644
+index aa6a453..fde9413 100644
 --- a/pkg/obi/config_test.go
 +++ b/pkg/obi/config_test.go
-@@ -399,6 +399,7 @@ discovery:
+@@ -398,6 +398,7 @@ discovery:
  		},
  		Discovery: services.DiscoveryConfig{
  			ExcludeOTelInstrumentedServices: true,

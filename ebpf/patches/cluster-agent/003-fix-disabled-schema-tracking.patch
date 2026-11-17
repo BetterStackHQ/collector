@@ -1,30 +1,9 @@
-diff --git a/metrics/metrics.go b/metrics/metrics.go
-index 2cc74f0..c837d82 100644
---- a/metrics/metrics.go
-+++ b/metrics/metrics.go
-@@ -16,6 +16,7 @@ import (
- 	"github.com/coroot/coroot-cluster-agent/flags"
- 	"github.com/coroot/coroot-cluster-agent/k8s"
- 	"github.com/coroot/coroot-cluster-agent/metrics/aws"
-+	"github.com/coroot/coroot-cluster-agent/metrics/dbtracker"
- 	"github.com/coroot/coroot-cluster-agent/metrics/gcp"
- 	"github.com/coroot/coroot-cluster-agent/metrics/ksm"
- 	"github.com/coroot/coroot-cluster-agent/metrics/mysql"
-@@ -56,7 +57,7 @@ type Metrics struct {
- 	k8sPodEvents <-chan k8s.PodEvent
- 	ksm          *ksm.KSM
- 
--	changeEmitter *emitter.ChangeEmitter
-+	changeEmitter dbtracker.ChangeEmitter
- }
- 
- func NewMetrics(k8s *k8s.K8S, static *config.Static) (*Metrics, error) {
 diff --git a/metrics/schema_tracking_test.go b/metrics/schema_tracking_test.go
 new file mode 100644
-index 0000000..f197bda
+index 0000000..93dd53c
 --- /dev/null
 +++ b/metrics/schema_tracking_test.go
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,25 @@
 +package metrics
 +
 +import (
@@ -33,7 +12,6 @@ index 0000000..f197bda
 +	"time"
 +
 +	"github.com/coroot/coroot-cluster-agent/flags"
-+	"github.com/coroot/coroot-cluster-agent/metrics/dbtracker"
 +	"github.com/stretchr/testify/require"
 +)
 +
@@ -45,34 +23,9 @@ index 0000000..f197bda
 +	*flags.CorootURL, _ = url.Parse("http://127.0.0.1:38263")
 +	*flags.MetricsScrapeInterval = 15 * time.Second
 +	*flags.TrackDatabaseChanges = false
-+	ms, err := NewMetrics(nil, nil)
++	ms, err := NewMetrics(nil, nil, nil)
 +	require.NoError(t, err)
 +	// Database constructors use this interface; a typed nil would enable tracking.
-+	var changeEmitter dbtracker.ChangeEmitter = ms.changeEmitter
-+	require.True(t, changeEmitter == nil)
++	opts := ms.exporterOptions()
++	require.True(t, opts.ChangeEmitter == nil)
 +}
-diff --git a/metrics/target.go b/metrics/target.go
-index 3e39831..1ebb019 100644
---- a/metrics/target.go
-+++ b/metrics/target.go
-@@ -13,10 +13,10 @@ import (
- 	"github.com/coroot/coroot-cluster-agent/common"
- 	"github.com/coroot/coroot-cluster-agent/config"
- 	"github.com/coroot/coroot-cluster-agent/k8s"
-+	"github.com/coroot/coroot-cluster-agent/metrics/dbtracker"
- 	"github.com/coroot/coroot-cluster-agent/metrics/mongo"
- 	"github.com/coroot/coroot-cluster-agent/metrics/mysql"
- 	"github.com/coroot/coroot-cluster-agent/metrics/postgres"
--	"github.com/coroot/coroot-cluster-agent/schema/emitter"
- 	"github.com/coroot/logger"
- 	"github.com/go-kit/log/level"
- 	gomysql "github.com/go-sql-driver/mysql"
-@@ -120,7 +120,7 @@ func (t *Target) IsExporterStarted() bool {
- 	return t.collector() != nil
- }
- 
--func (t *Target) StartExporter(reg *prometheus.Registry, credentials Credentials, tlsCreds common.TLSCredentials, scrapeInterval, scrapeTimeout time.Duration, changeEmitter *emitter.ChangeEmitter, maxTablesPerDB int, trackSizes, trackBloat bool, excludeDatabases []string) error {
-+func (t *Target) StartExporter(reg *prometheus.Registry, credentials Credentials, tlsCreds common.TLSCredentials, scrapeInterval, scrapeTimeout time.Duration, changeEmitter dbtracker.ChangeEmitter, maxTablesPerDB int, trackSizes, trackBloat bool, excludeDatabases []string) error {
- 	collectTimeout := scrapeTimeout - time.Second
- 	if collectTimeout <= 0 {
- 		collectTimeout = time.Second

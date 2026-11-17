@@ -8,7 +8,7 @@ ARG GO_VERSION=1.26.8
 RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz -o go.tar.gz && \
     tar -C /usr/local -xzf go.tar.gz && rm go.tar.gz
 ENV PATH="/usr/local/go/bin:${PATH}"
-ARG CLUSTER_AGENT_VERSION=v1.11.5
+ARG CLUSTER_AGENT_VERSION=v1.11.9
 RUN git clone --depth 1 --branch ${CLUSTER_AGENT_VERSION} \
     https://github.com/coroot/coroot-cluster-agent.git /tmp/cluster-agent
 WORKDIR /tmp/cluster-agent
@@ -36,12 +36,12 @@ FROM prometheuscommunity/pgbouncer-exporter:v0.12.0 AS pgbouncer-exporter
 FROM prom/mysqld-exporter:v0.20.0 AS mysqld-exporter
 
 # Build OBI from source with patches
-FROM ghcr.io/open-telemetry/obi-generator:0.2.16@sha256:3a8959e5253f2445b782b4f720ed54f6396fce350082486442e0b71ac02ff106 AS obi-builder
+FROM ghcr.io/open-telemetry/obi-generator:0.2.17@sha256:1ae9406f2566e32ccf5d8ba8e5ff0586a322300ae82870988ad605429021174a AS obi-builder
 RUN apk add --no-cache bash git make
 ARG TARGETARCH
 ARG CUSTOMIZATION_TAG="betterstack"
-ARG OBI_VERSION="v0.14.0"
-ARG OBI_REVISION="13d9b0c3f600a060bd78820a63ebec882b10757e"
+ARG OBI_VERSION="v0.15.2"
+ARG OBI_REVISION="b28e4e7fe0a01f1961b7c4747a13b8ff486d6fec"
 RUN git clone --depth 1 --branch ${OBI_VERSION} \
     https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation.git /tmp/obi && \
     test "$(git -C /tmp/obi rev-parse HEAD)" = "${OBI_REVISION}"
@@ -57,7 +57,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 # Final stage - Debian slim: the eBPF agent links against glibc
 FROM debian:13.5-slim
-ENV CLUSTER_AGENT_VERSION=1.11.5
+ENV CLUSTER_AGENT_VERSION=1.11.9
 
 # Install supervisor, ca-certificates, curl, procps, and Ruby
 RUN apt-get update && \

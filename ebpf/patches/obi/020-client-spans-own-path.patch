@@ -1,16 +1,8 @@
 diff --git a/pkg/appolly/app/request/metric_attributes.go b/pkg/appolly/app/request/metric_attributes.go
-index 10bfb03e9..7967ad5f4 100644
+index e1a6f81..435913d 100644
 --- a/pkg/appolly/app/request/metric_attributes.go
 +++ b/pkg/appolly/app/request/metric_attributes.go
-@@ -4,6 +4,7 @@
- package request // import "go.opentelemetry.io/obi/pkg/appolly/app/request"
- 
- import (
-+	"net"
- 	"strconv"
- 	"strings"
- 
-@@ -258,6 +259,29 @@ func HostFromSchemeHost(span *Span) string {
+@@ -262,6 +262,29 @@ func HostFromSchemeHost(span *Span) string {
  	return ""
  }
  
@@ -37,14 +29,14 @@ index 10bfb03e9..7967ad5f4 100644
 +	return net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(span.HostHeaderPort))
 +}
 +
+ // HTTPClientHost returns the host an HTTP client request was sent to, as the
+ // request named it: the Host header keeps a non-default port.
  func HTTPClientHost(span *Span) string {
- 	if host := HostFromSchemeHost(span); host != "" {
- 		return host
 diff --git a/pkg/appolly/app/request/span.go b/pkg/appolly/app/request/span.go
-index c1668e505..a5c0b9f7a 100644
+index 99a058e..33ccb9e 100644
 --- a/pkg/appolly/app/request/span.go
 +++ b/pkg/appolly/app/request/span.go
-@@ -1517,30 +1517,33 @@ const (
+@@ -1520,30 +1520,33 @@ const (
  // and SpanPromGetters in pkg/appolly/app/request/span_getters_providers.go and
  // getDefinitions in pkg/export/attributes/attr_defs.go
  type Span struct {
@@ -103,7 +95,7 @@ index c1668e505..a5c0b9f7a 100644
  	// span started: BPF cannot tell at that moment, so the pipeline settles the
  	// link against the parent span's real end timestamp before export.
 diff --git a/pkg/ebpf/common/http_transform.go b/pkg/ebpf/common/http_transform.go
-index d7a18f148..4b7165b31 100644
+index d7a18f1..4b7165b 100644
 --- a/pkg/ebpf/common/http_transform.go
 +++ b/pkg/ebpf/common/http_transform.go
 @@ -53,13 +53,15 @@ func removeQuery(url string) string {
@@ -192,7 +184,7 @@ index d7a18f148..4b7165b31 100644
  	return host, port
  }
 diff --git a/pkg/ebpf/common/http_transform_test.go b/pkg/ebpf/common/http_transform_test.go
-index bd79e8d15..dd732d22e 100644
+index bd79e8d..dd732d2 100644
 --- a/pkg/ebpf/common/http_transform_test.go
 +++ b/pkg/ebpf/common/http_transform_test.go
 @@ -244,20 +244,21 @@ func TestToRequestTraceNoConnection(t *testing.T) {
@@ -299,10 +291,10 @@ index bd79e8d15..dd732d22e 100644
  	newSSLEvent := func(buf []uint8) *BPFHTTPInfo {
  		event := makeBPFInfoWithBuf(buf)
 diff --git a/pkg/export/otel/tracesgen/tracesgen.go b/pkg/export/otel/tracesgen/tracesgen.go
-index 9ed1afb68..390027994 100644
+index 17f72c9..df31d64 100644
 --- a/pkg/export/otel/tracesgen/tracesgen.go
 +++ b/pkg/export/otel/tracesgen/tracesgen.go
-@@ -794,7 +794,7 @@ func traceAttributesSelectorInternal(span *request.Span, optionalAttrs map[attr.
+@@ -862,7 +862,7 @@ func traceAttributesSelectorInternal(span *request.Span, optionalAttrs map[attr.
  		}
  		url := urlPath
  		if span.HasOriginalHost() {
@@ -313,7 +305,7 @@ index 9ed1afb68..390027994 100644
  		transport := httpClientTransportScope(span.SubType)
 diff --git a/pkg/export/otel/tracesgen/url_full_test.go b/pkg/export/otel/tracesgen/url_full_test.go
 new file mode 100644
-index 000000000..808bd1d5e
+index 0000000..808bd1d
 --- /dev/null
 +++ b/pkg/export/otel/tracesgen/url_full_test.go
 @@ -0,0 +1,51 @@
@@ -369,7 +361,7 @@ index 000000000..808bd1d5e
 +	}
 +}
 diff --git a/pkg/internal/transform/route/parameters.go b/pkg/internal/transform/route/parameters.go
-index fc857b371..9c2fc6e9e 100644
+index fc857b3..9c2fc6e 100644
 --- a/pkg/internal/transform/route/parameters.go
 +++ b/pkg/internal/transform/route/parameters.go
 @@ -5,6 +5,17 @@ package route // import "go.opentelemetry.io/obi/pkg/internal/transform/route"
@@ -391,7 +383,7 @@ index fc857b371..9c2fc6e9e 100644
  	for i, part := range parts {
  		if tail, ok := routeParam(part); ok && tail && i != len(parts)-1 {
 diff --git a/pkg/internal/transform/route/parameters_test.go b/pkg/internal/transform/route/parameters_test.go
-index 61b640c9d..f80f29e87 100644
+index 61b640c..f80f29e 100644
 --- a/pkg/internal/transform/route/parameters_test.go
 +++ b/pkg/internal/transform/route/parameters_test.go
 @@ -9,6 +9,23 @@ import (
@@ -419,7 +411,7 @@ index 61b640c9d..f80f29e87 100644
  	tests := []struct {
  		name  string
 diff --git a/pkg/transform/routes.go b/pkg/transform/routes.go
-index 592524a97..0b0c92421 100644
+index 592524a..0b0c924 100644
 --- a/pkg/transform/routes.go
 +++ b/pkg/transform/routes.go
 @@ -8,6 +8,7 @@ import (
@@ -495,7 +487,7 @@ index 592524a97..0b0c92421 100644
  	if span.Route != "" {
  		return
 diff --git a/pkg/transform/routes_test.go b/pkg/transform/routes_test.go
-index f835a1d2c..69c909007 100644
+index f835a1d..69c9090 100644
 --- a/pkg/transform/routes_test.go
 +++ b/pkg/transform/routes_test.go
 @@ -322,6 +322,71 @@ func TestDirectionalRoutesPerServiceOverrides(t *testing.T) {
