@@ -283,9 +283,87 @@ adjust_compose_cpus() {
   mv "$tmpfile" "$file"
 }
 
+# A host with an IPv6 default route and no IPv4 one can reach Better Stack over IPv6 only
+ipv6_only_host() {
+  command -v ip > /dev/null 2>&1 || return 1
+  [ -z "$(ip -4 route show default 2>/dev/null)" ] && [ -n "$(ip -6 route show default 2>/dev/null)" ]
+}
+
+# The collector container sits on the Compose default network, which Docker creates without IPv6
+enable_compose_ipv6() {
+  local file="$1"
+
+  printf '\nnetworks:\n  default:\n    enable_ipv6: true\n' >> "$file"
+}
+
+# Prints the interface whose IPv6 default route the kernel keeps alive from router advertisements, if any.
+# Docker turns on IPv6 forwarding for an IPv6 network, and the kernel then drops such a route unless accept_ra is 2.
+kernel_ra_default_route_device() {
+  local dev
+
+  for dev in $(ip -6 route show default 2>/dev/null | awk '{
+    dev = ""; ra = 0
+    for (i = 1; i < NF; i++) {
+      if ($i == "dev") dev = $(i + 1)
+      if ($i == "proto" && $(i + 1) == "ra") ra = 1
+    }
+    if (ra && dev != "") print dev
+  }' | sort -u); do
+    if [ "$(cat "/proc/sys/net/ipv6/conf/$dev/accept_ra" 2>/dev/null)" = "1" ] &&
+       [ "$(cat "/proc/sys/net/ipv6/conf/$dev/forwarding" 2>/dev/null)" = "0" ]; then
+      echo "$dev"
+      return 0
+    fi
+  done
+}
+
+# Prints the containers on the collector network that are not ours; Docker cannot remove a network they still use
+other_network_containers() {
+  docker network inspect better-stack-collector_default --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null |
+    tr ' ' '\n' | grep -v -x -e '' -e 'better-stack-collector' | tr '\n' ' ' | sed 's/ $//'
+}
+
 adjust_compose_ports docker-compose.yml
 adjust_compose_volumes docker-compose.yml
 adjust_compose_cpus docker-compose.yml
+
+RECREATE_NETWORK=false
+NETWORK_IPV6=$(docker network inspect better-stack-collector_default --format '{{.EnableIPv6}}' 2>/dev/null || true)
+if version_lt "$DOCKER_VERSION" "27.0.0"; then
+    # Docker older than 27 cannot pick an IPv6 subnet for a network or route it outside without extra daemon settings
+    if ipv6_only_host; then
+        echo "WARNING: This host has no IPv4 default route, and Docker $DOCKER_VERSION cannot connect the collector over IPv6."
+        echo "The collector will not be able to reach Better Stack. Upgrade Docker to version 27 or newer and run this script again."
+    fi
+elif [ "$NETWORK_IPV6" = "true" ]; then
+    # Keep IPv6 on a network that already has it: taking it away again stops the collector on some Compose versions
+    enable_compose_ipv6 docker-compose.yml
+elif ipv6_only_host; then
+    RA_DEVICE=$(kernel_ra_default_route_device)
+    OTHER_CONTAINERS=""
+    if [ "$NETWORK_IPV6" = "false" ]; then
+        OTHER_CONTAINERS=$(other_network_containers)
+    fi
+    if [ -n "$RA_DEVICE" ]; then
+        echo "WARNING: This host has no IPv4 default route, so the collector needs IPv6 on its Docker network."
+        echo "Docker would turn on IPv6 forwarding for that, and this host would then lose its IPv6 default route,"
+        echo "which it learns from router advertisements on $RA_DEVICE. IPv6 was not enabled and the collector will not"
+        echo "be able to reach Better Stack. Set net.ipv6.conf.$RA_DEVICE.accept_ra=2 so that it survives a reboot"
+        echo "(for example in /etc/sysctl.d/) and run this script again."
+    elif [ -n "$OTHER_CONTAINERS" ]; then
+        echo "WARNING: This host has no IPv4 default route, so the collector needs IPv6 on its Docker network."
+        echo "The network better-stack-collector_default has to be created again for that, but other containers use it: $OTHER_CONTAINERS"
+        echo "IPv6 was not enabled and the collector will not be able to reach Better Stack."
+        echo "Disconnect them with 'docker network disconnect better-stack-collector_default <container>' and run this script again."
+    else
+        echo "Detected an IPv6-only host, enabling IPv6 on the collector network"
+        enable_compose_ipv6 docker-compose.yml
+        # Compose versions disagree on updating a network that already exists, so an IPv4-only one is removed first
+        if [ "$NETWORK_IPV6" = "false" ]; then
+            RECREATE_NETWORK=true
+        fi
+    fi
+fi
 
 # Replace :latest tag if IMAGE_TAG is set
 if [ -n "$IMAGE_TAG" ]; then
@@ -322,6 +400,11 @@ docker stop better-stack-ebpf 2>/dev/null || true
 docker rm better-stack-ebpf 2>/dev/null || true
 docker stop better-stack-beyla 2>/dev/null || true
 docker rm better-stack-beyla 2>/dev/null || true
+
+if [ "$RECREATE_NETWORK" = true ]; then
+    echo "Removing the existing collector network, it will be created again with IPv6"
+    $COMPOSE_CMD -p better-stack-collector down
+fi
 
 # Run containers
 COLLECTOR_SECRET="$COLLECTOR_SECRET" \
