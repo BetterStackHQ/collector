@@ -258,8 +258,34 @@ docker_v1_compatibility() {
   rm -f "$cleaned"
 }
 
+# Docker rejects the whole compose file when a container asks for more CPUs than the host has,
+# so a limit above the host's CPU count is lowered to that count.
+adjust_compose_cpus() {
+  local file="$1"
+  local host_cpus
+  # The Docker daemon's own count is the one it checks the limit against.
+  host_cpus="$(docker info --format '{{.NCPU}}' 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+  case "$host_cpus" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  local tmpfile
+  tmpfile="$(mktemp)"
+  awk -v max="$host_cpus" '
+    /^[ \t]*cpus:[ \t]*[0-9.]+[ \t]*$/ {
+      split($0, parts, "cpus:")
+      if (parts[2] + 0 > max + 0) {
+        print parts[1] "cpus: " max ".0"
+        next
+      }
+    }
+    { print }
+  ' "$file" > "$tmpfile"
+  mv "$tmpfile" "$file"
+}
+
 adjust_compose_ports docker-compose.yml
 adjust_compose_volumes docker-compose.yml
+adjust_compose_cpus docker-compose.yml
 
 # Replace :latest tag if IMAGE_TAG is set
 if [ -n "$IMAGE_TAG" ]; then
