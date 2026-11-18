@@ -17,12 +17,28 @@ RUN git apply *.patch
 RUN CGO_ENABLED=0 GOTOOLCHAIN=local go build -mod=readonly \
   -o /usr/bin/coroot-cluster-agent .
 
+# Ruby 3.4 from the official image. Debian 13 ships Ruby 3.3, whose TCPSocket
+# never tries IPv6 when IPv4 fails at once, so it can't connect on IPv6-only hosts.
+FROM ruby:3.4.12-slim-trixie AS ruby
+# webrick left the standard library in Ruby 3.0; Debian's ruby package brought it in
+RUN gem install --install-dir /usr/local/lib/ruby/gems/3.4.0 --no-document webrick -v 1.9.2
+# The official build keeps debug info (~50 MB); Debian's ruby package ships without it
+RUN apt-get update && apt-get install -y --no-install-recommends binutils \
+  && find /usr/local/bin/ruby /usr/local/lib -type f \( -name ruby -o -name '*.so*' \) \
+  -exec strip --strip-debug {} +
+
 # Final stage
 FROM debian:13.5-slim
 
-# Install required packages
+# Install required packages (the lib* ones are what Ruby and its extensions link against)
 RUN apt-get update && apt-get install -y \
-  ruby \
+  libcrypt1 \
+  libffi8 \
+  libgmp10 \
+  libssl3t64 \
+  libyaml-0-2 \
+  libzstd1 \
+  zlib1g \
   supervisor \
   curl \
   bash \
@@ -43,6 +59,16 @@ RUN apt-get update && apt-get install -y --only-upgrade ca-certificates \
   && update-ca-certificates \
   && ! test -e /etc/ssl/certs/emSign_ECC_Root_CA_-_G3.pem \
   && ! test -e /etc/ssl/certs/Comodo_AAA_Services_root.pem
+
+# Copy Ruby; scripts run both as `ruby` (PATH) and as `/usr/bin/ruby`.
+# Fail the build if a shared library is missing or a library the scripts need doesn't load.
+COPY --from=ruby /usr/local/bin/ /usr/local/bin/
+COPY --from=ruby /usr/local/etc/gemrc /usr/local/etc/gemrc
+COPY --from=ruby /usr/local/lib/ /usr/local/lib/
+RUN ln -s /usr/local/bin/ruby /usr/bin/ruby \
+  && ldconfig \
+  && ! { ldd /usr/local/bin/ruby; find /usr/local/lib/ruby -name '*.so' -exec ldd {} \; ; } | grep 'not found' \
+  && /usr/bin/ruby -ropenssl -rpsych -rzlib -rfiddle -rwebrick -rcsv -rbase64 -e 'exit 0'
 
 # Copy Vector from vector image
 COPY --from=vector --chmod=755 /usr/bin/vector /usr/local/bin/vector
