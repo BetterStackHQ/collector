@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Better Stack Collector is a Docker-based monitoring solution that collects metrics, logs, and traces. This repo contains the **container scaffolding and deployment scripts** only — the actual application logic (Ruby scripts, supervisor configs, healthcheck, etc.) is delivered at runtime via the Better Stack manifest API.
 
 Two containers are built here:
-- **Collector** (`collector/Dockerfile`) — Vector + Cluster Agent + Ruby 3.4 on Debian, bootstrapped via manifest API
+- **Collector** (`collector/Dockerfile`) — Vector + Cluster Agent + Ruby on Debian, bootstrapped via manifest API
 - **eBPF** (`ebpf/Dockerfile`) — OBI + Better Stack eBPF Agent + Cluster Agent + Node Exporter + Postgres Exporter on Debian, provisioned by the collector's bootstrap
 
 ## Repository Structure
