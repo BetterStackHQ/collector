@@ -19,7 +19,7 @@ RUN CGO_ENABLED=0 GOTOOLCHAIN=local go build -mod=readonly \
 
 # Ruby 4.0 from the official image. Debian 13 ships Ruby 3.3, whose TCPSocket
 # never tries IPv6 when IPv4 fails at once, so it can't connect on IPv6-only hosts.
-FROM ruby:4.0.9-slim-trixie AS ruby
+FROM ruby:4.0.10-slim-trixie AS ruby
 # webrick left the standard library in Ruby 3.0; Debian's ruby package brought it in
 RUN gem install --install-dir /usr/local/lib/ruby/gems/4.0.0 --no-document webrick -v 1.9.2
 # The official build keeps debug info (~50 MB); Debian's ruby package ships without it
