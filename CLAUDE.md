@@ -8,7 +8,7 @@ Better Stack Collector is a Docker-based monitoring solution that collects metri
 
 Two containers are built here:
 - **Collector** (`collector/Dockerfile`) — Vector + Cluster Agent + Ruby on Debian, bootstrapped via manifest API
-- **eBPF** (`ebpf/Dockerfile`) — OBI + Better Stack eBPF Agent + Cluster Agent + Node Exporter + Postgres Exporter on Debian, provisioned by the collector's bootstrap
+- **eBPF** (`ebpf/Dockerfile`) — OBI + Better Stack eBPF Agent + Cluster Agent + Node Exporter + Postgres Exporter + Ruby on Debian, provisioned by the collector's bootstrap
 
 ## Repository Structure
 
@@ -27,7 +27,7 @@ collector/
   versions/0-default/       # Default Vector config + empty databases.json
   kubernetes-discovery/0-default/
 ebpf/
-  Dockerfile                # Multi-stage: OBI 0.15.2 + eBPF Agent 1.1.1 + exporters + Debian 13.5-slim
+  Dockerfile                # Multi-stage: OBI 0.15.2 + eBPF Agent 1.1.1 + exporters + Ruby 4.0.10 + Debian 13.5-slim
   bootstrap_supervisord.conf
   run_supervisord.sh
 swarm/
