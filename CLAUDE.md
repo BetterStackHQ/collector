@@ -96,6 +96,8 @@ Both install.sh and deploy-to-swarm.sh check for the other's naming convention t
 - Downloads docker-compose.yml from GitHub raw URL
 - Adjusts ports, volumes, mounts via awk/sed
 - Handles Docker Compose v1 compatibility
+- On an IPv6-only host (IPv6 default route, no IPv4 one) with Docker >= 27, turns on IPv6 for the Compose default network and recreates an existing IPv4-only one. A network that already has IPv6 keeps it on later runs. The committed compose files stay IPv4-only because `enable_ipv6` without a subnet fails on Docker < 27
+- Skips that, with a warning, when other containers use the existing network (Docker cannot remove it then), or when the kernel keeps the host's IPv6 default route alive from router advertisements (`proto ra`, `accept_ra=1`, forwarding off): Docker turns on IPv6 forwarding for an IPv6 network and the kernel would then drop the route
 - Project name: `better-stack-collector`
 
 **Docker Swarm** (`deploy-to-swarm.sh`):
