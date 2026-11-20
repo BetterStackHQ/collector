@@ -55,19 +55,31 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     /generate.sh && \
     make compile RELEASE_VERSION="${OBI_VERSION}-${CUSTOMIZATION_TAG}"
 
+# Ruby 4.0 from the official image, the same release the collector image ships
+FROM ruby:4.0.10-slim-trixie AS ruby
+# The official build keeps debug info (~50 MB); Debian's ruby package ships without it
+RUN apt-get update && apt-get install -y --no-install-recommends binutils \
+  && find /usr/local/bin/ruby /usr/local/lib -type f \( -name ruby -o -name '*.so*' \) \
+  -exec strip --strip-debug {} +
+
 # Final stage - Debian slim: the eBPF agent links against glibc
 FROM debian:13.5-slim
 ENV CLUSTER_AGENT_VERSION=1.11.9
 
-# Install supervisor, ca-certificates, curl, procps, and Ruby
+# Install supervisor, ca-certificates, curl, procps, and the libraries Ruby and its extensions link against
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         supervisor \
         ca-certificates \
         curl \
         procps \
-        ruby \
-        ruby-json \
+        libcrypt1 \
+        libffi8 \
+        libgmp10 \
+        libssl3t64 \
+        libyaml-0-2 \
+        libzstd1 \
+        zlib1g \
         jq && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -81,6 +93,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends --only-upgrade 
     && update-ca-certificates \
     && ! test -e /etc/ssl/certs/emSign_ECC_Root_CA_-_G3.pem \
     && ! test -e /etc/ssl/certs/Comodo_AAA_Services_root.pem
+
+# Copy Ruby; scripts run both as `ruby` (PATH) and as `/usr/bin/ruby`.
+# Fail the build if a shared library is missing or a library the scripts need doesn't load.
+COPY --from=ruby /usr/local/bin/ /usr/local/bin/
+COPY --from=ruby /usr/local/etc/gemrc /usr/local/etc/gemrc
+COPY --from=ruby /usr/local/lib/ /usr/local/lib/
+RUN ln -s /usr/local/bin/ruby /usr/bin/ruby \
+    && ldconfig \
+    && ! { ldd /usr/local/bin/ruby; find /usr/local/lib/ruby -name '*.so' -exec ldd {} \; ; } | grep 'not found' \
+    && /usr/bin/ruby -ropenssl -rpsych -rzlib -rjson -rcsv -rlogger -rerb -ropen3 -rnet/http -e 'exit 0'
 
 # Create necessary directories
 RUN mkdir -p /etc/supervisor/conf.d /var/log/supervisor /enrichment /bootstrap

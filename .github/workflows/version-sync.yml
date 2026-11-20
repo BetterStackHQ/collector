@@ -81,12 +81,16 @@ jobs:
           # collector builds the same cluster-agent it declares (and that ebpf ships).
           check "collector build ARG CLUSTER_AGENT_VERSION" "$(norm "$(grep -oP '^ARG CLUSTER_AGENT_VERSION=\K.*' "$COL" | head -1)")" "$ca"
 
+          # Both images ship the same Ruby.
+          check "ebpf Ruby" "$(grep -oP '^FROM ruby:\K[0-9.]+' "$EBPF" | head -1)" "$ruby"
+
           # CLAUDE.md summary must match the pins.
           check "CLAUDE.md Vector"        "$(grep -oP 'Vector \K[0-9][0-9.]*' "$DOC" | head -1)"        "$vec"
           check "CLAUDE.md OBI"           "$(grep -oP 'OBI \K[0-9][0-9.]*' "$DOC" | head -1)"           "$obi"
           check "CLAUDE.md eBPF Agent"     "$(grep -oP 'eBPF Agent \K[0-9][0-9.]*' "$DOC" | head -1)"     "$ebpf_agent"
           check "CLAUDE.md Cluster Agent" "$(grep -oP 'Cluster Agent \K[0-9][0-9.]*' "$DOC" | head -1)" "$ca"
-          check "CLAUDE.md Ruby"          "$(grep -oP 'Ruby \K[0-9][0-9.]*' "$DOC" | head -1)"          "$ruby"
+          doc_ruby=$(grep -oP 'Ruby \K[0-9][0-9.]*' "$DOC" | sort -u)
+          check "CLAUDE.md Ruby"          "$doc_ruby"          "$ruby"
 
           # All debian bases must be one pinned point release, matching CLAUDE.md.
           deb_pins=$(grep -hoP '^FROM debian:\K[^ ]+' "$COL" "$EBPF" | sed 's/-slim$//' | sort -u)
