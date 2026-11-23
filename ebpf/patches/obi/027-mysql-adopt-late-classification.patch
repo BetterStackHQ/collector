@@ -1,0 +1,286 @@
+diff --git a/bpf/generictracer/protocol_tcp.h b/bpf/generictracer/protocol_tcp.h
+index 122ad61..4c3faed 100644
+--- a/bpf/generictracer/protocol_tcp.h
++++ b/bpf/generictracer/protocol_tcp.h
+@@ -24,6 +24,7 @@
+ #include <generictracer/failed_connect.h>
+ #include <generictracer/protocol_aerospike.h>
+ #include <generictracer/protocol_common.h>
++#include <generictracer/tcp_req_protocol.h>
+ #include <generictracer/tcp_trace_cleanup.h>
+ #include <generictracer/protocol_kafka.h>
+ #include <generictracer/protocol_mysql.h>
+@@ -422,6 +423,8 @@ static __always_inline void handle_unknown_tcp_connection(pid_connection_info_t
+                               direction,
+                               protocol_type,
+                               k_large_buf_action_append);
++
++        tcp_req_adopt_protocol(existing, protocol_type);
+     }
+ }
+ 
+diff --git a/bpf/generictracer/tcp_req_protocol.h b/bpf/generictracer/tcp_req_protocol.h
+new file mode 100644
+index 0000000..ec5bcc7
+--- /dev/null
++++ b/bpf/generictracer/tcp_req_protocol.h
+@@ -0,0 +1,27 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++#pragma once
++
++#include <bpfcore/vmlinux.h>
++
++#include <common/common.h>
++#include <common/connection_info.h>
++
++// A request opened before its connection was classified keeps the unknown
++// protocol even when a later read on the same request classifies it. This
++// happens to MySQL servers reached through a DNAT'd address, such as a
++// Kubernetes ClusterIP Service: the server reads the 4-byte packet header
++// first, which cannot be classified on its own. Userspace then parses the
++// request as a generic event and loses the MySQL prepared statement handling.
++//
++// Only MySQL is adopted. The protocol type also picks which large buffer kind
++// userspace looks up, so adopting other late-classified protocols (such as
++// Kafka, or HTTP from already_tracked_http) would change where userspace looks
++// for the request's captured bytes.
++static __always_inline void tcp_req_adopt_protocol(tcp_req_t *req,
++                                                   enum protocol_type protocol_type) {
++    if (req->protocol_type == k_protocol_type_unknown && protocol_type == k_protocol_type_mysql) {
++        req->protocol_type = protocol_type;
++    }
++}
+diff --git a/bpf/tests/test_tcp_req_protocol.c b/bpf/tests/test_tcp_req_protocol.c
+new file mode 100644
+index 0000000..f0658c2
+--- /dev/null
++++ b/bpf/tests/test_tcp_req_protocol.c
+@@ -0,0 +1,114 @@
++// Copyright The OpenTelemetry Authors
++// SPDX-License-Identifier: Apache-2.0
++
++// Run from repo root:
++//   make -C bpf/tests test_tcp_req_protocol && bpf/tests/test_tcp_req_protocol
++// Run from bpf/tests:
++//   make test_tcp_req_protocol && ./test_tcp_req_protocol
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdio.h>
++#include <string.h>
++
++#include <generictracer/tcp_req_protocol.h>
++
++static unsigned int failed_assertions;
++
++static void assert_true(bool condition, const char *message) {
++    if (condition) {
++        printf("PASS: %s\n", message);
++        return;
++    }
++
++    failed_assertions++;
++    printf("FAIL: %s\n", message);
++}
++
++// A request with every byte set, so that a write outside protocol_type shows
++// up in the byte comparison below.
++static void init_req(tcp_req_t *req, enum protocol_type protocol_type) {
++    unsigned char *bytes = (unsigned char *)req;
++    for (size_t i = 0; i < sizeof(*req); i++) {
++        bytes[i] = (unsigned char)(i * 31 + 7);
++    }
++    req->protocol_type = protocol_type;
++}
++
++static bool only_protocol_type_differs(const tcp_req_t *actual, const tcp_req_t *before) {
++    const unsigned char *actual_bytes = (const unsigned char *)actual;
++    const unsigned char *before_bytes = (const unsigned char *)before;
++    const size_t protocol_offset = offsetof(tcp_req_t, protocol_type);
++
++    for (size_t i = 0; i < sizeof(*actual); i++) {
++        if (i >= protocol_offset && i < protocol_offset + sizeof(actual->protocol_type)) {
++            continue;
++        }
++        if (actual_bytes[i] != before_bytes[i]) {
++            printf("tcp_req_t byte %zu changed: got 0x%02x, want 0x%02x\n",
++                   i,
++                   actual_bytes[i],
++                   before_bytes[i]);
++            return false;
++        }
++    }
++
++    return true;
++}
++
++static enum protocol_type adopt(enum protocol_type current, enum protocol_type classified) {
++    tcp_req_t req;
++    tcp_req_t before;
++    init_req(&req, current);
++    memcpy(&before, &req, sizeof(req));
++
++    tcp_req_adopt_protocol(&req, classified);
++
++    assert_true(only_protocol_type_differs(&req, &before),
++                "no byte of the request other than protocol_type changes");
++    return req.protocol_type;
++}
++
++// A MySQL server behind a DNAT'd address reads the 4-byte packet header
++// first, so the request opens as unknown and the next read classifies it.
++static void test_unknown_request_adopts_mysql(void) {
++    assert_true(adopt(k_protocol_type_unknown, k_protocol_type_mysql) == k_protocol_type_mysql,
++                "an unknown request adopts a late MySQL classification");
++}
++
++static void test_unknown_request_ignores_other_protocols(void) {
++    assert_true(adopt(k_protocol_type_unknown, k_protocol_type_unknown) == k_protocol_type_unknown,
++                "an unknown request stays unknown when the read is not classified");
++    assert_true(adopt(k_protocol_type_unknown, k_protocol_type_kafka) == k_protocol_type_unknown,
++                "an unknown request does not adopt Kafka");
++    assert_true(adopt(k_protocol_type_unknown, k_protocol_type_postgres) == k_protocol_type_unknown,
++                "an unknown request does not adopt Postgres");
++    assert_true(adopt(k_protocol_type_unknown, k_protocol_type_http) == k_protocol_type_unknown,
++                "an unknown request does not adopt HTTP");
++}
++
++static void test_mysql_request_keeps_its_protocol(void) {
++    assert_true(adopt(k_protocol_type_mysql, k_protocol_type_mysql) == k_protocol_type_mysql,
++                "a MySQL request stays MySQL on a MySQL read");
++    assert_true(adopt(k_protocol_type_mysql, k_protocol_type_unknown) == k_protocol_type_mysql,
++                "a MySQL request stays MySQL on an unclassified read");
++    assert_true(adopt(k_protocol_type_mysql, k_protocol_type_kafka) == k_protocol_type_mysql,
++                "a MySQL request stays MySQL on a Kafka read");
++    assert_true(adopt(k_protocol_type_mysql, k_protocol_type_postgres) == k_protocol_type_mysql,
++                "a MySQL request stays MySQL on a Postgres read");
++    assert_true(adopt(k_protocol_type_mysql, k_protocol_type_http) == k_protocol_type_mysql,
++                "a MySQL request stays MySQL on an HTTP read");
++}
++
++int main(void) {
++    test_unknown_request_adopts_mysql();
++    test_unknown_request_ignores_other_protocols();
++    test_mysql_request_keeps_its_protocol();
++
++    if (failed_assertions != 0) {
++        printf("%u failed assertions\n", failed_assertions);
++        return 1;
++    }
++
++    return 0;
++}
+diff --git a/pkg/ebpf/common/sql_detect_mysql_test.go b/pkg/ebpf/common/sql_detect_mysql_test.go
+index 4b51fc1..eac21f1 100644
+--- a/pkg/ebpf/common/sql_detect_mysql_test.go
++++ b/pkg/ebpf/common/sql_detect_mysql_test.go
+@@ -261,3 +261,107 @@ func TestReadTCPRequestIntoSpan_MySQLStmtCloseCoalescing(t *testing.T) {
+ 	assert.Equal(t, "products", span.Path)
+ 	assert.Equal(t, "QUERY", span.SQLCommand)
+ }
++
++// An app reaching MySQL through a Kubernetes ClusterIP Service sees the
++// Service address, while the server sees the pod address that DNAT rewrote it
++// to. The server reads the packet header before the command, so the kernel
++// opens its request before the connection is classified and only adopts MySQL
++// on the next read. Once adopted, the server's PREPARE must be cached like the
++// client's, not reported as a span whose parent (the client's PREPARE) is
++// never exported.
++func TestReadTCPRequestIntoSpan_MySQLPreparedStatementBehindNAT(t *testing.T) {
++	cfg := config.EBPFTracer{
++		CouchbaseDBCacheSize:                16,
++		MySQLPreparedStatementsCacheSize:    16,
++		PostgresPreparedStatementsCacheSize: 16,
++		MSSQLPreparedStatementsCacheSize:    16,
++		KafkaTopicUUIDCacheSize:             16,
++		MongoRequestsCacheSize:              16,
++	}
++	ctx := NewEBPFParseContext(&cfg, nil, nil)
++	fltr := TestPidsFilter{services: map[app.PID]svc.Attrs{}}
++
++	readSpan := func(t *testing.T, r TCPRequestInfo) (request.Span, bool) {
++		binaryRecord := bytes.Buffer{}
++		require.NoError(t, binary.Write(&binaryRecord, binary.LittleEndian, r))
++		span, ignore, err := ReadTCPRequestIntoSpan(ctx, &cfg, &ringbuf.Record{RawSample: binaryRecord.Bytes()}, &fltr)
++		require.NoError(t, err)
++		return span, ignore
++	}
++
++	setAddr := func(addr *[16]uint8, ip [4]uint8) {
++		*addr = [16]uint8{}
++		addr[10], addr[11] = 0xff, 0xff
++		copy(addr[12:], ip[:])
++	}
++
++	traceID := [16]uint8{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
++
++	// The client connects to the Service address.
++	clientEvent := func(spanID [8]uint8, req, resp []byte) TCPRequestInfo {
++		r := mysqlEventFor(req, resp)
++		setAddr(&r.ConnInfo.S_addr, [4]uint8{10, 244, 0, 5})
++		r.ConnInfo.S_port = 40000
++		setAddr(&r.ConnInfo.D_addr, [4]uint8{10, 96, 0, 10})
++		r.ConnInfo.D_port = 3306
++		r.Direction = directionSend
++		r.Tp.TraceId = traceID
++		r.Tp.SpanId = spanID
++		return r
++	}
++
++	// The server sees the pod address and links to the client's span.
++	serverEvent := func(spanID, parentID [8]uint8, req, resp []byte) TCPRequestInfo {
++		r := mysqlEventFor(req, resp)
++		setAddr(&r.ConnInfo.S_addr, [4]uint8{10, 244, 0, 5})
++		r.ConnInfo.S_port = 40000
++		setAddr(&r.ConnInfo.D_addr, [4]uint8{10, 244, 1, 7})
++		r.ConnInfo.D_port = 3306
++		r.Direction = directionRecv
++		r.IsServer = true
++		r.Tp.TraceId = traceID
++		r.Tp.SpanId = spanID
++		r.Tp.ParentId = parentID
++		return r
++	}
++
++	clientPrepareID := [8]uint8{1, 0, 0, 0, 0, 0, 0, 1}
++	serverPrepareID := [8]uint8{2, 0, 0, 0, 0, 0, 0, 2}
++	clientExecuteID := [8]uint8{3, 0, 0, 0, 0, 0, 0, 3}
++	serverExecuteID := [8]uint8{4, 0, 0, 0, 0, 0, 0, 4}
++
++	const query = "SELECT * FROM accounts WHERE id = ?"
++
++	_, ignore := readSpan(t, clientEvent(clientPrepareID, mysqlPreparePacket(query), mysqlPrepareResponsePacket(5)))
++	assert.True(t, ignore, "the client PREPARE is cached, not reported")
++
++	_, ignore = readSpan(t, serverEvent(serverPrepareID, clientPrepareID, mysqlPreparePacket(query), mysqlPrepareResponsePacket(5)))
++	assert.True(t, ignore, "the server PREPARE is cached, not reported with a parent that is never exported")
++
++	clientSpan, ignore := readSpan(t, clientEvent(clientExecuteID, mysqlExecutePacket(5), mysqlOKResponsePacket()))
++	require.False(t, ignore)
++	assert.Equal(t, request.EventTypeSQLClient, clientSpan.Type)
++	assert.Equal(t, query, clientSpan.Statement)
++	assert.Equal(t, "STMT_EXECUTE", clientSpan.SQLCommand)
++
++	serverSpan, ignore := readSpan(t, serverEvent(serverExecuteID, clientExecuteID, mysqlExecutePacket(5), mysqlOKResponsePacket()))
++	require.False(t, ignore)
++	assert.Equal(t, request.EventTypeSQLServer, serverSpan.Type)
++	assert.Equal(t, query, serverSpan.Statement)
++	assert.Equal(t, "STMT_EXECUTE", serverSpan.SQLCommand)
++	assert.Equal(t, "SELECT", serverSpan.Method)
++	assert.Equal(t, "accounts", serverSpan.Path)
++	assert.Equal(t, int(request.DBMySQL), serverSpan.SubType)
++	assert.Equal(t, clientSpan.SpanID, serverSpan.ParentSpanID)
++	assert.Equal(t, clientSpan.TraceID, serverSpan.TraceID)
++}
++
++// mysqlEventFor builds a kernel event already classified as MySQL, with the
++// request and response packets in place.
++func mysqlEventFor(req, resp []byte) TCPRequestInfo {
++	r := makeTCPReq(string(req), 3306)
++	r.ProtocolType = ProtocolTypeMySQL
++	r.RespLen = uint32(len(resp))
++	copy(r.Rbuf[:], resp)
++	return r
++}

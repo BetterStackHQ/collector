@@ -31,6 +31,7 @@ digest is pinned in `ebpf/Dockerfile`.
 | 024 | Keep unchanged | No upstream equivalent. |
 | 025 | Keep unchanged | No upstream equivalent. |
 | 026 | Keep unchanged | No upstream equivalent. |
+| 027 | New | No upstream equivalent. |
 
 Do not restore 009 ahead of 010: the upstream fill invalidation and mapped-window
 bounds are part of the base. A successful fill can copy less than `msg->size`
@@ -883,3 +884,34 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   copies of those stripped with binutils, and on the slim images themselves;
   the oracle test runs when `OBI_PYELF_FIXTURES` points at such a tree. No BPF
   change. Upstream candidate.
+* 027-mysql-adopt-late-classification.patch
+  Link MySQL server spans when the client reaches the server through a DNAT'd
+  address, such as a Kubernetes ClusterIP Service. MySQL 8.4 reads the 4-byte
+  packet header before the command, and the header alone cannot be classified,
+  so the server's request opened as protocol unknown. The next read classified
+  the connection as MySQL, but the open request kept the unknown protocol, and
+  userspace made a generic server span from the `COM_STMT_PREPARE`. Its parent,
+  the client's PREPARE, is never exported (OBI only caches a PREPARE's
+  statement), so the server span pointed at a missing parent. Without NAT the
+  request opens as MySQL and everything links.
+
+  The new `tcp_req_adopt_protocol()` (in `tcp_req_protocol.h`) moves an unknown
+  request to MySQL when a later read in the same direction classifies it as
+  MySQL. The server's PREPARE is then cached like the client's, and its EXECUTE
+  becomes a MySQL server span with the statement text, under the client's
+  EXECUTE. Only MySQL is adopted: the protocol type also picks which large
+  buffer kind userspace looks up, so adopting other late-classified protocols
+  (Kafka, or HTTP from `already_tracked_http`) would change where userspace
+  finds the request's bytes. The same unknown open happens without NAT when
+  the client runs on another node, since `protocol_cache` is per node; the
+  adoption covers that too.
+
+  A BPF host test (`test_tcp_req_protocol`) covers the adoption rule and checks
+  no other byte of the request changes. A Go test replays a prepared statement
+  with the client on a Service address and the server on the pod address, but
+  it builds already-adopted events, so it checks only the userspace side. No
+  host test covers the call in `handle_unknown_tcp_connection`; when
+  restacking, check it is still the last statement of the same-direction
+  append branch. The regression guard is end to end: a Laravel (PDO, MySQL
+  8.4) app reaching MySQL through a ClusterIP Service, where loose `SELECT`
+  server spans for the first statement of each connection should stay at 0.
