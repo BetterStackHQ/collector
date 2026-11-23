@@ -902,7 +902,16 @@ Go-specific tracing enabled and disabled, including a real Go HTTP client in bot
   EXECUTE. Only MySQL is adopted: the protocol type also picks which large
   buffer kind userspace looks up, so adopting other late-classified protocols
   (Kafka, or HTTP from `already_tracked_http`) would change where userspace
-  finds the request's bytes. A BPF host test (`test_tcp_req_protocol`) covers
-  the adoption rule and checks no other byte of the request changes, and a Go
-  test replays a prepared statement with the client on a Service address and
-  the server on the pod address.
+  finds the request's bytes. The same unknown open happens without NAT when
+  the client runs on another node, since `protocol_cache` is per node; the
+  adoption covers that too.
+
+  A BPF host test (`test_tcp_req_protocol`) covers the adoption rule and checks
+  no other byte of the request changes. A Go test replays a prepared statement
+  with the client on a Service address and the server on the pod address, but
+  it builds already-adopted events, so it checks only the userspace side. No
+  host test covers the call in `handle_unknown_tcp_connection`; when
+  restacking, check it is still the last statement of the same-direction
+  append branch. The regression guard is end to end: a Laravel (PDO, MySQL
+  8.4) app reaching MySQL through a ClusterIP Service, where loose `SELECT`
+  server spans for the first statement of each connection should stay at 0.
