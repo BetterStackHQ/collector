@@ -52,6 +52,16 @@ jobs:
         working-directory: ${{ runner.temp }}/obi
         run: ./scripts/lint-preempt-guard.sh
 
+      # The host tests need a newer clang than ubuntu-22.04 ships (upstream
+      # runs them on ubuntu-latest), so build and run them in ubuntu:24.04.
+      - name: Test TCP request protocol adoption
+        run: |
+          docker run --rm \
+            -v "$RUNNER_TEMP/obi:/src" \
+            -w /src \
+            ubuntu:24.04 \
+            sh -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends clang make libc6-dev >/dev/null && make -C bpf/tests test_tcp_req_protocol && bpf/tests/test_tcp_req_protocol'
+
       - name: Generate eBPF sources
         run: |
           docker run --rm \
