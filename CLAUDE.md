@@ -115,6 +115,7 @@ Both install.sh and deploy-to-swarm.sh check for the other's naming convention t
 - `CLUSTER_COLLECTOR` — Force cluster collector mode (default: false)
 - `MOUNT_HOST_PATHS` (optional) — Comma-separated host paths instead of default `/:/host:ro`
 - `COLLECT_OTEL_HTTP_PORT` / `COLLECT_OTEL_GRPC_PORT` (optional) — OTel ingestion ports
+- `COLLECT_OTEL_BIND_ADDRESS` (optional) — Listen address of the OTel receiver, e.g. `[::]`; unset lets the collector pick it
 
 ### Swarm-specific (deploy-to-swarm.sh)
 - `MANAGER_NODE` (required) — SSH target for swarm manager (user@host)
