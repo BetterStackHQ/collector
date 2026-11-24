@@ -68,6 +68,8 @@ fi
 MOUNT_HOST_PATHS="${MOUNT_HOST_PATHS:-}"
 COLLECT_OTEL_HTTP_PORT="${COLLECT_OTEL_HTTP_PORT:-}"
 COLLECT_OTEL_GRPC_PORT="${COLLECT_OTEL_GRPC_PORT:-}"
+# Optional listen address of the OTel receiver, e.g. [::]. Empty lets the collector pick it.
+COLLECT_OTEL_BIND_ADDRESS="${COLLECT_OTEL_BIND_ADDRESS:-}"
 
 # Set hostname if not provided (use empty string HOSTNAME="" to trigger runtime detection via uts:host)
 if [ -z "${HOSTNAME+x}" ]; then
@@ -386,6 +388,7 @@ ENABLE_DOCKERPROBE="$ENABLE_DOCKERPROBE" \
 HOSTNAME="$HOSTNAME" \
 COLLECT_OTEL_HTTP_PORT="$COLLECT_OTEL_HTTP_PORT" \
 COLLECT_OTEL_GRPC_PORT="$COLLECT_OTEL_GRPC_PORT" \
+COLLECT_OTEL_BIND_ADDRESS="$COLLECT_OTEL_BIND_ADDRESS" \
     $COMPOSE_CMD -p better-stack-collector pull
 
 if [ "$COMPOSE_CMD" = "docker-compose" ]; then
@@ -414,4 +417,5 @@ ENABLE_DOCKERPROBE="$ENABLE_DOCKERPROBE" \
 HOSTNAME="$HOSTNAME" \
 COLLECT_OTEL_HTTP_PORT="$COLLECT_OTEL_HTTP_PORT" \
 COLLECT_OTEL_GRPC_PORT="$COLLECT_OTEL_GRPC_PORT" \
+COLLECT_OTEL_BIND_ADDRESS="$COLLECT_OTEL_BIND_ADDRESS" \
     $COMPOSE_CMD -p better-stack-collector up -d --no-build

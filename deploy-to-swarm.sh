@@ -29,6 +29,7 @@
 # - ENABLE_DOCKERPROBE: Enable Docker container metadata collection (default: true)
 # - COLLECT_OTEL_HTTP_PORT: Port to expose for OTel HTTP ingestion (e.g., 4318)
 # - COLLECT_OTEL_GRPC_PORT: Port to expose for OTel gRPC ingestion (e.g., 4317)
+# - COLLECT_OTEL_BIND_ADDRESS: Listen address of the OTel receiver (e.g., [::]); unset lets the collector pick it
 #
 # Node filtering:
 # - To deploy only to specific nodes, label them beforehand:
@@ -98,6 +99,7 @@ CLUSTER_COLLECTOR="${CLUSTER_COLLECTOR:-false}"
 ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
 COLLECT_OTEL_HTTP_PORT="${COLLECT_OTEL_HTTP_PORT:-}"
 COLLECT_OTEL_GRPC_PORT="${COLLECT_OTEL_GRPC_PORT:-}"
+COLLECT_OTEL_BIND_ADDRESS="${COLLECT_OTEL_BIND_ADDRESS:-}"
 
 # GitHub raw URL base for downloading compose files
 GITHUB_RAW_BASE="https://raw.githubusercontent.com/BetterStackHQ/collector/main"
@@ -178,6 +180,7 @@ deploy_collector_stack() {
     local cluster_collector="$CLUSTER_COLLECTOR"
     local otel_http_port="$COLLECT_OTEL_HTTP_PORT"
     local otel_grpc_port="$COLLECT_OTEL_GRPC_PORT"
+    local otel_bind_address="$COLLECT_OTEL_BIND_ADDRESS"
     local use_labeled_nodes="$USE_LABELED_NODES"
 
     $SSH_CMD "$MANAGER_NODE" /bin/bash <<EOF
@@ -335,6 +338,7 @@ MOUNT_ENTRY
         CLUSTER_COLLECTOR="$cluster_collector" \\
         COLLECT_OTEL_HTTP_PORT="$otel_http_port" \\
         COLLECT_OTEL_GRPC_PORT="$otel_grpc_port" \\
+        COLLECT_OTEL_BIND_ADDRESS="$otel_bind_address" \\
             docker stack deploy -c docker-compose.yml better-stack
 
         # Trigger service reconciliation to schedule tasks on newly labeled nodes
