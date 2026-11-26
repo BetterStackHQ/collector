@@ -97,6 +97,195 @@ if [ -d "$COLLECTOR_DATA_DIR" ]; then
     echo "  rm -rf $COLLECTOR_DATA_DIR"
 fi
 
+# >>> sizing functions (the same text is in install.sh and deploy-to-swarm.sh; keep both copies identical)
+# Container sizes. A size comes from the environment, then from the sizing file, then from the default.
+# A size from the environment is saved to the sizing file, so the next run keeps it.
+SIZING_FILE="${SIZING_FILE:-/var/lib/better-stack/sizing.env}"
+SIZING_KEYS="COLLECTOR_CPUS COLLECTOR_MEM_LIMIT COLLECTOR_MEM_RESERVATION EBPF_CPUS EBPF_MEM_LIMIT EBPF_MEM_RESERVATION EBPF_GOMEMLIMIT EBPF_OBI_RESTART_MIB"
+
+sizing_fail() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+sizing_value_valid() {
+  local key="$1" value="$2"
+  case "$key" in
+    *_CPUS) [[ "$value" =~ ^[0-9]+(\.[0-9]+)?$ ]] ;;
+    *_MEM_LIMIT|*_MEM_RESERVATION) [[ "$value" =~ ^[0-9]+[mMgG]$ ]] ;;
+    EBPF_GOMEMLIMIT) [[ "$value" =~ ^[0-9]+(MiB|GiB)$ ]] ;;
+    EBPF_OBI_RESTART_MIB) [[ "$value" =~ ^[0-9]+$ ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+sizing_format_hint() {
+  case "$1" in
+    *_CPUS) echo "a number of CPUs, for example 2 or 1.5" ;;
+    *_MEM_LIMIT|*_MEM_RESERVATION) echo "a size in m or g, for example 3072m or 4g" ;;
+    EBPF_GOMEMLIMIT) echo "a size in MiB or GiB, for example 2800MiB" ;;
+    EBPF_OBI_RESTART_MIB) echo "a whole number of MiB, for example 2900" ;;
+  esac
+}
+
+# Prints a memory size such as 2048m or 4g as a number of MiB
+sizing_mib() {
+  local number="${1%[mMgG]}"
+  case "$1" in
+    *[gG]) echo $((number * 1024)) ;;
+    *) echo "$number" ;;
+  esac
+}
+
+# The Docker daemon's own counts are the ones it checks a limit against
+sizing_host_cpus() {
+  docker info --format '{{.NCPU}}' 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || true
+}
+
+sizing_host_mem_mib() {
+  local bytes
+  bytes="$(docker info --format '{{.MemTotal}}' 2>/dev/null || true)"
+  if [[ "$bytes" =~ ^[0-9]+$ ]] && [ "$bytes" -gt 0 ]; then
+    echo $((bytes / 1048576))
+  else
+    awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null || true
+  fi
+}
+
+# Sets each key in SIZING_KEYS to its value from the environment or the sizing file, or to an empty string.
+# The file is read as data and never run as a script.
+load_sizing() {
+  local key value line from_file from_env=false
+
+  if [ -f "$SIZING_FILE" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      if [[ "$line" =~ ^[[:space:]]*(#.*)?$ ]]; then
+        continue
+      fi
+      if ! [[ "$line" =~ ^[[:space:]]*([A-Z_]+)=([A-Za-z0-9.]*)[[:space:]]*(#.*)?$ ]]; then
+        sizing_fail "$SIZING_FILE has a line that is not KEY=value: $line"
+      fi
+      key="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+      case " $SIZING_KEYS " in
+        *" $key "*) ;;
+        *) sizing_fail "$SIZING_FILE has an unknown key: $key (known keys: $SIZING_KEYS)" ;;
+      esac
+      if [ -n "$value" ] && ! sizing_value_valid "$key" "$value"; then
+        sizing_fail "$key=$value in $SIZING_FILE is not valid, use $(sizing_format_hint "$key")"
+      fi
+      printf -v "SIZING_FROM_FILE_$key" '%s' "$value"
+    done < "$SIZING_FILE"
+  fi
+
+  for key in $SIZING_KEYS; do
+    value="${!key:-}"
+    from_file="SIZING_FROM_FILE_$key"
+    if [ -n "$value" ]; then
+      if ! sizing_value_valid "$key" "$value"; then
+        sizing_fail "$key=$value is not valid, use $(sizing_format_hint "$key")"
+      fi
+      if [ "$value" != "${!from_file:-}" ]; then
+        from_env=true
+      fi
+    else
+      value="${!from_file:-}"
+    fi
+    printf -v "$key" '%s' "$value"
+  done
+
+  if [ "$from_env" = true ]; then
+    save_sizing
+  fi
+}
+
+# Writes the sizes that were set by hand; a size left out keeps its default on later versions too
+save_sizing() {
+  local key tmpfile
+  tmpfile="$SIZING_FILE.tmp"
+
+  if ! mkdir -p "$(dirname "$SIZING_FILE")" 2>/dev/null || ! : 2>/dev/null > "$tmpfile"; then
+    echo "WARNING: Could not write $SIZING_FILE, so the sizes from the environment apply to this run only."
+    return 0
+  fi
+  {
+    echo "# Better Stack collector container sizes on this host."
+    echo "# The install scripts read this file on every run. Delete a line to get the default again."
+    for key in $SIZING_KEYS; do
+      if [ -n "${!key}" ]; then
+        echo "$key=${!key}"
+      fi
+    done
+  } > "$tmpfile"
+  mv "$tmpfile" "$SIZING_FILE"
+  echo "Saved container sizes to $SIZING_FILE"
+}
+
+# Lowers a CPU limit that is above the host's CPU count: Docker rejects the whole compose file otherwise
+sizing_fit_cpus() {
+  local key="$1" host_cpus="$2"
+  if [[ "$host_cpus" =~ ^[0-9]+$ ]] && awk -v want="${!key}" -v max="$host_cpus" 'BEGIN { exit !(want + 0 > max + 0) }'; then
+    echo "The CPU count of this host is $host_cpus, lowering $key from ${!key} to $host_cpus"
+    printf -v "$key" '%s' "$host_cpus"
+  fi
+}
+
+# Sets a default memory limit, lowered to the host's memory when the host has less
+sizing_default_mem_limit() {
+  local key="$1" default_mib="$2" host_mem_mib="$3"
+  if [ -n "${!key}" ]; then
+    return 0
+  fi
+  if [[ "$host_mem_mib" =~ ^[0-9]+$ ]] && [ "$host_mem_mib" -gt 0 ] && [ "$host_mem_mib" -lt "$default_mib" ]; then
+    echo "This host has $host_mem_mib MiB of memory, lowering $key from ${default_mib}m to ${host_mem_mib}m"
+    default_mib="$host_mem_mib"
+  fi
+  printf -v "$key" '%s' "${default_mib}m"
+}
+
+sizing_check_reservation() {
+  local reservation_key="$1" limit_key="$2"
+  if [ "$(sizing_mib "${!reservation_key}")" -gt "$(sizing_mib "${!limit_key}")" ]; then
+    sizing_fail "$reservation_key=${!reservation_key} is above $limit_key=${!limit_key}, and Docker rejects that"
+  fi
+}
+
+# Fills in every size that load_sizing left empty and exports all of them for Docker Compose.
+# The other memory values of a container follow its memory limit, in the proportions of the defaults.
+resolve_sizing() {
+  local key host_cpus host_mem_mib limit_mib
+  host_cpus="$(sizing_host_cpus)"
+  host_mem_mib="$(sizing_host_mem_mib)"
+
+  COLLECTOR_CPUS="${COLLECTOR_CPUS:-1.2}"
+  EBPF_CPUS="${EBPF_CPUS:-1.0}"
+  sizing_fit_cpus COLLECTOR_CPUS "$host_cpus"
+  sizing_fit_cpus EBPF_CPUS "$host_cpus"
+
+  sizing_default_mem_limit COLLECTOR_MEM_LIMIT 1024 "$host_mem_mib"
+  limit_mib="$(sizing_mib "$COLLECTOR_MEM_LIMIT")"
+  COLLECTOR_MEM_RESERVATION="${COLLECTOR_MEM_RESERVATION:-$((limit_mib / 2))m}"
+  sizing_check_reservation COLLECTOR_MEM_RESERVATION COLLECTOR_MEM_LIMIT
+
+  sizing_default_mem_limit EBPF_MEM_LIMIT 2048 "$host_mem_mib"
+  limit_mib="$(sizing_mib "$EBPF_MEM_LIMIT")"
+  EBPF_MEM_RESERVATION="${EBPF_MEM_RESERVATION:-$((limit_mib * 3 / 4))m}"
+  EBPF_GOMEMLIMIT="${EBPF_GOMEMLIMIT:-$((limit_mib * 1400 / 2048))MiB}"
+  EBPF_OBI_RESTART_MIB="${EBPF_OBI_RESTART_MIB:-$((limit_mib * 1450 / 2048))}"
+  sizing_check_reservation EBPF_MEM_RESERVATION EBPF_MEM_LIMIT
+
+  for key in $SIZING_KEYS; do
+    export "${key?}"
+  done
+}
+# <<< sizing functions
+
+load_sizing
+resolve_sizing
+echo "Container sizes (change them in $SIZING_FILE and run this script again):"
+echo "  better-stack-collector:      CPU limit $COLLECTOR_CPUS, memory limit $COLLECTOR_MEM_LIMIT"
+echo "  better-stack-collector-host: CPU limit $EBPF_CPUS, memory limit $EBPF_MEM_LIMIT, GOMEMLIMIT $EBPF_GOMEMLIMIT, OBI restarts above $EBPF_OBI_RESTART_MIB MiB"
+
 # Create temporary directory and cd into it
 TEMP_DIR=$(mktemp -d)
 cd "$TEMP_DIR"
@@ -260,31 +449,6 @@ docker_v1_compatibility() {
   rm -f "$cleaned"
 }
 
-# Docker rejects the whole compose file when a container asks for more CPUs than the host has,
-# so a limit above the host's CPU count is lowered to that count.
-adjust_compose_cpus() {
-  local file="$1"
-  local host_cpus
-  # The Docker daemon's own count is the one it checks the limit against.
-  host_cpus="$(docker info --format '{{.NCPU}}' 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
-  case "$host_cpus" in
-    ''|*[!0-9]*) return 0 ;;
-  esac
-  local tmpfile
-  tmpfile="$(mktemp)"
-  awk -v max="$host_cpus" '
-    /^[ \t]*cpus:[ \t]*[0-9.]+[ \t]*$/ {
-      split($0, parts, "cpus:")
-      if (parts[2] + 0 > max + 0) {
-        print parts[1] "cpus: " max ".0"
-        next
-      }
-    }
-    { print }
-  ' "$file" > "$tmpfile"
-  mv "$tmpfile" "$file"
-}
-
 # A host with an IPv6 default route and no IPv4 one can reach Better Stack over IPv6 only
 ipv6_only_host() {
   command -v ip > /dev/null 2>&1 || return 1
@@ -327,7 +491,6 @@ other_network_containers() {
 
 adjust_compose_ports docker-compose.yml
 adjust_compose_volumes docker-compose.yml
-adjust_compose_cpus docker-compose.yml
 
 RECREATE_NETWORK=false
 NETWORK_IPV6=$(docker network inspect better-stack-collector_default --format '{{.EnableIPv6}}' 2>/dev/null || true)

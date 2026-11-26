@@ -7,9 +7,9 @@ services:
     container_name: better-stack-collector
     restart: always
     uts: host
-    cpus: 1.2
-    mem_reservation: 512m
-    mem_limit: 1024m
+    cpus: ${COLLECTOR_CPUS:-1.2}
+    mem_reservation: ${COLLECTOR_MEM_RESERVATION:-512m}
+    mem_limit: ${COLLECTOR_MEM_LIMIT:-1024m}
     security_opt:
       - seccomp=collector-seccomp.json
     healthcheck:
@@ -49,18 +49,18 @@ services:
     pid: host
     uts: host
     network_mode: host
-    cpus: 1.0
-    mem_reservation: 1536m
-    mem_limit: 2048m
+    cpus: ${EBPF_CPUS:-1.0}
+    mem_reservation: ${EBPF_MEM_RESERVATION:-1536m}
+    mem_limit: ${EBPF_MEM_LIMIT:-2048m}
     healthcheck:
-      test: ["CMD-SHELL", "if [ -x /var/lib/better-stack/ebpf/healthcheck.sh ]; then /var/lib/better-stack/ebpf/healthcheck.sh; else exit 0; fi"]
+      test: ["CMD-SHELL", "if [ -x /var/lib/better-stack/ebpf/healthcheck.sh ]; then THRESHOLD=${EBPF_OBI_RESTART_MIB:-1450} /var/lib/better-stack/ebpf/healthcheck.sh; else exit 0; fi"]
       interval: 30s
       timeout: 5s
       start_period: 60s
       retries: 2
     environment:
-      # Set Go memory limit to slightly less than container limit
-      - GOMEMLIMIT=1400MiB
+      # Go starts to collect garbage harder at this size; keep it below the memory limit
+      - GOMEMLIMIT=${EBPF_GOMEMLIMIT:-1400MiB}
       # Pass hostname of host machine to eBPF agent; needs `export HOSTNAME` before running `docker compose up`
       - HOSTNAME
       # Enable dockerprobe

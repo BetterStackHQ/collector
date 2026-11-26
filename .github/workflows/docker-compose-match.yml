@@ -89,3 +89,26 @@ jobs:
           exit 1
         fi
         echo "✓ collector-host sections match between docker-compose.yml and swarm/docker-compose.swarm-ebpf.yml"
+
+  # install.sh and deploy-to-swarm.sh are standalone downloads, so each carries its own copy of the sizing functions
+  sizing-functions-match:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: check the sizing functions are the same in install.sh and deploy-to-swarm.sh
+      run: |
+        extract() { sed -n '/^# >>> sizing functions/,/^# <<< sizing functions/p' "$1"; }
+        extract install.sh > /tmp/sizing-install.sh
+        extract deploy-to-swarm.sh > /tmp/sizing-swarm.sh
+
+        if [ ! -s /tmp/sizing-install.sh ]; then
+          echo "ERROR: No sizing functions found in install.sh"
+          exit 1
+        fi
+        if ! diff /tmp/sizing-install.sh /tmp/sizing-swarm.sh; then
+          echo "ERROR: The sizing functions in install.sh and deploy-to-swarm.sh differ"
+          exit 1
+        fi
+        echo "✓ Sizing functions match between install.sh and deploy-to-swarm.sh"
