@@ -20,8 +20,22 @@ RUN CGO_ENABLED=0 GOTOOLCHAIN=local go build -mod=readonly \
 # Add node exporter to the image
 FROM prom/node-exporter:v1.10.2 AS node-exporter-source
 
-# Add postgres exporter to the image
-FROM prometheuscommunity/postgres-exporter:v0.18.1 AS postgres-exporter
+# Build Postgres exporter from source with patches
+FROM debian:13.5 AS postgres-exporter
+RUN apt-get update && apt-get install -y curl git
+ARG GO_VERSION=1.26.8
+RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz -o go.tar.gz && \
+    tar -C /usr/local -xzf go.tar.gz && rm go.tar.gz
+ENV PATH="/usr/local/go/bin:${PATH}"
+ARG POSTGRES_EXPORTER_VERSION=v0.18.1
+RUN git clone --depth 1 --branch ${POSTGRES_EXPORTER_VERSION} \
+    https://github.com/prometheus-community/postgres_exporter.git /tmp/postgres-exporter
+WORKDIR /tmp/postgres-exporter
+COPY ebpf/patches/postgres-exporter/*.patch ./
+RUN git apply *.patch
+RUN CGO_ENABLED=0 GOTOOLCHAIN=local go build -mod=readonly \
+    -ldflags "-X github.com/prometheus/common/version.Version=${POSTGRES_EXPORTER_VERSION#v}-betterstack -X github.com/prometheus/common/version.Revision=$(git rev-parse HEAD) -X github.com/prometheus/common/version.Branch=HEAD" \
+    -o /bin/postgres_exporter ./cmd/postgres_exporter
 
 # Add kafka exporter to the image
 FROM danielqsj/kafka-exporter:v1.9.0 AS kafka-exporter

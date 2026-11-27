@@ -1,0 +1,83 @@
+diff --git a/cmd/postgres_exporter/postgres_exporter_test.go b/cmd/postgres_exporter/postgres_exporter_test.go
+index 0f36feb..b714730 100644
+--- a/cmd/postgres_exporter/postgres_exporter_test.go
++++ b/cmd/postgres_exporter/postgres_exporter_test.go
+@@ -237,9 +237,21 @@ func (s *FunctionalSuite) TestParseFingerprint(c *C) {
+ 			url:         "host=example",
+ 			fingerprint: "example:5432",
+ 		},
++		{
++			url:         "postgresql://userDsn:pass%20word%27%22%23@10.0.0.1:5432/postgres?sslmode=disable",
++			fingerprint: "10.0.0.1:5432",
++		},
++		{
++			url:         "postgres://userDsn:pass%20word@db.example.com/postgres",
++			fingerprint: "db.example.com:5432",
++		},
+ 		{
+ 			url: "xyz",
+-			err: "malformed dsn \"xyz\"",
++			err: "malformed dsn",
++		},
++		{
++			url: "host=example password=secret word",
++			err: "malformed dsn",
+ 		},
+ 	}
+ 
+diff --git a/cmd/postgres_exporter/util.go b/cmd/postgres_exporter/util.go
+index fa692c6..beb3660 100644
+--- a/cmd/postgres_exporter/util.go
++++ b/cmd/postgres_exporter/util.go
+@@ -20,8 +20,6 @@ import (
+ 	"strconv"
+ 	"strings"
+ 	"time"
+-
+-	"github.com/lib/pq"
+ )
+ 
+ // convert a string to the corresponding ColumnUsage
+@@ -161,10 +159,27 @@ func dbToString(t interface{}) (string, bool) {
+ 	}
+ }
+ 
+-func parseFingerprint(url string) (string, error) {
+-	dsn, err := pq.ParseURL(url)
+-	if err != nil {
+-		dsn = url
++func parseFingerprint(dsn string) (string, error) {
++	// Only postgres:// and postgresql:// are valid DSN URL schemes; anything
++	// else (e.g. a key=value DSN like "host=example port=1234") falls through
++	// to the key=value parser below.
++	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
++		u, err := url.Parse(dsn)
++		if err != nil {
++			return "", fmt.Errorf("malformed dsn")
++		}
++
++		host := u.Hostname()
++		if host == "" {
++			host = "localhost"
++		}
++
++		port := u.Port()
++		if port == "" {
++			port = "5432"
++		}
++
++		return host + ":" + port, nil
+ 	}
+ 
+ 	pairs := strings.Split(dsn, " ")
+@@ -172,9 +187,8 @@ func parseFingerprint(url string) (string, error) {
+ 	for _, pair := range pairs {
+ 		splitted := strings.SplitN(pair, "=", 2)
+ 		if len(splitted) != 2 {
+-			return "", fmt.Errorf("malformed dsn %q", dsn)
++			return "", fmt.Errorf("malformed dsn")
+ 		}
+-		// Newer versions of pq.ParseURL quote values so trim them off if they exist
+ 		key := strings.Trim(splitted[0], "'\"")
+ 		value := strings.Trim(splitted[1], "'\"")
+ 		kv[key] = value
