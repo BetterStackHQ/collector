@@ -110,7 +110,7 @@ Both install.sh and deploy-to-swarm.sh check for the other's naming convention t
 - eBPF deployed per-node via docker-compose (swarm doesn't support privileged/host network)
 - Supports install/uninstall/force_upgrade/ebpf_only actions; `ebpf_only` deploys the eBPF container on each node again without `COLLECTOR_SECRET`
 - Each node sizes its eBPF container from its own `/var/lib/better-stack/sizing.env`; the collector service has one size for all nodes
-- `SWARM_SIZING_FILE` points to a file on the operator's machine with `[node names]` sections of `EBPF_*` keys. The script checks the whole file before it deploys anything, then replaces the sizing file of each node the file names; other nodes keep theirs
+- `SWARM_SIZING_FILE` points to a file on the operator's machine with `[node names]` sections of `EBPF_*` keys. The script checks the whole file before it deploys anything, then replaces the sizing file of every node: a node the file names gets its section, any other node gets the defaults
 - The sizing functions are the same text in `install.sh` and `deploy-to-swarm.sh` (between the `sizing functions` markers), and CI checks that
 
 ## Key Environment Variables

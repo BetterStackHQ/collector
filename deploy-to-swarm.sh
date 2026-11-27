@@ -48,8 +48,8 @@
 #
 #     [worker-1]
 #     EBPF_CPUS=3
-#   install, force_upgrade and ebpf_only replace the sizing.env of every node in the file with its section.
-#   A node that is not in the file keeps the sizing.env it has.
+#   With this file, install, force_upgrade and ebpf_only replace the sizing.env of every node:
+#   a node in the file gets its section, and a node that is not in the file gets the defaults.
 #
 # Node filtering:
 # - To deploy only to specific nodes, label them beforehand:
@@ -379,6 +379,7 @@ get_node_target() {
 # and SWARM_SIZING_NODES the nodes that the file names
 SWARM_SIZING=""
 SWARM_SIZING_NODES=""
+SWARM_SIZING_LOADED=false
 
 swarm_sizing_fail() {
     print_red "Error in $SWARM_SIZING_FILE, line $1: $2"
@@ -449,7 +450,8 @@ load_swarm_sizing() {
         done
     done < "$SWARM_SIZING_FILE"
 
-    print_green "✓ Read sizes for $(echo "$SWARM_SIZING_NODES" | grep -c .) nodes from $SWARM_SIZING_FILE"
+    SWARM_SIZING_LOADED=true
+    print_green "✓ Read sizes for $(echo "$SWARM_SIZING_NODES" | grep -c .) nodes from $SWARM_SIZING_FILE, the other nodes get the defaults"
     echo
 }
 
@@ -660,13 +662,15 @@ deploy_ebpf_to_node() {
     local enable_dockerprobe="$ENABLE_DOCKERPROBE"
 
     # Shell code that replaces the node's sizing file with its section of SWARM_SIZING_FILE.
+    # A node that the file does not name gets a file with no sizes, so it runs on the defaults.
     # The values passed load_swarm_sizing, so they hold letters, digits and dots only.
-    local write_node_sizing=""
-    if echo "$SWARM_SIZING_NODES" | grep -q -x -F -- "$node"; then
+    local write_node_sizing="" node_sizes
+    if [[ "$SWARM_SIZING_LOADED" == true ]]; then
+        node_sizes=$(echo "$SWARM_SIZING" | awk -v node="$node" '$1 == node { print $2 }')
         write_node_sizing="cat > \"\$SIZING_FILE.tmp\" <<'NODE_SIZING_EOF'
 # Better Stack collector container sizes on this host.
 # Written by deploy-to-swarm.sh from a SWARM_SIZING_FILE. A deploy with such a file replaces this file.
-$(echo "$SWARM_SIZING" | awk -v node="$node" '$1 == node { print $2 }')
+${node_sizes:-# The file has no sizes for this node, so it uses the defaults.}
 NODE_SIZING_EOF
 mv \"\$SIZING_FILE.tmp\" \"\$SIZING_FILE\"
 echo \"Wrote this node's sizes to \$SIZING_FILE\""
