@@ -40,6 +40,16 @@
 # - Keys: EBPF_CPUS, EBPF_MEM_LIMIT, EBPF_MEM_RESERVATION, EBPF_GOMEMLIMIT, EBPF_OBI_RESTART_MIB
 # - A key that is not in the file keeps its default. The memory values that are not set follow EBPF_MEM_LIMIT.
 # - The collector is one swarm service with one size for all nodes, so the COLLECTOR_* keys do nothing here.
+# - SWARM_SIZING_FILE: A file on this machine with the sizes of many nodes. Each section starts with the
+#   node names in brackets, as "docker node ls" prints them, and holds the keys for those nodes:
+#     [db-1 db-2]
+#     EBPF_CPUS=2
+#     EBPF_MEM_LIMIT=4096m
+#
+#     [worker-1]
+#     EBPF_CPUS=3
+#   install, force_upgrade and ebpf_only replace the sizing.env of every node in the file with its section.
+#   A node that is not in the file keeps the sizing.env it has.
 #
 # Node filtering:
 # - To deploy only to specific nodes, label them beforehand:
@@ -111,6 +121,7 @@ ENABLE_DOCKERPROBE="${ENABLE_DOCKERPROBE:-true}"
 COLLECT_OTEL_HTTP_PORT="${COLLECT_OTEL_HTTP_PORT:-}"
 COLLECT_OTEL_GRPC_PORT="${COLLECT_OTEL_GRPC_PORT:-}"
 COLLECT_OTEL_BIND_ADDRESS="${COLLECT_OTEL_BIND_ADDRESS:-}"
+SWARM_SIZING_FILE="${SWARM_SIZING_FILE:-}"
 
 # Shell code that runs on each node before the eBPF agent starts there
 IFS= read -r -d '' SIZING_FUNCTIONS <<'SIZING_FUNCTIONS_EOF' || true
@@ -364,6 +375,84 @@ get_node_target() {
     fi
 }
 
+# Sizes from SWARM_SIZING_FILE: SWARM_SIZING holds one "node KEY=value" line per size,
+# and SWARM_SIZING_NODES the nodes that the file names
+SWARM_SIZING=""
+SWARM_SIZING_NODES=""
+
+swarm_sizing_fail() {
+    print_red "Error in $SWARM_SIZING_FILE, line $1: $2"
+    exit 1
+}
+
+# Reads SWARM_SIZING_FILE and stops at the first line that is wrong, before anything is deployed
+load_swarm_sizing() {
+    local line key value node section_nodes="" in_section=false number=0
+    local blank_re='^[[:space:]]*(#.*)?$'
+    local section_re='^[[:space:]]*\[([^]]*)\][[:space:]]*(#.*)?$'
+    local size_re='^[[:space:]]*([A-Z_]+)=([^[:space:]#]*)[[:space:]]*(#.*)?$'
+
+    if [[ ! -f "$SWARM_SIZING_FILE" ]]; then
+        print_red "Error: SWARM_SIZING_FILE is $SWARM_SIZING_FILE, and there is no such file"
+        exit 1
+    fi
+    # The nodes check the same values again with the same functions
+    eval "$SIZING_FUNCTIONS"
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        ((number++))
+        if [[ "$line" =~ $blank_re ]]; then
+            continue
+        fi
+        if [[ "$line" =~ $section_re ]]; then
+            section_nodes="${BASH_REMATCH[1]}"
+            in_section=true
+            if [[ -z "${section_nodes// /}" ]]; then
+                swarm_sizing_fail "$number" "a section needs at least one node name in the brackets"
+            fi
+            for node in $section_nodes; do
+                if ! echo "$NODES" | grep -q -x -F -- "$node"; then
+                    swarm_sizing_fail "$number" "$node is not a node of this deployment (nodes: $(echo $NODES))"
+                fi
+                if echo "$SWARM_SIZING_NODES" | grep -q -x -F -- "$node"; then
+                    swarm_sizing_fail "$number" "$node is already in an earlier section"
+                fi
+                SWARM_SIZING_NODES="${SWARM_SIZING_NODES}${node}"$'\n'
+            done
+            continue
+        fi
+        if ! [[ "$line" =~ $size_re ]]; then
+            swarm_sizing_fail "$number" "expected [node names] or KEY=value, found: $line"
+        fi
+        key="${BASH_REMATCH[1]}"
+        value="${BASH_REMATCH[2]}"
+        if [[ "$in_section" != true ]]; then
+            swarm_sizing_fail "$number" "$key comes before the first [node names] line"
+        fi
+        case "$key" in
+            COLLECTOR_*)
+                swarm_sizing_fail "$number" "$key does nothing on Swarm: the collector is one service with one size for all nodes"
+                ;;
+        esac
+        case " $SIZING_KEYS " in
+            *" $key "*) ;;
+            *) swarm_sizing_fail "$number" "unknown key $key (keys: $(echo "$SIZING_KEYS" | tr ' ' '\n' | grep '^EBPF_' | tr '\n' ' '))" ;;
+        esac
+        if ! sizing_value_valid "$key" "$value"; then
+            swarm_sizing_fail "$number" "$key=$value is not valid, use $(sizing_format_hint "$key")"
+        fi
+        for node in $section_nodes; do
+            if echo "$SWARM_SIZING" | grep -q -- "^$node $key="; then
+                swarm_sizing_fail "$number" "$key is set twice for $node"
+            fi
+            SWARM_SIZING="${SWARM_SIZING}${node} ${key}=${value}"$'\n'
+        done
+    done < "$SWARM_SIZING_FILE"
+
+    print_green "✓ Read sizes for $(echo "$SWARM_SIZING_NODES" | grep -c .) nodes from $SWARM_SIZING_FILE"
+    echo
+}
+
 # Function to deploy collector stack to swarm
 deploy_collector_stack() {
     print_blue "Deploying collector stack to swarm..."
@@ -570,6 +659,19 @@ deploy_ebpf_to_node() {
     local image_tag="$IMAGE_TAG"
     local enable_dockerprobe="$ENABLE_DOCKERPROBE"
 
+    # Shell code that replaces the node's sizing file with its section of SWARM_SIZING_FILE.
+    # The values passed load_swarm_sizing, so they hold letters, digits and dots only.
+    local write_node_sizing=""
+    if echo "$SWARM_SIZING_NODES" | grep -q -x -F -- "$node"; then
+        write_node_sizing="cat > \"\$SIZING_FILE.tmp\" <<'NODE_SIZING_EOF'
+# Better Stack collector container sizes on this host.
+# Written by deploy-to-swarm.sh from a SWARM_SIZING_FILE. A deploy with such a file replaces this file.
+$(echo "$SWARM_SIZING" | awk -v node="$node" '$1 == node { print $2 }')
+NODE_SIZING_EOF
+mv \"\$SIZING_FILE.tmp\" \"\$SIZING_FILE\"
+echo \"Wrote this node's sizes to \$SIZING_FILE\""
+    fi
+
     if $SSH_CMD "$node_target" /bin/bash <<EOF
         set -e
 
@@ -627,6 +729,7 @@ deploy_ebpf_to_node() {
 
         # Container size from this node's sizing file
 $SIZING_FUNCTIONS
+$write_node_sizing
         load_sizing
         resolve_sizing
         echo "eBPF container size (change it in \$SIZING_FILE on this node and run ACTION=ebpf_only):"
@@ -710,6 +813,10 @@ uninstall_collector_stack() {
     # Wait for services to be removed
     sleep 5
 }
+
+if [[ -n "$SWARM_SIZING_FILE" && ( "$ACTION" == "install" || "$ACTION" == "force_upgrade" || "$ACTION" == "ebpf_only" ) ]]; then
+    load_swarm_sizing
+fi
 
 # Check for existing compose-mode installations on target nodes
 if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" || "$ACTION" == "ebpf_only" ]]; then

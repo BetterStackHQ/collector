@@ -110,6 +110,7 @@ Both install.sh and deploy-to-swarm.sh check for the other's naming convention t
 - eBPF deployed per-node via docker-compose (swarm doesn't support privileged/host network)
 - Supports install/uninstall/force_upgrade/ebpf_only actions; `ebpf_only` deploys the eBPF container on each node again without `COLLECTOR_SECRET`
 - Each node sizes its eBPF container from its own `/var/lib/better-stack/sizing.env`; the collector service has one size for all nodes
+- `SWARM_SIZING_FILE` points to a file on the operator's machine with `[node names]` sections of `EBPF_*` keys. The script checks the whole file before it deploys anything, then replaces the sizing file of each node the file names; other nodes keep theirs
 - The sizing functions are the same text in `install.sh` and `deploy-to-swarm.sh` (between the `sizing functions` markers), and CI checks that
 
 ## Key Environment Variables
@@ -120,7 +121,7 @@ Both install.sh and deploy-to-swarm.sh check for the other's naming convention t
 - `CLUSTER_COLLECTOR` — Force cluster collector mode (default: false)
 - `MOUNT_HOST_PATHS` (optional) — Comma-separated host paths instead of default `/:/host:ro`
 - `COLLECT_OTEL_HTTP_PORT` / `COLLECT_OTEL_GRPC_PORT` (optional) — OTel ingestion ports
-- `COLLECTOR_CPUS`, `COLLECTOR_MEM_LIMIT`, `COLLECTOR_MEM_RESERVATION`, `EBPF_CPUS`, `EBPF_MEM_LIMIT`, `EBPF_MEM_RESERVATION`, `EBPF_GOMEMLIMIT`, `EBPF_OBI_RESTART_MIB` (optional) — container sizes, see README; `deploy-to-swarm.sh` reads the `EBPF_*` ones from each node's sizing file only
+- `COLLECTOR_CPUS`, `COLLECTOR_MEM_LIMIT`, `COLLECTOR_MEM_RESERVATION`, `EBPF_CPUS`, `EBPF_MEM_LIMIT`, `EBPF_MEM_RESERVATION`, `EBPF_GOMEMLIMIT`, `EBPF_OBI_RESTART_MIB` (optional) — container sizes; `deploy-to-swarm.sh` reads the `EBPF_*` ones from each node's sizing file only
 - `COLLECT_OTEL_BIND_ADDRESS` (optional) — Listen address of the OTel receiver, e.g. `[::]`; unset lets the collector pick it
 
 ### Swarm-specific (deploy-to-swarm.sh)
@@ -128,6 +129,7 @@ Both install.sh and deploy-to-swarm.sh check for the other's naming convention t
 - `ACTION` — install (default), uninstall, force_upgrade, or ebpf_only
 - `SSH_CMD` — Custom SSH command (default: ssh), e.g., `tsh ssh` for Teleport
 - `ATTACH_NETWORKS` — Comma-separated overlay networks (auto-detected if not set)
+- `SWARM_SIZING_FILE` — Local file with eBPF container sizes per node, pushed to the nodes on install, force_upgrade and ebpf_only
 
 ## CI/CD
 

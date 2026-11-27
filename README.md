@@ -21,34 +21,6 @@ Better Stack collector is the easiest and recommended way of integrating Better 
 
 The collector-only guideline was validated with eBPF stopped. `mem_reservation` is a soft memory target; `mem_limit` and `cpus` are hard caps, and Docker does not reserve CPU. Host/node guidelines are planning targets: the reservation and enough headroom up to the caps must remain available after the OS and other applications consume their share.
 
-### Changing the container sizes
-
-The hard caps above are defaults. To change them on a host, put the sizes you want in `/var/lib/better-stack/sizing.env` and run the install script again:
-
-```
-EBPF_CPUS=2
-EBPF_MEM_LIMIT=4096m
-```
-
-| Key | Default | Applies to |
-| --- | --- | --- |
-| `COLLECTOR_CPUS` | `1.2` | CPU limit of `better-stack-collector` |
-| `COLLECTOR_MEM_LIMIT` | `1024m` | Memory limit of `better-stack-collector` |
-| `COLLECTOR_MEM_RESERVATION` | half of the limit | Soft memory target of `better-stack-collector` |
-| `EBPF_CPUS` | `1.0` | CPU limit of `better-stack-collector-host` |
-| `EBPF_MEM_LIMIT` | `2048m` | Memory limit of `better-stack-collector-host` |
-| `EBPF_MEM_RESERVATION` | 75% of the limit | Soft memory target of `better-stack-collector-host` |
-| `EBPF_GOMEMLIMIT` | 68% of the limit | Size at which the Go programs in `better-stack-collector-host` collect garbage harder |
-| `EBPF_OBI_RESTART_MIB` | 71% of the limit | Memory of the tracing process, in MiB, above which the health check fails |
-
-- A key you leave out keeps its default. The three values that follow a memory limit move with it, so `EBPF_MEM_LIMIT=4096m` alone is enough.
-- Memory limits take `m` or `g`, `EBPF_GOMEMLIMIT` takes `MiB` or `GiB`.
-- You can also pass a key as an environment variable to `install.sh`. The script saves it to the file, so later runs keep it.
-- The file stays in place across upgrades and uninstalls.
-- On a host with less memory than a default limit, `install.sh` lowers that limit to the host's memory. A CPU limit above the host's CPU count is lowered to that count. A memory limit you set yourself is used as written.
-- On Docker Swarm, each node reads its own file for `better-stack-collector-host`. Apply a change with `ACTION=ebpf_only`, which needs no `COLLECTOR_SECRET`. The collector is one Swarm service, so the `COLLECTOR_*` keys do nothing there.
-- If you run `docker compose` on the compose files yourself, the same keys work as environment variables, but nothing follows the memory limit: set all the memory values of a container together.
-
 ## Need help?
 Please let us know at [hello@betterstack.com](mailto:hello@betterstack.com). We're happy to help!
 
