@@ -41,7 +41,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: postgres-exporter-go-${{ hashFiles('/tmp/postgres-exporter/go.sum') }}
+          key: postgres-exporter-go-${{ hashFiles('ebpf/Dockerfile', 'ebpf/patches/postgres-exporter/**') }}
           restore-keys: postgres-exporter-go-
 
       - name: go mod download
