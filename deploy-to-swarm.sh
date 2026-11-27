@@ -59,6 +59,11 @@
 
 set -uo pipefail
 
+# The whole script is the body of main, which the last line calls. Bash reads a function to its end
+# before it runs it, so a download that is cut off, or a file that changes during a run, runs nothing.
+# The body is not indented, because the here-documents in it must end at the start of a line.
+main() {
+
 # Color support functions
 if [[ -t 1 ]] && [[ "${TERM:-}" != "dumb" ]] && command -v tput >/dev/null 2>&1; then
     BOLD=$(tput bold)
@@ -936,3 +941,7 @@ case "$ACTION" in
         print_green "✓ eBPF agent deployed on all swarm nodes. The collector service was not changed."
         ;;
 esac
+
+}
+
+main "$@"

@@ -113,6 +113,10 @@ Both install.sh and deploy-to-swarm.sh check for the other's naming convention t
 - `SWARM_SIZING_FILE` points to a file on the operator's machine with `[node names]` sections of `EBPF_*` keys. The script checks the whole file before it deploys anything, then replaces the sizing file of every node: a node the file names gets its section, any other node gets the defaults
 - The sizing functions are the same text in `install.sh` and `deploy-to-swarm.sh` (between the `sizing functions` markers), and CI checks that
 
+### Script layout
+
+`install.sh` and `deploy-to-swarm.sh` hold all their code in a `main` function that the last line calls. Bash reads a function to its end before it runs it, so a cut-off `curl | bash` download, or a file that changes during a run, runs nothing. Keep new code inside `main`, and do not indent the body: the here-documents in it must end at the start of a line.
+
 ## Key Environment Variables
 
 ### Installation (install.sh / deploy-to-swarm.sh)

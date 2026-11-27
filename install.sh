@@ -1,6 +1,11 @@
 #!/bin/bash
 set -e
 
+# The whole script is the body of main, which the last line calls. Bash reads a function to its end
+# before it runs it, so a download that is cut off, or a file that changes during a run, runs nothing.
+# The body is not indented, because the here-documents in it must end at the start of a line.
+main() {
+
 # Check Docker
 if ! docker version &> /dev/null; then
     echo "Please install Docker"
@@ -582,3 +587,7 @@ COLLECT_OTEL_HTTP_PORT="$COLLECT_OTEL_HTTP_PORT" \
 COLLECT_OTEL_GRPC_PORT="$COLLECT_OTEL_GRPC_PORT" \
 COLLECT_OTEL_BIND_ADDRESS="$COLLECT_OTEL_BIND_ADDRESS" \
     $COMPOSE_CMD -p better-stack-collector up -d --no-build
+
+}
+
+main "$@"
