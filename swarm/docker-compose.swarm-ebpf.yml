@@ -30,8 +30,9 @@ services:
       start_period: 60s
       retries: 2
     environment:
-      # Go starts to collect garbage harder at this size; keep it below the memory limit
-      - GOMEMLIMIT=${COLLECTOR_HOST_GOMEMLIMIT:-1400MiB}
+      # Go starts to collect garbage harder at this size. Well below the memory limit, as in the Helm chart:
+      # OBI works a little more and stays smaller.
+      - GOMEMLIMIT=${COLLECTOR_HOST_GOMEMLIMIT:-900MiB}
       # Pass hostname of host machine to eBPF agent; needs `export HOSTNAME` before running `docker compose up`
       - HOSTNAME
       # Enable dockerprobe
