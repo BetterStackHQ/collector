@@ -19,8 +19,9 @@
 # - COLLECTOR_SECRET: Better Stack authentication token
 #
 # Optional environment variables:
-# - ACTION: install (default), uninstall, force_upgrade, or ebpf_only
-#   ebpf_only deploys the eBPF agent on each node again and leaves the collector service alone.
+# - ACTION: install (default), uninstall, force_upgrade, or collector_host_only
+#   collector_host_only deploys the better-stack-collector-host container on each node again and leaves the
+#   collector service alone.
 #   It does not need COLLECTOR_SECRET. Use it after you change a node's sizing file.
 # - SSH_CMD: Custom SSH command (default: ssh), e.g., 'tsh ssh' for Teleport
 # - IMAGE_TAG: Docker image tag (default: latest)
@@ -49,7 +50,7 @@
 #
 #     [worker-1]
 #     COLLECTOR_HOST_CPUS=3
-#   With this file, install, force_upgrade and ebpf_only replace the sizing.env of every node:
+#   With this file, install, force_upgrade and collector_host_only replace the sizing.env of every node:
 #   a node in the file gets its section, and a node that is not in the file gets the defaults.
 #
 # Node filtering:
@@ -96,23 +97,23 @@ print_blue() {
 ACTION="${ACTION:-install}"
 
 # Validate ACTION parameter
-if [[ "$ACTION" != "install" && "$ACTION" != "uninstall" && "$ACTION" != "force_upgrade" && "$ACTION" != "ebpf_only" ]]; then
+if [[ "$ACTION" != "install" && "$ACTION" != "uninstall" && "$ACTION" != "force_upgrade" && "$ACTION" != "collector_host_only" ]]; then
     print_red "Error: Invalid ACTION parameter: $ACTION"
-    echo "Valid actions: install, uninstall, force_upgrade, ebpf_only"
+    echo "Valid actions: install, uninstall, force_upgrade, collector_host_only"
     exit 1
 fi
 
 # Check required environment variables
 if [[ -z "${MANAGER_NODE:-}" ]]; then
     print_red "Error: MANAGER_NODE environment variable is required"
-    echo "Usage: MANAGER_NODE=user@manager-node COLLECTOR_SECRET=secret [ACTION=install|uninstall|force_upgrade|ebpf_only] [SSH_CMD='tsh ssh'] $0"
+    echo "Usage: MANAGER_NODE=user@manager-node COLLECTOR_SECRET=secret [ACTION=install|uninstall|force_upgrade|collector_host_only] [SSH_CMD='tsh ssh'] $0"
     exit 1
 fi
 
-# ebpf_only does not touch the collector service, which is the only part that uses the secret
-if [[ "$ACTION" != "ebpf_only" && -z "${COLLECTOR_SECRET:-}" ]]; then
+# collector_host_only does not touch the collector service, which is the only part that uses the secret
+if [[ "$ACTION" != "collector_host_only" && -z "${COLLECTOR_SECRET:-}" ]]; then
     print_red "Error: COLLECTOR_SECRET environment variable is required"
-    echo "Usage: MANAGER_NODE=user@manager-node COLLECTOR_SECRET=secret [ACTION=install|uninstall|force_upgrade|ebpf_only] [SSH_CMD='tsh ssh'] $0"
+    echo "Usage: MANAGER_NODE=user@manager-node COLLECTOR_SECRET=secret [ACTION=install|uninstall|force_upgrade|collector_host_only] [SSH_CMD='tsh ssh'] $0"
     exit 1
 fi
 
@@ -742,7 +743,7 @@ $SIZING_FUNCTIONS
 $write_node_sizing
         load_sizing
         resolve_sizing
-        echo "Size of better-stack-collector-host (change it in \$SIZING_FILE on this node and run ACTION=ebpf_only):"
+        echo "Size of better-stack-collector-host (change it in \$SIZING_FILE on this node and run ACTION=collector_host_only):"
         echo "  CPU limit \$COLLECTOR_HOST_CPUS, memory limit \$COLLECTOR_HOST_MEM_LIMIT, GOMEMLIMIT \$COLLECTOR_HOST_GOMEMLIMIT, OBI restarts above \$COLLECTOR_HOST_OBI_RESTART_MIB MiB"
 
         # Stop old project names if present (for upgrades from older versions:
@@ -824,12 +825,12 @@ uninstall_collector_stack() {
     sleep 5
 }
 
-if [[ -n "$SWARM_SIZING_FILE" && ( "$ACTION" == "install" || "$ACTION" == "force_upgrade" || "$ACTION" == "ebpf_only" ) ]]; then
+if [[ -n "$SWARM_SIZING_FILE" && ( "$ACTION" == "install" || "$ACTION" == "force_upgrade" || "$ACTION" == "collector_host_only" ) ]]; then
     load_swarm_sizing
 fi
 
 # Check for existing compose-mode installations on target nodes
-if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" || "$ACTION" == "ebpf_only" ]]; then
+if [[ "$ACTION" == "install" || "$ACTION" == "force_upgrade" || "$ACTION" == "collector_host_only" ]]; then
     print_blue "Checking for existing compose-mode installations..."
     COMPOSE_NODES=""
     for NODE in $NODES; do
@@ -927,7 +928,7 @@ case "$ACTION" in
         print_green "✓ Better Stack collector successfully force upgraded on all swarm nodes!"
         ;;
 
-    "ebpf_only")
+    "collector_host_only")
         CURRENT=0
         for NODE in $NODES; do
             ((CURRENT++))
