@@ -96,8 +96,8 @@ Both install.sh and deploy-to-swarm.sh check for the other's naming convention t
 - Downloads docker-compose.yml from GitHub raw URL
 - Adjusts ports, volumes, mounts via awk/sed
 - Handles Docker Compose v1 compatibility
-- Sets the container sizes through variables in the compose files (`${EBPF_CPUS:-1.0}` and so on). A size comes from the environment, then from `/var/lib/better-stack/sizing.env`, then from the default; a size from the environment is saved to that file
-- Memory values that are not set follow the container's memory limit: reservation, `GOMEMLIMIT` and the OBI restart threshold of the eBPF container keep the proportions of the defaults
+- Sets the container sizes through variables in the compose files (`${COLLECTOR_HOST_CPUS:-1.0}` and so on). A size comes from the environment, then from `/var/lib/better-stack/sizing.env`, then from the default; a size from the environment is saved to that file
+- Memory values that are not set follow the container's memory limit: reservation, `GOMEMLIMIT` and the OBI restart threshold of the `better-stack-collector-host` container keep the proportions of the defaults
 - Lowers a default memory limit to the host's memory, and any CPU limit to the host's CPU count (Docker rejects a higher one)
 - On an IPv6-only host (IPv6 default route, no IPv4 one) with Docker >= 27, turns on IPv6 for the Compose default network and recreates an existing IPv4-only one. A network that already has IPv6 keeps it on later runs. The committed compose files stay IPv4-only because `enable_ipv6` without a subnet fails on Docker < 27
 - Skips that, with a warning, when other containers use the existing network (Docker cannot remove it then), or when the kernel keeps the host's IPv6 default route alive from router advertisements (`proto ra`, `accept_ra=1`, forwarding off): Docker turns on IPv6 forwarding for an IPv6 network and the kernel would then drop the route
@@ -108,9 +108,9 @@ Both install.sh and deploy-to-swarm.sh check for the other's naming convention t
 - Optional node filtering via `better-stack.collector=true` label
 - Collector deployed as global swarm service via `docker stack deploy`
 - eBPF deployed per-node via docker-compose (swarm doesn't support privileged/host network)
-- Supports install/uninstall/force_upgrade/ebpf_only actions; `ebpf_only` deploys the eBPF container on each node again without `COLLECTOR_SECRET`
-- Each node sizes its eBPF container from its own `/var/lib/better-stack/sizing.env`; the collector service has one size for all nodes
-- `SWARM_SIZING_FILE` points to a file on the operator's machine with `[node names]` sections of `EBPF_*` keys. The script checks the whole file before it deploys anything, then replaces the sizing file of every node: a node the file names gets its section, any other node gets the defaults
+- Supports install/uninstall/force_upgrade/collector_host_only actions; `collector_host_only` deploys the `better-stack-collector-host` container on each node again without `COLLECTOR_SECRET`
+- Each node sizes its `better-stack-collector-host` container from its own `/var/lib/better-stack/sizing.env`; the collector service has one size for all nodes
+- `SWARM_SIZING_FILE` points to a file on the operator's machine with `[node names]` sections of `COLLECTOR_HOST_*` keys. The script checks the whole file before it deploys anything, then replaces the sizing file of every node: a node the file names gets its section, any other node gets the defaults
 - The sizing functions are the same text in `install.sh` and `deploy-to-swarm.sh` (between the `sizing functions` markers), and CI checks that
 
 ### Script layout
@@ -125,15 +125,15 @@ Both install.sh and deploy-to-swarm.sh check for the other's naming convention t
 - `CLUSTER_COLLECTOR` — Force cluster collector mode (default: false)
 - `MOUNT_HOST_PATHS` (optional) — Comma-separated host paths instead of default `/:/host:ro`
 - `COLLECT_OTEL_HTTP_PORT` / `COLLECT_OTEL_GRPC_PORT` (optional) — OTel ingestion ports
-- `COLLECTOR_CPUS`, `COLLECTOR_MEM_LIMIT`, `COLLECTOR_MEM_RESERVATION`, `EBPF_CPUS`, `EBPF_MEM_LIMIT`, `EBPF_MEM_RESERVATION`, `EBPF_GOMEMLIMIT`, `EBPF_OBI_RESTART_MIB` (optional) — container sizes; `deploy-to-swarm.sh` reads the `EBPF_*` ones from each node's sizing file only
+- `COLLECTOR_CPUS`, `COLLECTOR_MEM_LIMIT`, `COLLECTOR_MEM_RESERVATION`, `COLLECTOR_HOST_CPUS`, `COLLECTOR_HOST_MEM_LIMIT`, `COLLECTOR_HOST_MEM_RESERVATION`, `COLLECTOR_HOST_GOMEMLIMIT`, `COLLECTOR_HOST_OBI_RESTART_MIB` (optional) — container sizes; `deploy-to-swarm.sh` reads the `COLLECTOR_HOST_*` ones from each node's sizing file only
 - `COLLECT_OTEL_BIND_ADDRESS` (optional) — Listen address of the OTel receiver, e.g. `[::]`; unset lets the collector pick it
 
 ### Swarm-specific (deploy-to-swarm.sh)
 - `MANAGER_NODE` (required) — SSH target for swarm manager (user@host)
-- `ACTION` — install (default), uninstall, force_upgrade, or ebpf_only
+- `ACTION` — install (default), uninstall, force_upgrade, or collector_host_only
 - `SSH_CMD` — Custom SSH command (default: ssh), e.g., `tsh ssh` for Teleport
 - `ATTACH_NETWORKS` — Comma-separated overlay networks (auto-detected if not set)
-- `SWARM_SIZING_FILE` — Local file with eBPF container sizes per node, pushed to the nodes on install, force_upgrade and ebpf_only
+- `SWARM_SIZING_FILE` — Local file with `better-stack-collector-host` container sizes per node, pushed to the nodes on install, force_upgrade and collector_host_only
 
 ## CI/CD
 

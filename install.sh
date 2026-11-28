@@ -106,7 +106,7 @@ fi
 # Container sizes. A size comes from the environment, then from the sizing file, then from the default.
 # A size from the environment is saved to the sizing file, so the next run keeps it.
 SIZING_FILE="${SIZING_FILE:-/var/lib/better-stack/sizing.env}"
-SIZING_KEYS="COLLECTOR_CPUS COLLECTOR_MEM_LIMIT COLLECTOR_MEM_RESERVATION EBPF_CPUS EBPF_MEM_LIMIT EBPF_MEM_RESERVATION EBPF_GOMEMLIMIT EBPF_OBI_RESTART_MIB"
+SIZING_KEYS="COLLECTOR_CPUS COLLECTOR_MEM_LIMIT COLLECTOR_MEM_RESERVATION COLLECTOR_HOST_CPUS COLLECTOR_HOST_MEM_LIMIT COLLECTOR_HOST_MEM_RESERVATION COLLECTOR_HOST_GOMEMLIMIT COLLECTOR_HOST_OBI_RESTART_MIB"
 
 sizing_fail() {
   echo "Error: $*" >&2
@@ -118,8 +118,8 @@ sizing_value_valid() {
   case "$key" in
     *_CPUS) [[ "$value" =~ ^[0-9]+(\.[0-9]+)?$ ]] ;;
     *_MEM_LIMIT|*_MEM_RESERVATION) [[ "$value" =~ ^[0-9]+[mMgG]$ ]] ;;
-    EBPF_GOMEMLIMIT) [[ "$value" =~ ^[0-9]+(MiB|GiB)$ ]] ;;
-    EBPF_OBI_RESTART_MIB) [[ "$value" =~ ^[0-9]+$ ]] ;;
+    COLLECTOR_HOST_GOMEMLIMIT) [[ "$value" =~ ^[0-9]+(MiB|GiB)$ ]] ;;
+    COLLECTOR_HOST_OBI_RESTART_MIB) [[ "$value" =~ ^[0-9]+$ ]] ;;
     *) return 1 ;;
   esac
 }
@@ -128,8 +128,8 @@ sizing_format_hint() {
   case "$1" in
     *_CPUS) echo "a number of CPUs, for example 2 or 1.5" ;;
     *_MEM_LIMIT|*_MEM_RESERVATION) echo "a size in m or g, for example 3072m or 4g" ;;
-    EBPF_GOMEMLIMIT) echo "a size in MiB or GiB, for example 2800MiB" ;;
-    EBPF_OBI_RESTART_MIB) echo "a whole number of MiB, for example 2900" ;;
+    COLLECTOR_HOST_GOMEMLIMIT) echo "a size in MiB or GiB, for example 2800MiB" ;;
+    COLLECTOR_HOST_OBI_RESTART_MIB) echo "a whole number of MiB, for example 2900" ;;
   esac
 }
 
@@ -263,21 +263,21 @@ resolve_sizing() {
   host_mem_mib="$(sizing_host_mem_mib)"
 
   COLLECTOR_CPUS="${COLLECTOR_CPUS:-1.2}"
-  EBPF_CPUS="${EBPF_CPUS:-1.0}"
+  COLLECTOR_HOST_CPUS="${COLLECTOR_HOST_CPUS:-1.0}"
   sizing_fit_cpus COLLECTOR_CPUS "$host_cpus"
-  sizing_fit_cpus EBPF_CPUS "$host_cpus"
+  sizing_fit_cpus COLLECTOR_HOST_CPUS "$host_cpus"
 
   sizing_default_mem_limit COLLECTOR_MEM_LIMIT 1024 "$host_mem_mib"
   limit_mib="$(sizing_mib "$COLLECTOR_MEM_LIMIT")"
   COLLECTOR_MEM_RESERVATION="${COLLECTOR_MEM_RESERVATION:-$((limit_mib / 2))m}"
   sizing_check_reservation COLLECTOR_MEM_RESERVATION COLLECTOR_MEM_LIMIT
 
-  sizing_default_mem_limit EBPF_MEM_LIMIT 2048 "$host_mem_mib"
-  limit_mib="$(sizing_mib "$EBPF_MEM_LIMIT")"
-  EBPF_MEM_RESERVATION="${EBPF_MEM_RESERVATION:-$((limit_mib * 3 / 4))m}"
-  EBPF_GOMEMLIMIT="${EBPF_GOMEMLIMIT:-$((limit_mib * 1400 / 2048))MiB}"
-  EBPF_OBI_RESTART_MIB="${EBPF_OBI_RESTART_MIB:-$((limit_mib * 1450 / 2048))}"
-  sizing_check_reservation EBPF_MEM_RESERVATION EBPF_MEM_LIMIT
+  sizing_default_mem_limit COLLECTOR_HOST_MEM_LIMIT 2048 "$host_mem_mib"
+  limit_mib="$(sizing_mib "$COLLECTOR_HOST_MEM_LIMIT")"
+  COLLECTOR_HOST_MEM_RESERVATION="${COLLECTOR_HOST_MEM_RESERVATION:-$((limit_mib * 3 / 4))m}"
+  COLLECTOR_HOST_GOMEMLIMIT="${COLLECTOR_HOST_GOMEMLIMIT:-$((limit_mib * 1400 / 2048))MiB}"
+  COLLECTOR_HOST_OBI_RESTART_MIB="${COLLECTOR_HOST_OBI_RESTART_MIB:-$((limit_mib * 1450 / 2048))}"
+  sizing_check_reservation COLLECTOR_HOST_MEM_RESERVATION COLLECTOR_HOST_MEM_LIMIT
 
   for key in $SIZING_KEYS; do
     export "${key?}"
@@ -289,7 +289,7 @@ load_sizing
 resolve_sizing
 echo "Container sizes (change them in $SIZING_FILE and run this script again):"
 echo "  better-stack-collector:      CPU limit $COLLECTOR_CPUS, memory limit $COLLECTOR_MEM_LIMIT"
-echo "  better-stack-collector-host: CPU limit $EBPF_CPUS, memory limit $EBPF_MEM_LIMIT, GOMEMLIMIT $EBPF_GOMEMLIMIT, OBI restarts above $EBPF_OBI_RESTART_MIB MiB"
+echo "  better-stack-collector-host: CPU limit $COLLECTOR_HOST_CPUS, memory limit $COLLECTOR_HOST_MEM_LIMIT, GOMEMLIMIT $COLLECTOR_HOST_GOMEMLIMIT, OBI restarts above $COLLECTOR_HOST_OBI_RESTART_MIB MiB"
 
 # Create temporary directory and cd into it
 TEMP_DIR=$(mktemp -d)
