@@ -1,4 +1,4 @@
-ARG EBPF_AGENT_IMAGE=ghcr.io/betterstackhq/ebpf-agent:1.1.1@sha256:80e4bb5b8daae4083fbbb5156819318aa1b821555fbd19321be21ae34f92e69d
+ARG EBPF_AGENT_IMAGE=ghcr.io/betterstackhq/ebpf-agent:1.1.2@sha256:62c57fd4901f77955f1d6d1c1f4e9f6452df35844cb7baedbc199f0373734930
 FROM ${EBPF_AGENT_IMAGE} AS ebpf-agent-source
 
 # Build Cluster Agent from source with patches
