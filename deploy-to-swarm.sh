@@ -33,21 +33,22 @@
 # - COLLECT_OTEL_GRPC_PORT: Port to expose for OTel gRPC ingestion (e.g., 4317)
 # - COLLECT_OTEL_BIND_ADDRESS: Listen address of the OTel receiver (e.g., [::]); unset lets the collector pick it
 #
-# eBPF container size per node:
+# Size of the better-stack-collector-host container per node:
 # - Each node reads its own /var/lib/better-stack/sizing.env, for example:
-#     EBPF_CPUS=2
-#     EBPF_MEM_LIMIT=4096m
-# - Keys: EBPF_CPUS, EBPF_MEM_LIMIT, EBPF_MEM_RESERVATION, EBPF_GOMEMLIMIT, EBPF_OBI_RESTART_MIB
-# - A key that is not in the file keeps its default. The memory values that are not set follow EBPF_MEM_LIMIT.
-# - The collector is one swarm service with one size for all nodes, so the COLLECTOR_* keys do nothing here.
+#     COLLECTOR_HOST_CPUS=2
+#     COLLECTOR_HOST_MEM_LIMIT=4096m
+# - Keys: COLLECTOR_HOST_CPUS, COLLECTOR_HOST_MEM_LIMIT, COLLECTOR_HOST_MEM_RESERVATION, COLLECTOR_HOST_GOMEMLIMIT, COLLECTOR_HOST_OBI_RESTART_MIB
+# - A key that is not in the file keeps its default. The memory values that are not set follow COLLECTOR_HOST_MEM_LIMIT.
+# - The collector is one swarm service with one size for all nodes, so COLLECTOR_CPUS, COLLECTOR_MEM_LIMIT and
+#   COLLECTOR_MEM_RESERVATION do nothing here.
 # - SWARM_SIZING_FILE: A file on this machine with the sizes of many nodes. Each section starts with the
 #   node names in brackets, as "docker node ls" prints them, and holds the keys for those nodes:
 #     [db-1 db-2]
-#     EBPF_CPUS=2
-#     EBPF_MEM_LIMIT=4096m
+#     COLLECTOR_HOST_CPUS=2
+#     COLLECTOR_HOST_MEM_LIMIT=4096m
 #
 #     [worker-1]
-#     EBPF_CPUS=3
+#     COLLECTOR_HOST_CPUS=3
 #   With this file, install, force_upgrade and ebpf_only replace the sizing.env of every node:
 #   a node in the file gets its section, and a node that is not in the file gets the defaults.
 #
@@ -134,7 +135,7 @@ IFS= read -r -d '' SIZING_FUNCTIONS <<'SIZING_FUNCTIONS_EOF' || true
 # Container sizes. A size comes from the environment, then from the sizing file, then from the default.
 # A size from the environment is saved to the sizing file, so the next run keeps it.
 SIZING_FILE="${SIZING_FILE:-/var/lib/better-stack/sizing.env}"
-SIZING_KEYS="COLLECTOR_CPUS COLLECTOR_MEM_LIMIT COLLECTOR_MEM_RESERVATION EBPF_CPUS EBPF_MEM_LIMIT EBPF_MEM_RESERVATION EBPF_GOMEMLIMIT EBPF_OBI_RESTART_MIB"
+SIZING_KEYS="COLLECTOR_CPUS COLLECTOR_MEM_LIMIT COLLECTOR_MEM_RESERVATION COLLECTOR_HOST_CPUS COLLECTOR_HOST_MEM_LIMIT COLLECTOR_HOST_MEM_RESERVATION COLLECTOR_HOST_GOMEMLIMIT COLLECTOR_HOST_OBI_RESTART_MIB"
 
 sizing_fail() {
   echo "Error: $*" >&2
@@ -146,8 +147,8 @@ sizing_value_valid() {
   case "$key" in
     *_CPUS) [[ "$value" =~ ^[0-9]+(\.[0-9]+)?$ ]] ;;
     *_MEM_LIMIT|*_MEM_RESERVATION) [[ "$value" =~ ^[0-9]+[mMgG]$ ]] ;;
-    EBPF_GOMEMLIMIT) [[ "$value" =~ ^[0-9]+(MiB|GiB)$ ]] ;;
-    EBPF_OBI_RESTART_MIB) [[ "$value" =~ ^[0-9]+$ ]] ;;
+    COLLECTOR_HOST_GOMEMLIMIT) [[ "$value" =~ ^[0-9]+(MiB|GiB)$ ]] ;;
+    COLLECTOR_HOST_OBI_RESTART_MIB) [[ "$value" =~ ^[0-9]+$ ]] ;;
     *) return 1 ;;
   esac
 }
@@ -156,8 +157,8 @@ sizing_format_hint() {
   case "$1" in
     *_CPUS) echo "a number of CPUs, for example 2 or 1.5" ;;
     *_MEM_LIMIT|*_MEM_RESERVATION) echo "a size in m or g, for example 3072m or 4g" ;;
-    EBPF_GOMEMLIMIT) echo "a size in MiB or GiB, for example 2800MiB" ;;
-    EBPF_OBI_RESTART_MIB) echo "a whole number of MiB, for example 2900" ;;
+    COLLECTOR_HOST_GOMEMLIMIT) echo "a size in MiB or GiB, for example 2800MiB" ;;
+    COLLECTOR_HOST_OBI_RESTART_MIB) echo "a whole number of MiB, for example 2900" ;;
   esac
 }
 
@@ -291,21 +292,21 @@ resolve_sizing() {
   host_mem_mib="$(sizing_host_mem_mib)"
 
   COLLECTOR_CPUS="${COLLECTOR_CPUS:-1.2}"
-  EBPF_CPUS="${EBPF_CPUS:-1.0}"
+  COLLECTOR_HOST_CPUS="${COLLECTOR_HOST_CPUS:-1.0}"
   sizing_fit_cpus COLLECTOR_CPUS "$host_cpus"
-  sizing_fit_cpus EBPF_CPUS "$host_cpus"
+  sizing_fit_cpus COLLECTOR_HOST_CPUS "$host_cpus"
 
   sizing_default_mem_limit COLLECTOR_MEM_LIMIT 1024 "$host_mem_mib"
   limit_mib="$(sizing_mib "$COLLECTOR_MEM_LIMIT")"
   COLLECTOR_MEM_RESERVATION="${COLLECTOR_MEM_RESERVATION:-$((limit_mib / 2))m}"
   sizing_check_reservation COLLECTOR_MEM_RESERVATION COLLECTOR_MEM_LIMIT
 
-  sizing_default_mem_limit EBPF_MEM_LIMIT 2048 "$host_mem_mib"
-  limit_mib="$(sizing_mib "$EBPF_MEM_LIMIT")"
-  EBPF_MEM_RESERVATION="${EBPF_MEM_RESERVATION:-$((limit_mib * 3 / 4))m}"
-  EBPF_GOMEMLIMIT="${EBPF_GOMEMLIMIT:-$((limit_mib * 1400 / 2048))MiB}"
-  EBPF_OBI_RESTART_MIB="${EBPF_OBI_RESTART_MIB:-$((limit_mib * 1450 / 2048))}"
-  sizing_check_reservation EBPF_MEM_RESERVATION EBPF_MEM_LIMIT
+  sizing_default_mem_limit COLLECTOR_HOST_MEM_LIMIT 2048 "$host_mem_mib"
+  limit_mib="$(sizing_mib "$COLLECTOR_HOST_MEM_LIMIT")"
+  COLLECTOR_HOST_MEM_RESERVATION="${COLLECTOR_HOST_MEM_RESERVATION:-$((limit_mib * 3 / 4))m}"
+  COLLECTOR_HOST_GOMEMLIMIT="${COLLECTOR_HOST_GOMEMLIMIT:-$((limit_mib * 1400 / 2048))MiB}"
+  COLLECTOR_HOST_OBI_RESTART_MIB="${COLLECTOR_HOST_OBI_RESTART_MIB:-$((limit_mib * 1450 / 2048))}"
+  sizing_check_reservation COLLECTOR_HOST_MEM_RESERVATION COLLECTOR_HOST_MEM_LIMIT
 
   for key in $SIZING_KEYS; do
     export "${key?}"
@@ -436,13 +437,13 @@ load_swarm_sizing() {
             swarm_sizing_fail "$number" "$key comes before the first [node names] line"
         fi
         case "$key" in
-            COLLECTOR_*)
+            COLLECTOR_CPUS|COLLECTOR_MEM_LIMIT|COLLECTOR_MEM_RESERVATION)
                 swarm_sizing_fail "$number" "$key does nothing on Swarm: the collector is one service with one size for all nodes"
                 ;;
         esac
         case " $SIZING_KEYS " in
             *" $key "*) ;;
-            *) swarm_sizing_fail "$number" "unknown key $key (keys: $(echo "$SIZING_KEYS" | tr ' ' '\n' | grep '^EBPF_' | tr '\n' ' '))" ;;
+            *) swarm_sizing_fail "$number" "unknown key $key (keys: $(echo "$SIZING_KEYS" | tr ' ' '\n' | grep '^COLLECTOR_HOST_' | tr '\n' ' '))" ;;
         esac
         if ! sizing_value_valid "$key" "$value"; then
             swarm_sizing_fail "$number" "$key=$value is not valid, use $(sizing_format_hint "$key")"
@@ -741,8 +742,8 @@ $SIZING_FUNCTIONS
 $write_node_sizing
         load_sizing
         resolve_sizing
-        echo "eBPF container size (change it in \$SIZING_FILE on this node and run ACTION=ebpf_only):"
-        echo "  CPU limit \$EBPF_CPUS, memory limit \$EBPF_MEM_LIMIT, GOMEMLIMIT \$EBPF_GOMEMLIMIT, OBI restarts above \$EBPF_OBI_RESTART_MIB MiB"
+        echo "Size of better-stack-collector-host (change it in \$SIZING_FILE on this node and run ACTION=ebpf_only):"
+        echo "  CPU limit \$COLLECTOR_HOST_CPUS, memory limit \$COLLECTOR_HOST_MEM_LIMIT, GOMEMLIMIT \$COLLECTOR_HOST_GOMEMLIMIT, OBI restarts above \$COLLECTOR_HOST_OBI_RESTART_MIB MiB"
 
         # Stop old project names if present (for upgrades from older versions:
         # the agent was previously deployed as better-stack-ebpf, and before that better-stack-beyla)
